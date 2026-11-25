@@ -732,6 +732,87 @@ the decision, the reason, and what it blocks or requires later.
   declared explicitly in pubspec; verify on every web build (files
   on disk + decoded manifest), not byte count alone.
 
+## D63. Auto purchase list suggestion rules (Week 2 Day 2)
+- One suggestion per medicine per branch, computed from live batch
+  rows by the pure functions in
+  `lib/features/purchases/auto_purchase_logic.dart`.
+- **Usable stock** = `sellableStockFor` (the Day 5 shared guard,
+  D30): non-expired batches with stock on hand only.
+- **Reorder (par) level** = the sum of `lowStockThreshold` over the
+  medicine's batch rows at the branch. The threshold already lives
+  on the batch row (seeded 10 per batch), so no new model field was
+  invented; the par level follows the branch's own alert levels.
+- **Suggested quantity** = reorder level − usable stock, floored at
+  0; only lines with suggested quantity > 0 appear.
+- **Reason** (priority order): usable stock 0 → `Low stock`; a
+  sellable batch expiring within 30 days → `Near expiry — usable
+  stock low`; otherwise `Below reorder level`. Near-expiry alone,
+  with usable stock at/above the reorder level, suggests nothing —
+  the task's "whose usable stock is low" qualifier is the gate.
+- **Unit cost** = the FEFO batch's cost, falling back to the
+  earliest-expiry batch with a cost, then to 80% of the sale price
+  (the Day 7 PO-form default, D43).
+- **Exclusions:** a medicine on an open PO (Draft / Approved /
+  Partially received, same branch, units still outstanding) is
+  excluded. The count counts only medicines that would otherwise
+  have been suggested.
+- **Preferred supplier:** the catalogue has no medicine→supplier
+  field, so the suggestion reuses history — the supplier of the most
+  recent non-cancelled PO for that medicine at the branch, falling
+  back to the first active supplier. Staff override it per line;
+  approval groups by the line's supplier.
+
+## D64. No batch status field yet — "non-quarantined" = sellable (Week 2 Day 2)
+- The SRS batch status (available / quarantined / expired /
+  returned, `firestore_schema.dart`) has no field on
+  `InventoryItem` yet, so a quarantined batch cannot be represented
+  in the model. The auto purchase list's "non-expired,
+  non-quarantined" usable-stock rule is therefore implemented as the
+  sellable guard (D30) — non-expired, in stock. When the status
+  field lands (Week 2 model migration, D6), re-check the rule and
+  exclude quarantined batches explicitly; do not assume the guard
+  covers it.
+
+## D65. Purchase-order idempotency: client-generated ids (Week 2 Day 2)
+- Auto purchase approval mints one client-generated key per tap
+  (`auto-po-<branch>-<millis>`), reused on retry, with a
+  per-supplier key (`<key>-<supplierId>`) for each PO created.
+- Three layers: (1) the approve button is disabled while an approval
+  is in flight (`isApproving` on the notifier state); (2) the
+  notifier remembers completed keys for the session and returns the
+  already-created POs on a repeat submission; (3)
+  `MockPurchaseOrderRepository.createPurchaseOrder` returns the
+  existing PO when a non-empty client id is submitted again, and
+  still assigns the sequential PO number. `buildNewPurchaseOrder`
+  and `PurchaseOrdersNotifier.createOrder` accept the optional
+  id/key. A retry after a partial failure reuses the per-supplier
+  keys, so POs that already succeeded are returned, not duplicated.
+- This is the same pattern D54 describes for sales/orders (doc id =
+  idempotency key), applied to POs; the Firestore implementation
+  must use the client id as the doc id the same way.
+
+## D66. Riverpod 3.5 does not export `Override` publicly (Week 2 Day 2)
+- `Override` is a sealed class in `riverpod`'s `override.dart`
+  (a `part` of `framework.dart`) but it is NOT in the public
+  `show` list of `lib/riverpod.dart` — so `List<Override>` cannot be
+  named in test code and `flutter analyze` reports
+  "The name 'Override' isn't a type". Override lists must be built
+  inline where the `ProviderContainer(overrides: …)` parameter
+  types them contextually; do not try to name the type in a helper
+  signature (and `List<dynamic>` is not assignable to the parameter
+  either). The Day 2 test helper takes an optional pre-built
+  `ProviderContainer` instead.
+
+## D67. Test lesson: off-screen taps need `ensureVisible` (Week 2 Day 2, D33 re-applied)
+- The wide auto purchase table is taller than the 900px test
+  viewport and wider than 1280px: the approve button sits below the
+  fold and the remove button sits off the right edge (horizontal
+  scroll). `tester.tap` on either silently misses (hit-test
+  warning, no action) — the approval tests then saw zero POs
+  created. `ensureVisible` before tapping both fixes it. Same rule
+  as D33 for long forms; apply it to any button below the fold or
+  past a horizontal scroll edge.
+
 ## D62. Backend pivot: Spark (permanent free) → Blaze pay-as-you-go (25 Nov 2026, Dazy)
 - **Decision (Dazy, 25 Nov 15:56: "jo best rahy ga vo kro, free walaa ya paid jo b"):** the permanent-free Spark constraint (D2, 23 Nov) is LIFTED. Backend is now **Firebase Blaze (pay-as-you-go)**. Parent's call: Blaze unlocks Cloud Functions + Cloud Storage; at 8-branch scale cost stays near-zero (free quotas cover most usage, overage is cents); Flutter-native, fits the deadline.
 - **What changes:**
@@ -743,3 +824,98 @@ the decision, the reason, and what it blocks or requires later.
 - **What does NOT change:** Firestore schema (§3), security rules + branch isolation + roles, offline sync queue, inventory engine, audit logs, export/backup, and the quota-efficient design (caching, batched writes ≤500, pagination, counters). The core data layer is backend-plan-agnostic. The only difference is the ceiling: on Blaze, exceeding the free tier bills the overage instead of stopping Firestore until reset.
 - **Still forbidden:** no Firebase project, no billing setup, no google-services.json, no Firebase.initializeApp() — project + billing need Dazy's Google account + card (Dazy-only step).
 - **History note:** D2 stays as written (it records the 23 Nov decision); this entry supersedes it. Do not rewrite D2 — the pivot is the record.
+
+## D68. Batch status field (Week 2 Day 3, closes D64)
+- `BatchStatus` enum (`available` / `quarantined` / `expired` / `returned`) on `InventoryItem`, default `available`; `isBatchSellable` now requires `status == available` in addition to future expiry + stock on hand. `isExpired` stays date-based. `sellableStockFor` (Day 2 auto purchase list) automatically excludes quarantined stock — the "usable stock excludes quarantined" rule now holds end-to-end. Firestore mapping preserves the status; legacy docs without a status parse as `available`.
+
+## D69. Prescription gains branchId + photo metadata fields (Week 2 Day 3)
+- `Prescription` gains `branchId`, `photoStoragePath`, `photoContentType`, `photoUploadedAt`, `photoUploadedBy`, `localPhotoPath` (all nullable). `fromMap` accepts both `reviewStatus`/`status` and `notes`/`reviewNotes`; `toMap` writes both `status` and `reviewStatus`. Mock `_scoped` prefers `branchId` when present, else the id-prefix fallback (`rx-dha-…` / `rx-glb-…`, D21). Mock `createPrescription` stores an explicit `branchId`.
+
+## D70. Permission service: the SRS §5.1 matrix governs actions, not module viewing (Week 2 Day 3)
+- `PermissionService` (`can` / `canInBranch` / `canWrite` / `isReadOnly` / `permissionFor`); null user = allowed (the router redirect is the signed-out guard; Firestore rules remain the authority). Route→capability map: `/billing`→`posSell`, `/medicines`→`medicineCrud`, `/customers`→`khata`, `/suppliers`→`supplierPay`, `/purchases`→`poManage`, `/reports`→`reports`. NOT gated: `/prescriptions` (Owner has `rxReview: none` yet must view the queue; only Approve/Reject actions are gated), `/inventory` and `/orders` (viewing is not a matrix capability; Cashier has `stockReceive: none` yet must run Stock Check), `/notifications`, `/dashboard`. `FeatureGate` takes the capability from the route internally (router passes `state.uri.path`, no router edits needed). Shell sidebar + mobile More-sheet hide modules the signed-in user lacks permission for (null user → show all); fixed bottom-nav items are NOT filtered (index-based). Prescription detail Approve/Reject/Needs-clearer-photo buttons are disabled with an explanation when the user lacks `rxReview` (pharmacist-only, own branch).
+- Test lesson: do not assume the matrix from the role name — read it. Cashier CAN view reports (`own`) and Pharmacist CAN sell (`own`); both are branch-scoped, not denied. The matrix is the source of truth, not intuition.
+
+## D71. Firestore transport seam (Week 2 Day 3)
+- Firestore repositories talk to Firestore ONLY through the `FirestoreTransport` interface; `FirebaseFirestoreTransport` is the real implementation; tests use an in-memory fake. The transport owns ≤500-op batch chunking and pagination (`queryCollection` with `orderBy` + `startAfterId`, default document-id order). No `deleteDocument` method (soft-delete only); deletes exist only as `WriteOperationKind.delete` inside batched writes for subcollection item maintenance. Mappers stamp `Timestamp.fromDate(now)` (client clock), not server timestamps — documented tradeoff (server timestamps would need a second read to confirm the value).
+
+## D72. Firestore mapper lossy mappings (Week 2 Day 3)
+- Pure model↔Firestore translation with documented lossy mappings: money int paisa (OrderItem/Medicine/Order double rupees converted at the boundary); sale doc uses schema names (`subtotal`, `discountTotal`, `taxTotal`, `grandTotal`) + extras (`paymentMethod`, `cashierName`, `cashReceivedMinor`, `changeMinor`, `billDiscountMinor`); order status `newOrder`/`placed`→`pending`, `ready`→`preparing` (lossy — reads back as `processing`), `pending`→`newOrder`; source `walkIn`→`walk_in`; order `discountMinor` stored as extra; batch `quantityReceived == quantity` on create, only `quantityRemaining` updated later, dropped on read; `lowStockThreshold` extra; ledger `amount`/`balanceAfter` (schema) vs `amountMinor`/`balanceAfterMinor` (model), both accepted on read; PO status `partially_received` snake_case; items/payments in subcollections, never embedded in sale/order/PO docs; counter docs carry `value` + org/branch fields.
+
+## D73. Firestore repository rules (Week 2 Day 3)
+- Same interfaces as the mocks; doc id = idempotency key for sales (key), orders/POs (caller client id, D65 pattern — retry returns existing); sequential numbers from counter docs `branches/{branchId}/counters/{invoices|orders|purchaseOrders}` via transaction, starting 1001 (reserved number + failed batch = gap, never duplicate); branch code from the branch doc `code` field with demo fallback (dha→DHA, gulberg/glb→GLB); branch-scoped reads with null branch enumerate org branches via the `branches` list read (preserves mock "all" semantics); `getById` searches branches when the branch is unknown; low-stock/expiry filtered client-side (Firestore cannot compare two fields); ledgers read-then-add with computed `balanceAfter` (documented race note — a real concurrent-writer race needs a transaction; the queue serialises writes in practice); `receiveStock`/`adjustStock`/`recordStockCount` run in transactions (batch doc + counter delta + append-only stockTransaction); `updateOrder`/`updatePurchaseOrder` preserve the original `createdAt` and delete trailing stale item docs on shrunk lists; `updateSupplier` is a merge-update preserving `createdAt`; `reviewPrescription` update map never touches `photoStoragePath` (rules: immutable on update).
+
+## D74. Prescription photo upload (Week 2 Day 3)
+- `buildPrescriptionPhotoUpload` validates (image/* content type, bytes strictly < 10 MiB = 10,485,760, non-empty prescription id) and builds `organizations/{orgId}/branches/{branchId}/prescriptions/{id}.jpg`. `FirebasePrescriptionPhotoUploader` (real, needs a project) vs `LocalPrescriptionPhotoUploader` (default; holds bytes in memory keyed by prescription id, returns `localPath: prescriptions/{id}.jpg`, `storagePath: null` — never a fake cloud path).
+
+## D75. Repository factory / provider switch (Week 2 Day 3)
+- `createRepositoryBundle({kind, transport, firebaseAuth, firebaseStorage, organizationId})`; `repositoryBundleProvider` defaults to the mock bundle; all 9 `*RepositoryProvider`s + `authRepositoryProvider` + `prescriptionPhotoUploaderProvider` read from the bundle, so one override switches the whole app. Firestore kind without a transport throws `StateError` with an explanation. Auth switches to `FirebaseAuthRepository` only when a `FirebaseAuth` instance is passed; the uploader switches to Cloud Storage only when a `FirebaseStorage` instance is passed — without a project there is nothing to pass, so both stay mock/local by design. No in-app toggle, no auto `Firebase.initializeApp()`. Note: this creates Dart-legal import cycles (repositories ↔ factory, auth_repository ↔ factory, prescription_storage ↔ factory); all initialisation is lazy via providers.
+
+## D76. Medicine purchase price was missing from the model (Week 2 Day 3, found by the tests)
+- The SRS §3 `medicines` doc requires `purchasePrice`, but the Day 0 `Medicine` model had no cost field and the mapper omitted it — its own `validateOrThrow` then rejected every medicine write. Fix: `Medicine.purchasePriceMinor` (int paisa, default 0, in `fromMap`/`toMap`); the mapper writes it and reads it back. Demo seed rows carry 0 until a purchase price is recorded. Lesson: the schema is the contract — when a mapper's comment says a required field is "omitted, never invented", that is a bug, not a design choice.
+
+## D77. Refund rule: line totals only (Week 2 Day 4)
+- A return refunds the returned chunks' line totals only (unit price × qty − pro-rated line discount, truncated). Bill discount and tax are NOT refunded — re-allocating them per chunk would invent a split that no record supports. `chunkRefundMinor` / `computeRefundMinor` in `returns_logic.dart`.
+
+## D78. Restock rule: original batch, else earliest-expiry available batch, else reject (Week 2 Day 4)
+- A returned chunk restocks into its original batch if it still exists; else the earliest-expiry `available` batch of the same medicine; else the return is rejected. Never invent a batch, never move stock to another medicine. Batch status decides sellability via the Day 5 guard (`isBatchSellable`).
+
+## D79. Khata attribution is per-branch only for sale-linked entries (Week 2 Day 4)
+- Per-branch outstanding counts only ledger entries whose `referenceId` is one of that branch's credit sales; manual entries (no sale ref, incl. all seeded opening entries) are unattributed and count only in the org-wide total. The branch-comparison table footer explains this; the org-wide total in the KPI card is the SUM of all entries (D37).
+
+## D80. Returns permission: the SRS §5.1 posRefund matrix governs, not the job title (Week 2 Day 4)
+- `posRefund`: Super Admin none, Owner allowed, HO Admin allowed, Regional Mgr none, Branch Mgr own, **Pharmacist none**, Cashier own, Inventory Mgr none, Accountant none, Auditor none. So a pharmacist CANNOT approve returns, despite the task text saying "pharmacist/manager" — the matrix is the source of truth (D70 lesson: read the matrix, not the job title). Enforced via `permissionService.canWrite(user, 'posRefund', branchId)` in `SaleReturnsNotifier.createReturn`; the form disables Confirm with an explanation when the user lacks it.
+
+## D81. Gross profit is POS sales only (Week 2 Day 4)
+- `computeGrossProfitMinor` covers POS sales only — only they carry batch costs (batch `costMinor`, fallback medicine `purchasePriceMinor`, else 0). Orders are excluded and documented: they have no batch costs. Today's refunds are subtracted; bill discount/tax are ignored.
+
+## D82. Printer honesty: web test print is real, network/USB report unavailability (Week 2 Day 4)
+- The web printer's test print really prints (popup print dialog via `printText`); network/USB printers honestly report "not configured / not implemented" and never pretend to print. The browser cannot send a cash-drawer kick signal — `WebReceiptPrinter.openCashDrawer` returns failure with that explanation instead of faking success.
+
+## D83. POS scan field sits after the search field (Week 2 Day 4)
+- The barcode scan field is placed AFTER the search field in the "Add medicines" card so Day 6 tests' `find.byType(TextField).first` (the search field) keeps working. `_addMedicine` takes a required `sellableStock` and enforces the cap in one place — pick row, scan and stepper all funnel through it.
+
+## D84. branchPerformanceProvider removed, replaced by branchComparisonProvider (Week 2 Day 4)
+- The Day 3 branch-performance card is superseded by the branch-comparison card (same branches, richer per-branch stats: sales, stock value, outstanding, alerts). `branchPerformanceProvider` deleted; `ref.invalidate(branchComparisonProvider)` in billing, inventory, purchases and prescriptions providers.
+
+## D85. js_interop @staticInterop: instance members must live in extensions (Week 2 Day 4)
+- `@staticInterop` classes cannot declare instance members — the first Day 4 web build failed with "cannot declare instance members" on `_PopupWindow` / `_PopupDocument` in `receipt_print_web.dart`. Fix: empty `@staticInterop` classes + `extension …Members on …` blocks holding the `external` instance members. `flutter analyze` does NOT catch this; only the web build does.
+
+## D86. Test lesson: settle between ensureVisible and tap in scrolling lists (Week 2 Day 4)
+- `ensureVisible` starts a scroll animation; tapping immediately after fires at the pre-animation position and misses (hit-test warning, tap on sidebar 'Settings' missed). Pattern: `ensureVisible` → `pumpAndSettle` → `tap`. Applies wherever the target sits in a `ListView` (sidebar, long forms).
+
+## D87. Day 3 test update: 'Branch performance' → 'Branch comparison' (Week 2 Day 4)
+- The Day 3 widget test expected the old card title; Day 4 replaced the card (D84), so the test was updated to the new title. A replaced UI element is not a regression — but the test update belongs in the day's diff, not hidden.
+
+## D88. Sale-list refresh after a return status update (Week 2 Day 4, found by the tests)
+- `SaleRepository.updateSale` writes the new status to the repo, but the in-memory `SaleNotifier` list still holds the old sale — so the receipt, history and returns list all kept showing the old status (a full return displayed as "Partial return"). Fix: `SaleReturnsNotifier.createReturn` calls `ref.read(salesProvider.notifier).refresh()` after `updateSale`. Lesson: any repo write that bypasses a notifier's state must refresh that notifier, or every derived lookup goes stale.
+
+## D89. Staff & HR: reuse the Day 0 Staff model, mock-first repos (Week 2 Day 5)
+- The staff directory reuses the extended Day 0 `Staff` model (added `phone`, `jobTitle`, `roleKey`, `copyWith`, `effectiveRoleKey`) — no separate Employee model; SRS §3.7 `employees` is the Firestore-side name. Six new repos (`Staff`, `Attendance`, `Shift`, `Expense`, `FinancialTransaction`, `SupplierPayment`) are mock-backed providers NOT yet in the Day 3 `RepositoryBundle` — Firestore implementations land with the Firebase-wiring chunk (same Day 7 → Day 3 pattern as suppliers/purchase orders). Firestore schema paths for all six collections already exist in `firestore_schema.dart` §3.6/§3.7, so the contract is ready.
+- Overnight shifts are out of scope (`validateShift` requires end after start the same day). Late = check-in after shift start + **15-minute grace** (documented demo rule). Salary figures are NOT shown in the Day 5 directory; the `hrSalary` capability exists so a future salary screen gates on the matrix.
+
+## D90. Prescription validity: 30-day default, expired blocks dispatch (Week 2 Day 5)
+- Default validity is 30 days from issue (a documented demo rule — the SRS names no validity period; the new-prescription form lets staff change the date). `isPrescriptionExpired` compares calendar days; a null `validUntil` on legacy records = treated as valid. `canUnblockOrder` = approved AND not expired, and the Day 4 dispatch guard (`advanceBlockedReason`) blocks dispatch for an approved-but-expired prescription with an explanatory message, like a pending one.
+
+## D91. Prescription re-review: rejected / needs-clearer-photo can re-submit (Week 2 Day 5)
+- `canResubmit` only for `rejected` / `needsClearerPhoto`. Re-submission returns the record to Pending, clears the previous review, sets a new (future) validity date, increments `resubmissionCount`. Who may re-submit is derived from the matrix — `canWrite(posSell)` OR `canWrite(rxReview)` in-branch — because the SRS has no "re-submit" capability; Inventory Manager, Accountant, Regional Mgr, Super Admin and Auditor may not re-submit. `resubmitPrescription` is implemented in both the mock and `FirestorePrescriptionRepository`; `validUntil` / `resubmissionCount` are in the Firestore schema contract and mappers.
+
+## D92. Aging buckets + FIFO allocation (Week 2 Day 5)
+- Buckets: Current 0–30 days, 31–60, 61–90, 90+ over 90 days. Supplier payments allocate oldest-first (FIFO); allocations always sum to the payment; a payment above the outstanding payable is refused. The same FIFO aging applies to customer khata outstanding. Supplier statement ordering is oldest-first and the stored `balanceAfterMinor` is the running balance, never recomputed.
+
+## D93. Profit & loss cost rule (Week 2 Day 5)
+- Reuses D81 (POS batch `costMinor`, fallback medicine `purchasePriceMinor`, else 0; orders use `purchasePriceMinor`). Refunds reduce revenue only — COGS is NOT clawed back, because restocked units return to sellable stock. Other income comes only from `financialTransactions` of type `income`; expenses come from the `expenses` collection (each expense writes a matching negative transaction, so the two sources never double-count).
+
+## D94. Suppliers route gate: Branch Manager is stopped before the screen (Week 2 Day 5, found by the tests)
+- The Day 3 `FeatureGate` maps `/suppliers` to `supplierPay`, on which a Branch Manager is `none` in the SRS §5.1 matrix — so the gate shows "No permission for Suppliers" before the detail screen (and its disabled Record payment button) is ever reached. That mapping is Day 3's deliberate, matrix-faithful design and was NOT changed in Day 5. The screen-level disabled button with explanation is for roles that can VIEW but not pay — i.e. Auditor (read-only on `supplierPay`): the gate lets them in, `canWrite` is false, the button renders disabled. Widget tests cover both paths (gate screen for Branch Manager, disabled button for Auditor).
+
+## D95. Goods receiving: functionally covered by Day 7 batch-wise receiving (Week 2 Day 5)
+- The tracker's deferred "Goods receiving" item was checked against Day 7: per-line quantity, batch number, mfg/expiry pickers, partial receiving, inventory + supplier-ledger writes are all built. The remaining gap is only the separate SRS `goodsReceipts` document and routing receiving through the production data layer — recorded as a follow-up, not built in Day 5.
+
+## D96. Prescription detail badges wrap on narrow screens (Week 2 Day 5, found by the tests)
+- The detail header Row (status + received + validity badges) overflowed 36px at 800px phone width once the validity badge was added. Fix: `Wrap` with spacing/runSpacing instead of `Row` + `SizedBox` gaps. Lesson: any header row that gains a third chip needs a wrap, not a wider row.
+
+## D97. Day 5 test updates to earlier tests (D87 pattern, Week 2 Day 5)
+- Deliberate, disclosed updates (not hidden): Day 7 roles-matrix test 21 → 23 capabilities (new `hrAttendance` + `hrSalary`); Day 7 feature-modules test 10 → 11 (`staff` module); Day 2 sidebar test 14 → 15 modules (`Staff & HR`); Day 7 route walk 14 → 15 routes (`/staff`); Day 7 supplier-payment widget test expects 3 dialog fields (amount + reason + reference — the Day 5 payment flow adds the reference field). Test-harness note: `signInAsDemoRole` taps the login screen of the REAL app widget; router-harness tests sign in through the container (`container.read(authProvider.notifier).signInAsDemo(DemoRole.…)`) instead.
+
+## D98. Sidebar growth breaks ensureVisible on lazy ListView items (Week 2 Day 5, found by the full suite)
+- The Day 5 sidebar additions (Staff & HR module + Attendance/Shifts sub-items) pushed 'Settings' out of the initially-built range of the lazy sidebar ListView, so the Day 4 printer widget test's `ensureVisible(find.text('Settings'))` threw "No element" — the element must already exist for `ensureVisible` to work. Fix (in the Day 4 test, not the app): scroll the ListView with drags until the item exists, then `ensureVisible` → `pumpAndSettle` → tap (Day 2 `scrollListToTitle` pattern). Lesson: any test that reaches a bottom-of-sidebar item must scroll first; adding a sidebar item can break such tests even when the app is fine.

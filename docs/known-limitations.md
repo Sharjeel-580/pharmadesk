@@ -20,8 +20,19 @@ defect: if it is listed, it is known and accepted for this build.
   holds operations until the Firebase project exists, and on web it
   resets on restart. Cloud sync, real login and claims arrive with
   the Firebase-wiring chunk.
+- **Week 2 Day 3 update:** the Firestore implementations now exist
+  in code (`lib/core/data/firestore_*.dart`, `repository_factory.dart`)
+  and are tested against an in-memory fake transport — but they are
+  still **unwired**: the app defaults to the mock bundle, and the
+  Firestore kind needs a transport + (for auth/storage) a Firebase
+  project that does not exist yet. Cloud sync, real login and claims
+  arrive with the Firebase-wiring chunk.
 - The five demo accounts (`demo1234`) are a local mock login. There is
-  no real authentication, no password hashing, no sessions.
+  no real authentication, no password hashing, no sessions. **Week 2
+  Day 3 update:** the login screens now delegate to an `AuthRepository`
+  interface (mock implementation), and `AppUser` carries the custom-
+  claims shape (`orgId` / `branchIds[]` / `role`) — the Firebase Auth
+  implementation exists but cannot run without a project.
 - Demo passwords are shared and public by design — never use them in
   production.
 
@@ -90,6 +101,13 @@ defect: if it is listed, it is known and accepted for this build.
   The demo role picker only highlights a column; it does not enforce
   anything. Production enforcement is Firestore security rules +
   custom claims (SRS §5.2) — not built yet.
+- **Week 2 Day 3 update:** the matrix is now enforced in the UX
+  layer — `FeatureGate` blocks modules the signed-in user has no
+  capability for, the sidebar/More-sheet hide unpermitted modules,
+  and prescription review buttons are gated (pharmacist-only, own
+  branch). This is defense in depth only: **Firestore rules remain
+  the authority**, and the rules themselves are still unwired (no
+  project). The demo role picker still does not change enforcement.
 
 ## 8. Feature config is demo-local
 
@@ -123,6 +141,25 @@ defect: if it is listed, it is known and accepted for this build.
   for the real Fazal Din business are **unknown** — Hadi's
   requirements are still awaited. Nothing in the demo should be read
   as the real business's data.
+
+## 13. Auto Purchase List notes (Week 2 Day 2)
+
+- The list suggests from live inventory; the reorder (par) level is
+  the sum of the batch low-stock thresholds (seeded 10 per batch),
+  not a separately configured par level per medicine.
+- There is no batch `status` field on `InventoryItem` yet, so the
+  "non-quarantined" part of the usable-stock rule is currently the
+  sellable guard (non-expired, in stock) — see D64.
+- **Week 2 Day 3 update (D64 closed):** the batch `status` field has
+  landed (`available` / `quarantined` / `expired` / `returned`) and
+  quarantined stock is excluded from usable stock end-to-end.
+- The catalogue has no medicine→supplier field: the preferred
+  supplier per line is taken from the most recent PO for that
+  medicine, falling back to the first active supplier. Staff can
+  change it per line; there is no supplier lead-time / pack-size
+  catalogue yet.
+- Approval creates Draft POs only — a manager still approves each PO
+  on the Purchases screen before goods can be received.
 
 ## 12. What is explicitly NOT in the demo (SRS §8.5)
 
