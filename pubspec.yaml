@@ -72,6 +72,11 @@ flutter:
 
   assets:
     - assets/images/
+    # NOTE (D61): Flutter directory assets are NOT recursive — a
+    # directory entry bundles only its direct files. The sample
+    # prescriptions live one level deeper, so this directory must be
+    # declared explicitly or the PNGs never reach the build.
+    - assets/images/prescriptions/
     - assets/icons/
     - assets/branding/
 
