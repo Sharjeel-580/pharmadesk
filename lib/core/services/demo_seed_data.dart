@@ -10,6 +10,7 @@ import '../../models/order.dart';
 import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
+import '../../models/salary_record.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
 import '../../models/supplier.dart';
@@ -1036,6 +1037,49 @@ const demoStaff = <Staff>[
     branchId: 'branch-dha-main',
   ),
 ];
+
+/// Sample monthly salary records (Week 3 Day 2, fictional demo
+/// figures — D102). One record per staff member for the current
+/// month, sized to the role: Owner Rs 250,000; Branch Managers Rs
+/// 150,000; Senior Pharmacist Rs 120,000; Pharmacist Rs 100,000;
+/// Inventory Manager Rs 90,000; Cashiers Rs 60,000; Counter Staff
+/// Rs 55,000; Accountant Rs 110,000. Every non-owner record carries
+/// a Rs 5,000 transport allowance; two records carry a small advance
+/// recovery as the deduction, so the deductions column is real.
+/// Every record is `isDemo: true` — the salary screen labels these
+/// figures as demo/sample, and no record here is real payroll.
+/// Amounts are int paisa per month (D6).
+List<SalaryRecord> demoSalaryRecords({DateTime? now}) {
+  final at = now ?? DateTime.now();
+  final month =
+      '${at.year}-${at.month.toString().padLeft(2, '0')}';
+  const figures = <String, (int base, int allowances, int deductions)>{
+    'staff-1': (25000000, 0, 0),
+    'staff-2': (15000000, 500000, 300000),
+    'staff-3': (12000000, 500000, 0),
+    'staff-4': (6000000, 500000, 0),
+    'staff-5': (5500000, 500000, 0),
+    'staff-6': (9000000, 500000, 0),
+    'staff-7': (15000000, 500000, 0),
+    'staff-8': (10000000, 500000, 150000),
+    'staff-9': (6000000, 500000, 0),
+    'staff-10': (11000000, 500000, 0),
+  };
+  return [
+    for (final member in demoStaff)
+      if (figures.containsKey(member.id))
+        SalaryRecord(
+          id: 'sal-${member.id}-$month',
+          employeeId: member.id,
+          branchId: member.branchId,
+          month: month,
+          baseSalaryMinor: figures[member.id]!.$1,
+          allowancesMinor: figures[member.id]!.$2,
+          deductionsMinor: figures[member.id]!.$3,
+          isDemo: true,
+        ),
+  ];
+}
 
 /// Sample shifts (Week 2 Day 5, fictional): a morning and an
 /// evening shift per branch, with the branch's staff assigned.

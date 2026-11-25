@@ -5,6 +5,7 @@ import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
+import '../../models/goods_receipt.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/order.dart';
@@ -13,12 +14,14 @@ import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
+import '../../models/salary_record.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 import '../data/repository_factory.dart';
+import '../data/report_counters.dart';
 import 'demo_seed_data.dart';
 
 /// Repository interfaces — the contract between presentation/state and
@@ -335,6 +338,47 @@ abstract class SupplierPaymentRepository {
   /// caller also writes the matching supplier-ledger entry and
   /// `financialTransactions` entry (see the finance provider).
   Future<SupplierPayment> createPayment(SupplierPayment payment);
+}
+
+/// Goods receipts (Week 3 Day 2, SRS §3 `goodsReceipts` / D103).
+///
+/// One document per receiving event, written by the production data
+/// layer — never directly by a screen. The mock starts empty:
+/// receipts only arise from receiving in the session, so there is
+/// nothing to seed.
+abstract class GoodsReceiptRepository {
+  Future<List<GoodsReceipt>> getGoodsReceipts({
+    String? branchId,
+    String? poId,
+  });
+  Future<GoodsReceipt?> getById(String id);
+
+  /// Saves a receipt. The repository assigns the id and the
+  /// sequential per-branch receipt number (`GR-DHA-1001`, …) and
+  /// returns the saved receipt. A non-empty id is the idempotency
+  /// key (D65 pattern): a retry with the same id returns the
+  /// already-saved receipt, never a second document.
+  Future<GoodsReceipt> createGoodsReceipt(GoodsReceipt receipt);
+}
+
+/// Salary records (Week 3 Day 2, SRS §3.7 `salaries` / D102).
+///
+/// One record per (employee, month) — the source of truth for
+/// salary figures. The mock is seeded from [demoSalaryRecords]
+/// (fictional demo figures, `isDemo: true`).
+abstract class SalaryRepository {
+  Future<List<SalaryRecord>> getSalaryRecords({
+    String? branchId,
+    String? month,
+  });
+  Future<SalaryRecord?> getById(String id);
+
+  /// Saves (creates or replaces) one record, keyed by
+  /// (employeeId, month): a re-save overwrites the same record,
+  /// never a duplicate. Throws [ArgumentError] on a negative
+  /// amount, a bad month (`YYYY-MM` required) or a net that does
+  /// not equal base + allowances − deductions.
+  Future<SalaryRecord> saveSalaryRecord(SalaryRecord record);
 }
 
 /// --- Mock implementations (sample data only) ---
@@ -1154,6 +1198,128 @@ class MockPurchaseOrderRepository implements PurchaseOrderRepository {
   }
 }
 
+class MockGoodsReceiptRepository implements GoodsReceiptRepository {
+  final List<GoodsReceipt> _receipts = [];
+
+  @override
+  Future<List<GoodsReceipt>> getGoodsReceipts({
+    String? branchId,
+    String? poId,
+  }) async {
+    var scoped = _receipts;
+    if (branchId != null) {
+      scoped = scoped.where((r) => r.branchId == branchId).toList();
+    }
+    if (poId != null) {
+      scoped = scoped.where((r) => r.poId == poId).toList();
+    }
+    return List.unmodifiable(scoped);
+  }
+
+  @override
+  Future<GoodsReceipt?> getById(String id) async {
+    for (final receipt in _receipts) {
+      if (receipt.id == id) return receipt;
+    }
+    return null;
+  }
+
+  @override
+  Future<GoodsReceipt> createGoodsReceipt(GoodsReceipt receipt) async {
+    // Client id = idempotency key (D65 pattern): a retry with the
+    // same key returns the already-saved receipt, never a second
+    // document — the production layer relies on this.
+    if (receipt.id.isNotEmpty) {
+      for (final existing in _receipts) {
+        if (existing.id == receipt.id) return existing;
+      }
+    }
+    final branchCode = receipt.branchId == 'branch-dha-main' ? 'DHA' : 'GLB';
+    final sequence = 1000 + _receipts.length + 1;
+    final saved = receipt.copyWith(
+      id: receipt.id.isEmpty ? 'gr-$branchCode-$sequence' : receipt.id,
+      receiptNumber: 'GR-$branchCode-$sequence',
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    _receipts.add(saved);
+    return saved;
+  }
+}
+
+class MockSalaryRepository implements SalaryRepository {
+  MockSalaryRepository() : _records = demoSalaryRecords();
+
+  final List<SalaryRecord> _records;
+
+  @override
+  Future<List<SalaryRecord>> getSalaryRecords({
+    String? branchId,
+    String? month,
+  }) async {
+    var scoped = _records;
+    if (branchId != null) {
+      scoped = scoped.where((r) => r.branchId == branchId).toList();
+    }
+    if (month != null) {
+      scoped = scoped.where((r) => r.month == month).toList();
+    }
+    return List.unmodifiable(scoped);
+  }
+
+  @override
+  Future<SalaryRecord?> getById(String id) async {
+    for (final record in _records) {
+      if (record.id == id) return record;
+    }
+    return null;
+  }
+
+  @override
+  Future<SalaryRecord> saveSalaryRecord(SalaryRecord record) async {
+    // Repository re-checks (D100 pattern — mirrors the pure
+    // `validateSalaryRecord` in salary_logic.dart, which the future
+    // edit UI will use): negative amounts, a bad month, or a
+    // negative net never reach the store.
+    if (record.employeeId.isEmpty || record.branchId.isEmpty) {
+      throw ArgumentError(
+        'A salary record needs an employee and a branch.',
+      );
+    }
+    if (!RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(record.month)) {
+      throw ArgumentError('Month must look like YYYY-MM (e.g. 2026-11).');
+    }
+    if (record.baseSalaryMinor < 0 ||
+        record.allowancesMinor < 0 ||
+        record.deductionsMinor < 0) {
+      throw ArgumentError('Salary amounts cannot be negative.');
+    }
+    if (record.netMinor < 0) {
+      throw ArgumentError(
+        'Net salary cannot be negative — deductions exceed pay.',
+      );
+    }
+    final index = _records.indexWhere(
+      (r) => r.employeeId == record.employeeId && r.month == record.month,
+    );
+    final saved = record.copyWith(
+      id: record.id.isEmpty
+          ? 'sal-${record.employeeId}-${record.month}'
+          : record.id,
+      createdAt: index == -1
+          ? DateTime.now()
+          : _records[index].createdAt ?? DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    if (index == -1) {
+      _records.add(saved);
+    } else {
+      _records[index] = saved;
+    }
+    return saved;
+  }
+}
+
 /// Default providers — mock implementations until the Firebase data layer
 /// lands in Week 2. Screens inject these providers, never the mocks.
 ///
@@ -1202,37 +1368,55 @@ final riderRepositoryProvider = Provider<RiderRepository>(
   (ref) => ref.watch(repositoryBundleProvider).riders,
 );
 
-/// Week 2 Day 5 repositories (D89): these are mock-backed providers
-/// for now — they are NOT part of the Day 3 [RepositoryBundle] yet,
-/// because their Firestore implementations land with the
-/// Firebase-wiring chunk (same Day 7 → Day 3 pattern as suppliers
-/// and purchase orders: interface + mock first, Firestore behind
-/// the same interface next). The Firestore schema paths for all six
-/// collections already exist (`firestore_schema.dart` §3.6/§3.7),
-/// so the mappers and repositories have their contract ready.
-/// Each provider owns one mock instance per scope; screens inject
-/// these providers, never the mocks.
+/// Week 2 Day 5 repositories (D89): mock-backed by default — the
+/// providers below read from the [RepositoryBundle] (Week 3 Day 1,
+/// D101), so the mock bundle is the default and a Firestore bundle
+/// override switches all six to their Firestore implementations
+/// exactly like the Day 3 repos. Each provider reads the bundle, so
+/// screens inject these providers, never the repos directly.
 final staffRepositoryProvider = Provider<StaffRepository>(
-  (ref) => MockStaffRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).staff,
 );
 
 final attendanceRepositoryProvider = Provider<AttendanceRepository>(
-  (ref) => MockAttendanceRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).attendance,
 );
 
 final shiftRepositoryProvider = Provider<ShiftRepository>(
-  (ref) => MockShiftRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).shifts,
 );
 
 final expenseRepositoryProvider = Provider<ExpenseRepository>(
-  (ref) => MockExpenseRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).expenses,
 );
 
 final financialTransactionRepositoryProvider =
     Provider<FinancialTransactionRepository>(
-      (ref) => MockFinancialTransactionRepository(),
+      (ref) => ref.watch(repositoryBundleProvider).financialTransactions,
     );
 
 final supplierPaymentRepositoryProvider = Provider<SupplierPaymentRepository>(
-  (ref) => MockSupplierPaymentRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).supplierPayments,
+);
+
+/// Week 3 Day 2 repositories (D102/D103): mock-backed by default —
+/// the providers below read from the [RepositoryBundle], so the mock
+/// bundle is the default and a Firestore bundle override switches
+/// both to their Firestore implementations exactly like the Day 3
+/// repos (D101 pattern).
+final goodsReceiptRepositoryProvider = Provider<GoodsReceiptRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).goodsReceipts,
+);
+
+final salaryRepositoryProvider = Provider<SalaryRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).salary,
+);
+
+/// Week 3 Day 3 report counters (D105/D106): mock-backed by
+/// default — the provider reads from the [RepositoryBundle], so the
+/// mock bundle is the default and a Firestore bundle override
+/// switches it to the rollup-doc reader exactly like the Day 3 repos
+/// (D101 pattern).
+final reportCounterRepositoryProvider = Provider<ReportCounterRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).reportCounters,
 );
