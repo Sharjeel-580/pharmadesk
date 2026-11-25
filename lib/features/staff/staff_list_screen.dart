@@ -10,6 +10,7 @@ import '../../models/staff.dart';
 import '../authentication/auth_state.dart';
 import '../settings/roles_permissions.dart';
 import 'hr_logic.dart';
+import 'salary_logic.dart';
 import 'staff_provider.dart';
 
 /// Staff directory (Week 2 Day 5, SRS §3.7 employees, D-22).
@@ -55,6 +56,9 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
     final mayManage = effectiveBranch == null
         ? canManageStaff(user, ref.read(activeBranchProvider).id)
         : canManageStaff(user, effectiveBranch);
+    final mayViewSalary = effectiveBranch == null
+        ? canViewSalary(user, ref.read(activeBranchProvider).id)
+        : canViewSalary(user, effectiveBranch);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -110,6 +114,14 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
                 label: const Text('Shifts'),
                 onPressed: () => context.go('/staff/shifts'),
               ),
+              // Salary (Week 3 Day 2, D102): only for users who may
+              // view salary figures in this branch (`hrSalary`).
+              if (mayViewSalary)
+                ActionChip(
+                  avatar: const Icon(Icons.payments_outlined, size: 18),
+                  label: const Text('Salary'),
+                  onPressed: () => context.go('/staff/salary'),
+                ),
             ],
           ),
           const SizedBox(height: 8),
