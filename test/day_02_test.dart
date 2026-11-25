@@ -277,7 +277,7 @@ void main() {
       await signInAsDemoRole(tester, 'Owner');
     }
 
-    testWidgets('desktop sidebar lists all 14 modules and navigates',
+    testWidgets('desktop sidebar lists all 15 modules and navigates',
         (WidgetTester tester) async {
       await pumpWideApp(tester);
       // The sidebar is a lazy ListView: scroll each item into view
@@ -294,6 +294,7 @@ void main() {
         'Suppliers',
         'Purchases',
         'Prescriptions',
+        'Staff & HR',
         'Reports',
         'Notifications',
         'Settings',
@@ -309,26 +310,44 @@ void main() {
         await scrollListToTitle(tester, sidebarList, title);
       }
       await scrollListToTitle(tester, sidebarList, 'Medicines');
-      await tester.tap(
-        find.descendant(
-          of: sidebarList,
-          matching: find.text('Medicines'),
-        ),
+      final medicinesItem = find.descendant(
+        of: sidebarList,
+        matching: find.text('Medicines'),
       );
+      // Week 2 Day 2: the Auto Purchase List sub-item under Purchases
+      // lengthened the sidebar list, so the 300px drag steps can park
+      // an item half under the brand header — bring it fully into
+      // view before tapping (D24 pattern).
+      await tester.ensureVisible(medicinesItem);
+      await tester.pumpAndSettle();
+      await tester.tap(medicinesItem);
       await tester.pumpAndSettle();
       // Day 5: the catalogue is real — 180 medicines, not a placeholder.
       expect(find.textContaining('180 medicines'), findsOneWidget);
       await scrollListToTitle(tester, sidebarList, 'Suppliers');
-      await tester.tap(
-        find.descendant(
-          of: sidebarList,
-          matching: find.text('Suppliers'),
-        ),
+      final suppliersItem = find.descendant(
+        of: sidebarList,
+        matching: find.text('Suppliers'),
       );
+      await tester.ensureVisible(suppliersItem);
+      await tester.pumpAndSettle();
+      await tester.tap(suppliersItem);
       await tester.pumpAndSettle();
       // Day 7: the supplier directory is real — seeded suppliers listed.
       expect(find.text('Sami Pharmaceuticals'), findsOneWidget);
       expect(find.text('Add supplier'), findsOneWidget);
+      // Week 2 Day 2: the Auto Purchase List sub-item under Purchases
+      // navigates to the auto purchase list screen.
+      await scrollListToTitle(tester, sidebarList, 'Auto Purchase List');
+      final autoItem = find.descendant(
+        of: sidebarList,
+        matching: find.text('Auto Purchase List'),
+      );
+      await tester.ensureVisible(autoItem);
+      await tester.pumpAndSettle();
+      await tester.tap(autoItem);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Branch: Demo Branch'), findsOneWidget);
     });
 
     testWidgets('branch switcher changes the displayed branch context',

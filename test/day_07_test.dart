@@ -787,14 +787,14 @@ void main() {
       expect(featureModuleForRoute('/dashboard'), isNull);
       expect(featureModuleForRoute('/settings'), isNull);
       notifier.enableAll();
-      expect(container.read(featureConfigProvider).length, 10);
+      expect(container.read(featureConfigProvider).length, 11);
     });
 
-    test('roles matrix: 10 roles, 21 capabilities, pharmacist reviews', () {
+    test('roles matrix: 10 roles, 23 capabilities, pharmacist reviews', () {
       expect(demoRoles.length, 10);
-      expect(roleCapabilities.length, 21);
+      expect(roleCapabilities.length, 23);
       final pharmacist = permissionsForRole('Pharmacist');
-      expect(pharmacist.length, 21);
+      expect(pharmacist.length, 23);
       final rxIndex = roleCapabilities.indexWhere(
         (c) => c.key == 'rxReview',
       );
@@ -829,7 +829,9 @@ void main() {
         of: find.byType(AlertDialog),
         matching: find.byType(TextField),
       );
-      expect(dialogFields, findsNWidgets(2));
+      // Amount + reason + reference (the Day 5 payment flow adds a
+      // reference field for the payment record).
+      expect(dialogFields, findsNWidgets(3));
       await tester.enterText(dialogFields.at(0), '5000');
       await tester.enterText(dialogFields.at(1), 'Test payment');
       await tester.tap(find.text('Record'));
@@ -965,7 +967,7 @@ void main() {
       expect(find.text('Daily sales'), findsOneWidget);
     });
 
-    testWidgets('full route walk: all 14 modules load, no placeholders left',
+    testWidgets('full route walk: all 15 modules load, no placeholders left',
         (WidgetTester tester) async {
       final (_, router) = await pumpRouterApp(
         tester,
@@ -981,6 +983,7 @@ void main() {
         '/suppliers',
         '/purchases',
         '/prescriptions',
+        '/staff',
         '/reports',
         '/notifications',
         '/settings',

@@ -37,34 +37,37 @@ void main() {
       container.dispose();
     });
 
-    test('valid email/password signs in as Owner', () {
-      final error = container
+    test('valid email/password signs in as Owner', () async {
+      final error = await container
           .read(authProvider.notifier)
           .signIn('owner@demo.pharmadesk', 'demo1234');
       expect(error, isNull);
       final user = container.read(authProvider);
       expect(user, isNotNull);
-      expect(user!.role, DemoRole.owner);
+      // Week 2 Day 3: the signed-in user is an AppUser (uid, org,
+      // branch list, SRS §5.1 role key); the demo role is `demoRole`.
+      expect(user!.demoRole, DemoRole.owner);
+      expect(user.roleKey, 'owner');
       expect(user.name, 'Hassan Raza');
       expect(user.branchId, isNull);
       expect(user.seesAllBranches, isTrue);
     });
 
-    test('wrong password and unknown email fail without signing in', () {
+    test('wrong password and unknown email fail without signing in', () async {
       final notifier = container.read(authProvider.notifier);
       expect(
-        notifier.signIn('owner@demo.pharmadesk', 'wrongpass'),
+        await notifier.signIn('owner@demo.pharmadesk', 'wrongpass'),
         'Incorrect password for this demo account.',
       );
       expect(container.read(authProvider), isNull);
       expect(
-        notifier.signIn('nobody@demo.pharmadesk', 'demo1234'),
+        await notifier.signIn('nobody@demo.pharmadesk', 'demo1234'),
         'No demo account found for this email.',
       );
       expect(container.read(authProvider), isNull);
     });
 
-    test('one-tap demo sign-in works for all five roles', () {
+    test('one-tap demo sign-in works for all five roles', () async {
       final notifier = container.read(authProvider.notifier);
       const expectedBranch = {
         DemoRole.owner: null,
@@ -74,90 +77,90 @@ void main() {
         DemoRole.inventoryManager: 'branch-demo-gulberg',
       };
       for (final role in DemoRole.values) {
-        notifier.signInAsDemo(role);
+        await notifier.signInAsDemo(role);
         final user = container.read(authProvider);
         expect(user, isNotNull);
-        expect(user!.role, role);
+        expect(user!.demoRole, role);
         expect(user.email, role.email);
         expect(user.branchId, expectedBranch[role]);
-        notifier.signOut();
+        await notifier.signOut();
         expect(container.read(authProvider), isNull);
       }
     });
 
-    test('demo sign-in moves branch-scoped roles to their home branch',
-        () {
-      final notifier = container.read(authProvider.notifier);
-      // Start on DHA, sign in as the Gulberg cashier.
-      container.read(activeBranchProvider.notifier).switchTo('branch-dha-main');
-      notifier.signInAsDemo(DemoRole.cashier);
-      expect(
-        container.read(activeBranchProvider).id,
-        'branch-demo-gulberg',
-      );
-      // Owner keeps whichever branch was active.
-      notifier.signInAsDemo(DemoRole.owner);
-      expect(
-        container.read(activeBranchProvider).id,
-        'branch-demo-gulberg',
-      );
-    });
+    test(
+      'demo sign-in moves branch-scoped roles to their home branch',
+      () async {
+        final notifier = container.read(authProvider.notifier);
+        // Start on DHA, sign in as the Gulberg cashier.
+        container
+            .read(activeBranchProvider.notifier)
+            .switchTo('branch-dha-main');
+        await notifier.signInAsDemo(DemoRole.cashier);
+        expect(container.read(activeBranchProvider).id, 'branch-demo-gulberg');
+        // Owner keeps whichever branch was active.
+        await notifier.signInAsDemo(DemoRole.owner);
+        expect(container.read(activeBranchProvider).id, 'branch-demo-gulberg');
+      },
+    );
 
-    test('forgot-password flow: code, wrong code, reset, new password',
-        () {
-      final notifier = container.read(authProvider.notifier);
-      expect(
-        notifier.requestPasswordReset('nobody@demo.pharmadesk'),
-        isNull,
-      );
-      final code = notifier.requestPasswordReset('owner@demo.pharmadesk');
-      expect(code, isNotNull);
-      expect(code!.length, 6);
-      expect(int.tryParse(code), isNotNull);
-      // Deterministic: same email always yields the same code.
-      expect(
-        AuthNotifier.resetCodeFor('owner@demo.pharmadesk'),
-        code,
-      );
-      expect(
-        notifier.resetPassword(
-          email: 'owner@demo.pharmadesk',
-          code: '000000',
-          newPassword: 'newpass123',
-        ),
-        contains('incorrect'),
-      );
-      expect(
-        notifier.resetPassword(
-          email: 'owner@demo.pharmadesk',
-          code: code,
-          newPassword: 'short',
-        ),
-        contains('at least 6 characters'),
-      );
-      expect(
-        notifier.resetPassword(
-          email: 'owner@demo.pharmadesk',
-          code: code,
-          newPassword: 'newpass123',
-        ),
-        isNull,
-      );
-      // The new password signs in; the old one no longer does.
-      expect(
-        notifier.signIn('owner@demo.pharmadesk', 'demo1234'),
-        isNotNull,
-      );
-      expect(
-        notifier.signIn('owner@demo.pharmadesk', 'newpass123'),
-        isNull,
-      );
-    });
+    test(
+      'forgot-password flow: code, wrong code, reset, new password',
+      () async {
+        final notifier = container.read(authProvider.notifier);
+        expect(
+          await notifier.requestPasswordReset('nobody@demo.pharmadesk'),
+          isNull,
+        );
+        final code = await notifier.requestPasswordReset(
+          'owner@demo.pharmadesk',
+        );
+        expect(code, isNotNull);
+        expect(code!.length, 6);
+        expect(int.tryParse(code), isNotNull);
+        // Deterministic: same email always yields the same code.
+        expect(AuthNotifier.resetCodeFor('owner@demo.pharmadesk'), code);
+        expect(
+          await notifier.resetPassword(
+            email: 'owner@demo.pharmadesk',
+            code: '000000',
+            newPassword: 'newpass123',
+          ),
+          contains('incorrect'),
+        );
+        expect(
+          await notifier.resetPassword(
+            email: 'owner@demo.pharmadesk',
+            code: code,
+            newPassword: 'short',
+          ),
+          contains('at least 6 characters'),
+        );
+        expect(
+          await notifier.resetPassword(
+            email: 'owner@demo.pharmadesk',
+            code: code,
+            newPassword: 'newpass123',
+          ),
+          isNull,
+        );
+        // The new password signs in; the old one no longer does.
+        expect(
+          await notifier.signIn('owner@demo.pharmadesk', 'demo1234'),
+          isNotNull,
+        );
+        expect(
+          await notifier.signIn('owner@demo.pharmadesk', 'newpass123'),
+          isNull,
+        );
+      },
+    );
   });
 
   group('Splash + login screens', () {
-    testWidgets('splash shows brand + DEMO MODE, then routes to login',
-        (WidgetTester tester) async {
+    testWidgets('splash shows brand + DEMO MODE, then routes to login', (
+      WidgetTester tester,
+    ) async {
       await tester.pumpWidget(const ProviderScope(child: PharmaDeskApp()));
       await tester.pump();
       expect(find.text('PharmaDesk'), findsWidgets);
@@ -171,24 +174,25 @@ void main() {
       expect(find.text('DEMO MODE'), findsOneWidget);
     });
 
-    testWidgets('login shows all five demo accounts + password hint',
-        (WidgetTester tester) async {
+    testWidgets('login shows all five demo accounts + password hint', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       for (final role in DemoRole.values) {
         expect(find.text(role.label), findsOneWidget);
       }
-      expect(find.text('Demo password for every account: demo1234'),
-          findsOneWidget);
+      expect(
+        find.text('Demo password for every account: demo1234'),
+        findsOneWidget,
+      );
       expect(find.text('Forgot password?'), findsOneWidget);
     });
 
-    testWidgets('login validation rejects bad email / short password',
-        (WidgetTester tester) async {
+    testWidgets('login validation rejects bad email / short password', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
-      await tester.enterText(
-        find.byType(TextFormField).first,
-        'not-an-email',
-      );
+      await tester.enterText(find.byType(TextFormField).first, 'not-an-email');
       await tester.enterText(find.byType(TextFormField).last, '123');
       await tester.tap(find.text('Sign in'));
       await tester.pump();
@@ -200,8 +204,9 @@ void main() {
       expect(find.text('Owner dashboard'), findsNothing);
     });
 
-    testWidgets('login with wrong password shows an error, stays put',
-        (WidgetTester tester) async {
+    testWidgets('login with wrong password shows an error, stays put', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await tester.enterText(
         find.byType(TextFormField).first,
@@ -217,8 +222,9 @@ void main() {
       expect(find.text('Owner dashboard'), findsNothing);
     });
 
-    testWidgets('login with valid credentials opens the owner dashboard',
-        (WidgetTester tester) async {
+    testWidgets('login with valid credentials opens the owner dashboard', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await tester.enterText(
         find.byType(TextFormField).first,
@@ -230,8 +236,9 @@ void main() {
       expect(find.text('Owner dashboard'), findsOneWidget);
     });
 
-    testWidgets('one-tap demo login works for every role',
-        (WidgetTester tester) async {
+    testWidgets('one-tap demo login works for every role', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       const expectedTitle = {
         DemoRole.owner: 'Owner dashboard',
@@ -252,8 +259,9 @@ void main() {
       }
     });
 
-    testWidgets('profile menu signs out back to the login screen',
-        (WidgetTester tester) async {
+    testWidgets('profile menu signs out back to the login screen', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Owner');
       expect(find.text('Owner dashboard'), findsOneWidget);
@@ -266,8 +274,9 @@ void main() {
       expect(find.text('Owner dashboard'), findsNothing);
     });
 
-    testWidgets('profile screen shows the signed-in user + sign out',
-        (WidgetTester tester) async {
+    testWidgets('profile screen shows the signed-in user + sign out', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Cashier');
       await tester.tap(find.byKey(const ValueKey('profile-button')));
@@ -284,8 +293,9 @@ void main() {
   });
 
   group('Forgot-password screen', () {
-    testWidgets('unknown email is rejected with a clear error',
-        (WidgetTester tester) async {
+    testWidgets('unknown email is rejected with a clear error', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await tester.tap(find.text('Forgot password?'));
       await tester.pumpAndSettle();
@@ -300,8 +310,9 @@ void main() {
       expect(find.textContaining('No demo account found'), findsOneWidget);
     });
 
-    testWidgets('full mock reset flow ends with a working new password',
-        (WidgetTester tester) async {
+    testWidgets('full mock reset flow ends with a working new password', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await tester.tap(find.text('Forgot password?'));
       await tester.pumpAndSettle();
@@ -313,10 +324,7 @@ void main() {
       await tester.pumpAndSettle();
       final code = AuthNotifier.resetCodeFor('owner@demo.pharmadesk');
       expect(find.text(code), findsOneWidget);
-      expect(
-        find.textContaining('no reset email is sent'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('no reset email is sent'), findsOneWidget);
       // Wrong code first: rejected, still on step 2.
       final fields = find.byType(TextFormField);
       await tester.enterText(fields.at(0), '000000');
@@ -481,8 +489,7 @@ void main() {
       ),
     ];
 
-    test('KPIs are computed from the data, cancelled orders excluded',
-        () {
+    test('KPIs are computed from the data, cancelled orders excluded', () {
       final kpis = computeDashboardKpis(
         orders: ordersForTest(),
         inventory: inventoryForTest(),
@@ -545,22 +552,26 @@ void main() {
       final orders = generateDemoOrders();
       expect(orders.length, greaterThan(300));
       final dha = orders.where((o) => o.branchId == 'branch-dha-main');
-      final glb = orders.where(
-        (o) => o.branchId == 'branch-demo-gulberg',
-      );
+      final glb = orders.where((o) => o.branchId == 'branch-demo-gulberg');
       expect(dha.length, greaterThan(glb.length));
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
       expect(
-        dha.where((o) => o.createdAt!.year == today.year &&
-            o.createdAt!.month == today.month &&
-            o.createdAt!.day == today.day),
+        dha.where(
+          (o) =>
+              o.createdAt!.year == today.year &&
+              o.createdAt!.month == today.month &&
+              o.createdAt!.day == today.day,
+        ),
         isNotEmpty,
       );
       expect(
-        glb.where((o) => o.createdAt!.year == today.year &&
-            o.createdAt!.month == today.month &&
-            o.createdAt!.day == today.day),
+        glb.where(
+          (o) =>
+              o.createdAt!.year == today.year &&
+              o.createdAt!.month == today.month &&
+              o.createdAt!.day == today.day,
+        ),
         isNotEmpty,
       );
       // Every order total equals the sum of its lines.
@@ -579,8 +590,7 @@ void main() {
         for (final branchId in demoSeedBranchIds) {
           expect(
             items.where(
-              (i) =>
-                  i.medicineId == medicine.id && i.branchId == branchId,
+              (i) => i.medicineId == medicine.id && i.branchId == branchId,
             ),
             isNotEmpty,
           );
@@ -602,8 +612,7 @@ void main() {
       expect(items.where((i) => i.isExpired), isNotEmpty);
     });
 
-    test('medicines, customers, suppliers and prescriptions are seeded',
-        () {
+    test('medicines, customers, suppliers and prescriptions are seeded', () {
       expect(demoMedicines.length, 180);
       expect(demoMedicinesCore.length, 14);
       expect(demoCustomers.length, 8);
@@ -616,13 +625,10 @@ void main() {
       );
     });
 
-    test('prescription repository scopes pending reviews per branch',
-        () async {
+    test('prescription repository scopes pending reviews per branch', () async {
       final repo = MockPrescriptionRepository();
       final dha = await repo.getPending(branchId: 'branch-dha-main');
-      final glb = await repo.getPending(
-        branchId: 'branch-demo-gulberg',
-      );
+      final glb = await repo.getPending(branchId: 'branch-demo-gulberg');
       final all = await repo.getPending();
       expect(dha.length + glb.length, all.length);
       expect(dha, isNotEmpty);
@@ -631,8 +637,9 @@ void main() {
   });
 
   group('Dashboards (widget)', () {
-    testWidgets('owner dashboard shows computed KPIs + sections',
-        (WidgetTester tester) async {
+    testWidgets('owner dashboard shows computed KPIs + sections', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Owner');
       expect(find.text('Owner dashboard'), findsOneWidget);
@@ -642,7 +649,9 @@ void main() {
       expect(find.text('Low stock'), findsOneWidget);
       expect(find.text('Near expiry'), findsOneWidget);
       expect(find.text('Sales — last 30 days'), findsOneWidget);
-      expect(find.text('Branch performance'), findsOneWidget);
+      // Week 2 Day 4: the branch-performance card was replaced by the
+      // branch-comparison card (same branches, richer per-branch stats).
+      expect(find.text('Branch comparison'), findsOneWidget);
       expect(find.text('Top-selling medicines'), findsOneWidget);
       expect(find.text('Recent orders'), findsOneWidget);
       expect(find.text('Alerts'), findsOneWidget);
@@ -652,8 +661,9 @@ void main() {
       expect(find.text('DEMO MODE'), findsWidgets);
     });
 
-    testWidgets('owner KPI values match the seed data computation',
-        (WidgetTester tester) async {
+    testWidgets('owner KPI values match the seed data computation', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Owner');
       final orders = await MockOrderRepository().getOrders();
@@ -667,21 +677,16 @@ void main() {
         now: DateTime.now(),
       );
       expect(find.text(formatPkr(expected.todaySalesMinor)), findsWidgets);
-      expect(
-        find.text(formatPkr(expected.revenue30dMinor)),
-        findsOneWidget,
-      );
+      expect(find.text(formatPkr(expected.revenue30dMinor)), findsOneWidget);
     });
 
-    testWidgets('branch dashboard is scoped: cashier sees Gulberg',
-        (WidgetTester tester) async {
+    testWidgets('branch dashboard is scoped: cashier sees Gulberg', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Cashier');
       expect(find.text('Branch dashboard'), findsOneWidget);
-      expect(
-        find.text('Demo Branch — Gulberg • Cashier'),
-        findsOneWidget,
-      );
+      expect(find.text('Demo Branch — Gulberg • Cashier'), findsOneWidget);
       expect(find.text("Today's branch sales"), findsOneWidget);
       expect(find.text('Pending prescriptions'), findsOneWidget);
       expect(find.text('Quick actions'), findsOneWidget);
@@ -693,16 +698,18 @@ void main() {
       expect(find.text('Revenue — 30 days'), findsNothing);
     });
 
-    testWidgets('pharmacist quick actions lead with Prescriptions',
-        (WidgetTester tester) async {
+    testWidgets('pharmacist quick actions lead with Prescriptions', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Pharmacist');
       expect(find.text('Branch dashboard'), findsOneWidget);
       expect(find.text('Prescriptions'), findsWidgets);
     });
 
-    testWidgets('branch switching changes the dashboard figures',
-        (WidgetTester tester) async {
+    testWidgets('branch switching changes the dashboard figures', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Cashier'); // Gulberg home branch
       final orders = await MockOrderRepository().getOrders();
@@ -736,8 +743,9 @@ void main() {
       expect(find.text(glbSalesText), findsNothing);
     });
 
-    testWidgets('quick actions navigate to their modules',
-        (WidgetTester tester) async {
+    testWidgets('quick actions navigate to their modules', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Cashier');
       await tester.ensureVisible(find.text('New Sale'));
@@ -756,8 +764,9 @@ void main() {
       expect(find.textContaining('expiring'), findsWidgets);
     });
 
-    testWidgets('owner branch row switches branch and opens orders',
-        (WidgetTester tester) async {
+    testWidgets('owner branch row switches branch and opens orders', (
+      WidgetTester tester,
+    ) async {
       await pumpAppToLogin(tester, const PharmaDeskApp());
       await signInAsDemoRole(tester, 'Owner');
       // Scroll the branch-performance row into view, then tap it.
@@ -792,14 +801,16 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('signed out: dashboard redirects to login',
-        (WidgetTester tester) async {
+    testWidgets('signed out: dashboard redirects to login', (
+      WidgetTester tester,
+    ) async {
       await pumpRouter(tester, signedIn: false);
       expect(find.text('Sign in'), findsOneWidget);
     });
 
-    testWidgets('signed in: login redirects to the dashboard',
-        (WidgetTester tester) async {
+    testWidgets('signed in: login redirects to the dashboard', (
+      WidgetTester tester,
+    ) async {
       await pumpRouter(tester, signedIn: true);
       // No user in the provider: the dashboard falls back to the
       // branch view for the active branch.
