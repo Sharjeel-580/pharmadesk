@@ -11,6 +11,7 @@ import '../../core/widgets/demo_mode_badge.dart';
 import '../../features/authentication/auth_state.dart';
 import '../../features/notifications/notifications_provider.dart';
 import '../../features/settings/feature_config.dart';
+import '../../features/staff/salary_logic.dart';
 
 /// Responsive application shell — Day 2.
 ///
@@ -562,6 +563,17 @@ class _Sidebar extends ConsumerWidget {
                           route: '/staff/shifts',
                           selected: currentLocation == '/staff/shifts',
                         ),
+                        // Salary sits under Staff & HR too (Week 3
+                        // Day 2, D102) — but only for users who may
+                        // view salary figures in the active branch
+                        // (`hrSalary`): a Branch Manager sees the
+                        // directory, not the salary screen.
+                        if (canViewSalary(user, branchId))
+                          _SidebarSubItem(
+                            label: 'Salary',
+                            route: '/staff/salary',
+                            selected: currentLocation == '/staff/salary',
+                          ),
                       ],
                     ],
                 ],
@@ -731,7 +743,11 @@ class _BottomNav extends ConsumerWidget {
         if (index < _primaryRoutes.length) {
           context.go(_primaryRoutes[index]);
         } else {
-          _showMoreSheet(context, visibleModules);
+          _showMoreSheet(
+            context,
+            visibleModules,
+            canViewSalary(user, branchId),
+          );
         }
       },
       items: const [
@@ -760,7 +776,11 @@ class _BottomNav extends ConsumerWidget {
     );
   }
 
-  void _showMoreSheet(BuildContext context, List<AppModule> modules) {
+  void _showMoreSheet(
+    BuildContext context,
+    List<AppModule> modules,
+    bool canViewSalaryRecords,
+  ) {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -839,6 +859,20 @@ class _BottomNav extends ConsumerWidget {
                     context.go('/staff/shifts');
                   },
                 ),
+                // Salary sits under Staff & HR too (Week 3 Day 2,
+                // D102) — only for users who may view salary figures
+                // (`hrSalary`).
+                if (canViewSalaryRecords)
+                  ListTile(
+                    leading: const SizedBox(width: 24),
+                    title: const Text('Salary'),
+                    subtitle: const Text('Monthly payroll, per employee'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      context.go('/staff/salary');
+                    },
+                  ),
               ],
             ],
           ],
