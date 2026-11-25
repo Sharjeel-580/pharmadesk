@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/permission_service.dart';
 import '../../core/routing/app_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/theme/theme_mode_provider.dart';
@@ -179,10 +180,7 @@ class _BranchSwitcher extends ConsumerWidget {
                         branch.name,
                         style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
-                      Text(
-                        branch.address,
-                        style: theme.textTheme.bodySmall,
-                      ),
+                      Text(branch.address, style: theme.textTheme.bodySmall),
                     ],
                   ),
                 ),
@@ -408,7 +406,10 @@ class _ThemeMenuItem extends ConsumerWidget {
 /// Sidebar navigation groups (module titles, in [appModules] order).
 const _navGroups = <(String, List<String>)>[
   ('Main', ['Dashboard', 'Orders', 'Billing & POS', 'Medicines', 'Inventory']),
-  ('Manage', ['Customers', 'Suppliers', 'Purchases', 'Prescriptions']),
+  (
+    'Manage',
+    ['Customers', 'Suppliers', 'Purchases', 'Prescriptions', 'Staff & HR'],
+  ),
   ('Insights', ['Reports', 'Notifications']),
   ('System', ['Settings', 'Profile', 'Authentication']),
 ];
@@ -424,10 +425,24 @@ class _Sidebar extends ConsumerWidget {
     final moduleByTitle = {for (final m in appModules) m.title: m};
     // Disabled modules (FR-SYS-05) leave the navigation.
     final enabledModules = ref.watch(featureConfigProvider);
+    // Modules the signed-in user has no §5.1 permission for in the
+    // active branch leave the navigation too (Week 2 Day 3, D70).
+    // A signed-out user sees everything — the router's auth redirect
+    // is the signed-out guard.
+    final user = ref.watch(authProvider);
+    final branchId = ref.watch(activeBranchProvider).id;
     bool isVisible(AppModule module) {
       final config = featureModuleForRoute(module.route);
-      return config == null || enabledModules.contains(config.key);
+      if (config != null && !enabledModules.contains(config.key)) {
+        return false;
+      }
+      final capability = routeCapability(module.route);
+      if (capability != null && user != null) {
+        return permissionService.canInBranch(user, capability, branchId);
+      }
+      return true;
     }
+
     return Container(
       width: 264,
       color: brand.secondaryColor,
@@ -506,12 +521,49 @@ class _Sidebar extends ConsumerWidget {
                   ),
                   for (final title in titles)
                     if (moduleByTitle[title] != null &&
-                        isVisible(moduleByTitle[title]!))
+                        isVisible(moduleByTitle[title]!)) ...[
                       _SidebarItem(
                         module: moduleByTitle[title]!,
                         selected:
                             moduleByTitle[title]!.route == currentLocation,
                       ),
+                      // Auto Purchase List sits under Purchases (Day 2
+                      // Week 2): a sub-screen of the Purchases module,
+                      // not a 15th module — it follows the Purchases
+                      // feature toggle via featureModuleForRoute.
+                      if (title == 'Purchases')
+                        _SidebarSubItem(
+                          label: 'Auto Purchase List',
+                          route: '/purchases/auto',
+                          selected: currentLocation == '/purchases/auto',
+                        ),
+                      // Returns & refunds sits under Billing & POS
+                      // (Week 2 Day 4): a sub-screen of the Billing
+                      // module, same feature toggle as the POS.
+                      if (title == 'Billing & POS')
+                        _SidebarSubItem(
+                          label: 'Returns & refunds',
+                          route: '/billing/returns',
+                          selected: currentLocation == '/billing/returns' ||
+                              currentLocation == '/billing/returns/new',
+                        ),
+                      // Attendance & shifts sit under Staff & HR
+                      // (Week 2 Day 5): sub-screens of the Staff
+                      // module, same feature toggle as the directory.
+                      if (title == 'Staff & HR') ...[
+                        _SidebarSubItem(
+                          label: 'Attendance',
+                          route: '/staff/attendance',
+                          selected:
+                              currentLocation == '/staff/attendance',
+                        ),
+                        _SidebarSubItem(
+                          label: 'Shifts',
+                          route: '/staff/shifts',
+                          selected: currentLocation == '/staff/shifts',
+                        ),
+                      ],
+                    ],
                 ],
               ],
             ),
@@ -527,6 +579,58 @@ class _Sidebar extends ConsumerWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SidebarSubItem extends StatelessWidget {
+  const _SidebarSubItem({
+    required this.label,
+    required this.route,
+    required this.selected,
+  });
+
+  final String label;
+  final String route;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: Material(
+        color: selected
+            ? Colors.white.withValues(alpha: 0.14)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => context.go(route),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(44, 8, 12, 8),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.auto_awesome_outlined,
+                  size: 16,
+                  color: Colors.white.withValues(alpha: 0.75),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -557,9 +661,7 @@ class _SidebarItem extends StatelessWidget {
                 Icon(
                   module.icon,
                   size: 20,
-                  color: Colors.white.withValues(
-                    alpha: selected ? 1.0 : 0.75,
-                  ),
+                  color: Colors.white.withValues(alpha: selected ? 1.0 : 0.75),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -568,9 +670,7 @@ class _SidebarItem extends StatelessWidget {
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
-                      fontWeight: selected
-                          ? FontWeight.w700
-                          : FontWeight.w500,
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                     ),
                   ),
                 ),
@@ -608,9 +708,21 @@ class _BottomNav extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final enabledModules = ref.watch(featureConfigProvider);
+    // The More sheet lists the same visible modules as the sidebar:
+    // feature-flagged off, or without §5.1 permission in the active
+    // branch, stays out (Week 2 Day 3, D70).
+    final user = ref.watch(authProvider);
+    final branchId = ref.watch(activeBranchProvider).id;
     final visibleModules = appModules.where((module) {
       final config = featureModuleForRoute(module.route);
-      return config == null || enabledModules.contains(config.key);
+      if (config != null && !enabledModules.contains(config.key)) {
+        return false;
+      }
+      final capability = routeCapability(module.route);
+      if (capability != null && user != null) {
+        return permissionService.canInBranch(user, capability, branchId);
+      }
+      return true;
     }).toList();
     return BottomNavigationBar(
       currentIndex: _currentIndex,
@@ -643,10 +755,7 @@ class _BottomNav extends ConsumerWidget {
           activeIcon: Icon(Icons.medication),
           label: 'Medicines',
         ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.menu),
-          label: 'More',
-        ),
+        BottomNavigationBarItem(icon: Icon(Icons.menu), label: 'More'),
       ],
     );
   }
@@ -670,7 +779,7 @@ class _BottomNav extends ConsumerWidget {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
               ),
             ),
-            for (final module in modules)
+            for (final module in modules) ...[
               ListTile(
                 leading: Icon(
                   module.icon,
@@ -684,6 +793,54 @@ class _BottomNav extends ConsumerWidget {
                   context.go(module.route);
                 },
               ),
+              // Auto Purchase List sits under Purchases (Day 2 Week 2).
+              if (module.title == 'Purchases')
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Auto Purchase List'),
+                  subtitle: const Text('Suggested orders from live stock'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/purchases/auto');
+                  },
+                ),
+              // Returns & refunds sits under Billing & POS (Week 2 Day 4).
+              if (module.title == 'Billing & POS')
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Returns & refunds'),
+                  subtitle: const Text('Return items, restock, refund'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/billing/returns');
+                  },
+                ),
+              // Attendance & shifts sit under Staff & HR (Week 2 Day 5).
+              if (module.title == 'Staff & HR') ...[
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Attendance'),
+                  subtitle: const Text('Check-in / check-out today'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/staff/attendance');
+                  },
+                ),
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Shifts'),
+                  subtitle: const Text('Shift planner'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/staff/shifts');
+                  },
+                ),
+              ],
+            ],
           ],
         ),
       ),
