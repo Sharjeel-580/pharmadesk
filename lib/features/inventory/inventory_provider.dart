@@ -41,7 +41,7 @@ class InventoryNotifier extends AsyncNotifier<List<InventoryItem>> {
   void _invalidateDependents() {
     ref.invalidate(dashboardKpisProvider);
     ref.invalidate(dashboardAlertsProvider);
-    ref.invalidate(branchPerformanceProvider);
+    ref.invalidate(branchComparisonProvider);
     ref.invalidate(orderInventoryProvider);
   }
 

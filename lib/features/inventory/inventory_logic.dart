@@ -9,7 +9,9 @@ import '../../models/inventory_item.dart';
 /// sellable guard all read off these rows.
 ///
 /// THE RULE (SRS §8, demo scope): an expired batch can NEVER be sold —
-/// not from an order, not from the POS. The guard lives here, in ONE
+/// not from an order, not from the POS. Since Day 3 (D68) the same
+/// applies to a batch whose SRS §3 status is not `available`
+/// (quarantined / expired / returned). The guard lives here, in ONE
 /// place ([isBatchSellable] / [canSellMedicine]); the Day 4 order form
 /// and the Day 6 POS both call it instead of re-implementing the rule
 /// (D30).
@@ -61,11 +63,14 @@ StatusKind expiryBucketKind(ExpiryBucket bucket) => switch (bucket) {
   ExpiryBucket.fresh => StatusKind.success,
 };
 
-/// THE GUARD — true only when this batch may be sold: its expiry day is
-/// still ahead AND it has stock on hand. Expired batches and empty
-/// batches are never sellable. [now] is injectable so tests can pin the
-/// date; production callers omit it.
+/// THE GUARD — true only when this batch may be sold: its status is
+/// [BatchStatus.available] (D68 — quarantined / expired / returned
+/// batches are never sellable, even with stock on hand and a future
+/// expiry date), its expiry day is still ahead AND it has stock on
+/// hand. Expired batches and empty batches are never sellable. [now]
+/// is injectable so tests can pin the date; production callers omit it.
 bool isBatchSellable(InventoryItem batch, {DateTime? now}) {
+  if (batch.status != BatchStatus.available) return false;
   if (batch.quantity <= 0) return false;
   return expiryBucketFor(batch.expiryDate, now: now) != ExpiryBucket.expired;
 }
@@ -97,10 +102,7 @@ List<InventoryItem> fefoBatches(Iterable<InventoryItem> batches) {
 /// The batch to sell from: the first sellable batch in FEFO order, or
 /// `null` when every batch is expired or empty. This is what the order
 /// form and the POS show as the batch being picked.
-InventoryItem? fefoBatchFor(
-  Iterable<InventoryItem> batches, {
-  DateTime? now,
-}) {
+InventoryItem? fefoBatchFor(Iterable<InventoryItem> batches, {DateTime? now}) {
   for (final batch in fefoBatches(batches)) {
     if (isBatchSellable(batch, now: now)) return batch;
   }
@@ -152,9 +154,7 @@ Map<ExpiryBucket, int> expiryBucketCounts(
   Iterable<InventoryItem> batches, {
   DateTime? now,
 }) {
-  final counts = {
-    for (final bucket in ExpiryBucket.values) bucket: 0,
-  };
+  final counts = {for (final bucket in ExpiryBucket.values) bucket: 0};
   for (final batch in batches) {
     final bucket = expiryBucketFor(batch.expiryDate, now: now);
     counts[bucket] = counts[bucket]! + 1;
