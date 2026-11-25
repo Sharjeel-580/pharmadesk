@@ -31,6 +31,7 @@ import '../../features/reports/reports_screen.dart';
 import '../../features/settings/feature_gate.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/staff/attendance_screen.dart';
+import '../../features/staff/salary_screen.dart';
 import '../../features/staff/shifts_screen.dart';
 import '../../features/staff/staff_list_screen.dart';
 import '../../features/suppliers/supplier_detail_screen.dart';
@@ -139,7 +140,7 @@ const appModules = <AppModule>[
     route: '/staff',
     icon: Icons.badge_outlined,
     description:
-        'Staff directory, roles, attendance and shifts.',
+        'Staff directory, roles, attendance, shifts and salary.',
     day: 'Week 2 — Day 5',
   ),
   AppModule(
@@ -450,6 +451,13 @@ GoRouter createAppRouter({
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
               child: const ShiftsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/staff/salary',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const SalaryScreen(),
             ),
           ),
           GoRoute(
