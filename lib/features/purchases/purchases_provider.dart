@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/data/production_data_layer.dart';
 import '../../core/services/repositories.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../models/purchase_order.dart';
 import '../../models/supplier_ledger.dart';
 import '../dashboard/dashboard_screen.dart';
@@ -116,16 +118,23 @@ class PurchaseOrdersNotifier extends AsyncNotifier<List<PurchaseOrder>> {
 
   /// Receives goods against a PO (SRS FR-PUR-02/03).
   ///
-  /// For every line receiving units: a batch is added to inventory
-  /// (batch number, mfg/expiry, cost from the PO line) and the
-  /// received value is charged to the supplier ledger as a purchase
-  /// entry. Returns the updated PO, or `null` PO + an error message
-  /// when validation or the inventory repository rejects the receive
-  /// (nothing is partially applied — validation runs first).
+  /// The write runs through the production data layer (D103): one
+  /// `goodsReceipts` document for the delivery, batches into
+  /// inventory (batch number, mfg/expiry, cost from the PO line),
+  /// the received value charged to the supplier ledger, and the PO
+  /// moved to Partially received / Received — with idempotency, so
+  /// a retried submit with the same [idempotencyKey] returns the
+  /// original receipt and moves nothing twice. The receiving dialog
+  /// mints the key once per dialog and passes it on every submit,
+  /// so a retry after a failed attempt reuses it (D54/D65 pattern).
+  /// Returns the updated PO, or `null` PO + an error message when
+  /// validation or the layer rejects the receive (nothing is
+  /// partially applied — validation runs first).
   Future<({PurchaseOrder? order, String? error})> receiveOrder(
     PurchaseOrder order,
-    List<ReceivingLine> lines,
-  ) async {
+    List<ReceivingLine> lines, {
+    String? idempotencyKey,
+  }) async {
     if (!canReceivePo(order)) {
       return (
         order: null,
@@ -137,52 +146,23 @@ class PurchaseOrdersNotifier extends AsyncNotifier<List<PurchaseOrder>> {
       return (order: null, error: errors.first);
     }
     try {
-      var receivedValueMinor = 0;
-      for (final line in lines) {
-        if (line.quantityReceivedNow <= 0) continue;
-        await ref
-            .read(inventoryRepositoryProvider)
-            .receiveStock(
-              branchId: order.branchId,
-              medicineId: line.item.medicineId,
-              batchNo: line.batchNo.trim(),
-              mfgDate: line.mfgDate!,
-              expiryDate: line.expiryDate!,
-              quantity: line.quantityReceivedNow,
-              costMinor: line.item.unitCostMinor,
-            );
-        receivedValueMinor +=
-            line.quantityReceivedNow * line.item.unitCostMinor;
-      }
-      final updatedItems = applyReceiving(order.items, lines);
-      final updated = order.copyWith(
-        items: updatedItems,
-        status: statusAfterReceiving(order.copyWith(items: updatedItems)),
-      );
-      await ref
-          .read(purchaseOrderRepositoryProvider)
-          .updatePurchaseOrder(updated);
-      if (receivedValueMinor > 0) {
-        await ref
-            .read(supplierRepositoryProvider)
-            .addLedgerEntry(
-              SupplierLedgerEntry(
-                id: '',
-                supplierId: order.supplierId,
-                kind: SupplierLedgerEntryKind.purchase,
-                amountMinor: receivedValueMinor,
-                reason: 'Goods received — ${order.poNumber}',
-                referenceId: order.id,
-                balanceAfterMinor: 0, // set by the repository
-                createdAt: DateTime.now(),
-              ),
-            );
-      }
+      final result = await ref
+          .read(productionDataLayerProvider)
+          .receiveGoods(
+            order: order,
+            lines: lines,
+            idempotencyKey: idempotencyKey,
+          );
       await refresh();
       _invalidateDependents();
-      return (order: updated, error: null);
+      // Receiving enqueues one sync payload (D103/D108) — the sync
+      // chip on the purchases screen re-reads the queue.
+      ref.invalidate(syncStatusProvider);
+      return (order: result.order, error: null);
     } on ArgumentError catch (error) {
       return (order: null, error: error.message?.toString());
+    } on StateError catch (error) {
+      return (order: null, error: error.message);
     }
   }
 

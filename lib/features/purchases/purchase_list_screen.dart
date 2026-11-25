@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../models/purchase_order.dart';
 import '../suppliers/suppliers_provider.dart';
 import 'purchases_logic.dart';
@@ -50,6 +51,14 @@ class _PurchaseListScreenState extends ConsumerState<PurchaseListScreen> {
             actionLabel: 'New purchase order',
             actionIcon: Icons.add_outlined,
             onAction: () => context.go('/purchases/new'),
+          ),
+          const SizedBox(height: 12),
+          // Sync status (Week 3 Day 3, D108/D109): goods receiving
+          // enqueues one batched-write sync payload through the
+          // production data layer (D103) — the chip shows it live.
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: SyncStatusChip(),
           ),
           const SizedBox(height: 16),
           PharmaSearchField(

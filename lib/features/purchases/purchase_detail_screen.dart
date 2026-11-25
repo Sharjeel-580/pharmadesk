@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/sync_queue.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/purchase_order.dart';
@@ -368,6 +369,15 @@ class _ReceiveDialogState extends ConsumerState<_ReceiveDialog> {
   List<String> _errors = [];
   bool _saving = false;
 
+  /// Minted once per dialog (Week 3 Day 2, D103): the receiving
+  /// idempotency key. A failed submit keeps the dialog open, so a
+  /// retry reuses this key and the production layer returns the
+  /// original receipt instead of receiving the stock twice (D54/D65
+  /// pattern). A fresh dialog is a new delivery, so it mints a new
+  /// key.
+  late final String _idempotencyKey =
+      newIdempotencyKey('receipt-${widget.order.branchId}');
+
   @override
   void initState() {
     super.initState();
@@ -400,7 +410,11 @@ class _ReceiveDialogState extends ConsumerState<_ReceiveDialog> {
     });
     final result = await ref
         .read(purchaseOrdersProvider.notifier)
-        .receiveOrder(widget.order, lines);
+        .receiveOrder(
+          widget.order,
+          lines,
+          idempotencyKey: _idempotencyKey,
+        );
     if (!mounted) return;
     setState(() => _saving = false);
     if (result.error != null) {
