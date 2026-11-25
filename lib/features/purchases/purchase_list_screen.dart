@@ -81,6 +81,19 @@ class _PurchaseListScreenState extends ConsumerState<PurchaseListScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          Row(
+            children: [
+              PharmaButton(
+                key: const ValueKey('open-auto-purchase-list'),
+                label: 'Auto Purchase List',
+                variant: PharmaButtonVariant.secondary,
+                size: PharmaButtonSize.small,
+                icon: Icons.auto_awesome_outlined,
+                onPressed: () => context.go('/purchases/auto'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
           ordersAsync.when(
             loading: () => const SkeletonList(count: 4),
             error: (error, _) => PharmaEmptyState(

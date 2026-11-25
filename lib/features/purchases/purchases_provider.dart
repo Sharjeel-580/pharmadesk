@@ -43,18 +43,22 @@ class PurchaseOrdersNotifier extends AsyncNotifier<List<PurchaseOrder>> {
     ref.invalidate(inventoryProvider);
     ref.invalidate(dashboardKpisProvider);
     ref.invalidate(dashboardAlertsProvider);
-    ref.invalidate(branchPerformanceProvider);
+    ref.invalidate(branchComparisonProvider);
     ref.invalidate(orderInventoryProvider);
     ref.invalidate(notificationsProvider);
   }
 
   /// Creates a draft PO after validation. Returns the saved PO, or
   /// `null` PO + an error message when validation rejects it.
+  /// [idempotencyKey] is a client-generated id (auto purchase
+  /// approval, D65): the repository returns the already-created PO
+  /// instead of a duplicate when the same key is submitted again.
   Future<({PurchaseOrder? order, String? error})> createOrder({
     required String branchId,
     required String supplierId,
     required List<PurchaseOrderItem> items,
     String? notes,
+    String? idempotencyKey,
   }) async {
     final errors = validatePurchaseOrderForm(
       supplierId: supplierId,
@@ -71,6 +75,7 @@ class PurchaseOrdersNotifier extends AsyncNotifier<List<PurchaseOrder>> {
             supplierId: supplierId,
             items: items,
             notes: notes,
+            id: idempotencyKey ?? '',
           ),
         );
     await refresh();

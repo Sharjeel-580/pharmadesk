@@ -197,14 +197,18 @@ List<PurchaseOrder> filterPurchaseOrders({
 }
 
 /// Builds a draft PO from the create form. All money is int paisa.
+/// [id] is the client-generated id when the caller mints one (auto
+/// purchase approval, D65) — the repository dedupes on a non-empty id
+/// and still assigns the sequential PO number.
 PurchaseOrder buildNewPurchaseOrder({
   required String branchId,
   required String supplierId,
   required List<PurchaseOrderItem> items,
   String? notes,
+  String id = '',
 }) {
   return PurchaseOrder(
-    id: '',
+    id: id,
     poNumber: '',
     supplierId: supplierId,
     branchId: branchId,
