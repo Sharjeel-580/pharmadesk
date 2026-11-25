@@ -1,0 +1,60 @@
+# PharmaDesk — CI: build the release APK on push.
+#
+# Why CI exists: `flutter build apk` is environment-blocked in the dev
+# sandbox (Gradle's HTTP client cannot download plugins through the
+# egress proxy, and the locally installed Gradle 9.3.1 hits a KGP
+# NoSuchMethodError — see docs/technical-decisions.md D14/D15/D52).
+# GitHub-hosted runners have direct internet, so the Gradle wrapper
+# downloads its distribution and plugins normally. This workflow is the
+# APK path for the demo.
+#
+# NOTE: the release APK is signed with the DEBUG keys (the Flutter
+# template default in android/app/build.gradle.kts). That is fine for
+# the demo APK that goes to the client. A Play Store release needs a
+# real release keystore + signing config — a separate, Dazy-approved step.
+
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter 3.47.7 (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pharmadesk-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
