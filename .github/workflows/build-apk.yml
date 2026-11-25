@@ -58,3 +58,51 @@ jobs:
           name: pharmadesk-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
+
+  # Windows desktop build (Week 3 Day 4, D113).
+  #
+  # Why a separate job on a Windows runner: `flutter build windows`
+  # needs the Visual Studio toolchain and cannot run on the Linux
+  # sandbox (D11) or on the ubuntu runner above — the APK job owns
+  # the test run, this job owns the desktop binary. The desktop entry
+  # point is lib/main_desktop.dart (it wires sqflite_common_ffi for
+  # the sync queue, D110, and never touches firebase_messaging,
+  # which has no Windows implementation, D4/D110).
+  #
+  # NOTE: the first push that contains this job exercises it — no
+  # Windows binary has been built yet. Until that run goes green,
+  # do not claim the desktop app builds.
+  build-windows:
+    name: Build Windows desktop app
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter 3.47.7 (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.7"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build Windows release
+        run: flutter build windows --release -t lib/main_desktop.dart
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pharmadesk-windows
+          path: build/windows/x64/runner/Release
+          retention-days: 30
