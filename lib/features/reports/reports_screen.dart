@@ -7,6 +7,7 @@ import '../../core/services/branch_context.dart';
 import '../../core/utils/file_download.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/pagination_controls.dart';
 import '../../models/expense.dart';
 import '../authentication/auth_state.dart';
 import '../billing/receipt_print.dart';
@@ -294,30 +295,24 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                   ),
                   child: data.lowStock.isEmpty
                       ? const Text('No batches at or below their threshold.')
-                      : Column(
-                          children: [
-                            for (final row in data.lowStock.take(20))
-                              ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                leading: const Icon(
-                                  Icons.warning_amber_outlined,
-                                ),
-                                title: Text(row.medicineName),
-                                subtitle: Text(
-                                  'Batch ${row.batchNo ?? '—'} • threshold ${row.threshold}',
-                                ),
-                                trailing: Text(
-                                  '${row.quantity} left',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
+                      : PagedList<ReportLowStockRow>(
+                          items: data.lowStock,
+                          itemBuilder: (context, row) => ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(
+                              Icons.warning_amber_outlined,
+                            ),
+                            title: Text(row.medicineName),
+                            subtitle: Text(
+                              'Batch ${row.batchNo ?? '—'} • threshold ${row.threshold}',
+                            ),
+                            trailing: Text(
+                              '${row.quantity} left',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
                               ),
-                            if (data.lowStock.length > 20)
-                              Text(
-                                '…and ${data.lowStock.length - 20} more — see the CSV export.',
-                              ),
-                          ],
+                            ),
+                          ),
                         ),
                 ),
                 const SizedBox(height: 24),
@@ -335,10 +330,17 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                       ? const Text(
                           'No batches expiring within 90 days and none expired.',
                         )
-                      : Column(
-                          children: [
-                            for (final row in data.expired.take(10))
-                              ListTile(
+                      : PagedList<({ReportExpiryRow row, bool expired})>(
+                          items: [
+                            for (final row in data.expired)
+                              (row: row, expired: true),
+                            for (final row in data.expiring)
+                              (row: row, expired: false),
+                          ],
+                          itemBuilder: (context, entry) {
+                            final row = entry.row;
+                            if (entry.expired) {
+                              return ListTile(
                                 contentPadding: EdgeInsets.zero,
                                 leading: Icon(
                                   Icons.dangerous_outlined,
@@ -352,28 +354,23 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                                   '${row.expiryDate.day}/${row.expiryDate.month}/${row.expiryDate.year}',
                                 ),
                                 trailing: Text('${row.quantity} units'),
+                              );
+                            }
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: const Icon(
+                                Icons.schedule_outlined,
                               ),
-                            for (final row in data.expiring.take(10))
-                              ListTile(
-                                contentPadding: EdgeInsets.zero,
-                                leading: const Icon(
-                                  Icons.schedule_outlined,
-                                ),
-                                title: Text(row.medicineName),
-                                subtitle: Text(
-                                  'Batch ${row.batchNo ?? '—'} • expires '
-                                  '${row.expiryDate.day}/${row.expiryDate.month}/${row.expiryDate.year}',
-                                ),
-                                trailing: Text(
-                                  '${row.daysLeft}d left • ${row.quantity} units',
-                                ),
+                              title: Text(row.medicineName),
+                              subtitle: Text(
+                                'Batch ${row.batchNo ?? '—'} • expires '
+                                '${row.expiryDate.day}/${row.expiryDate.month}/${row.expiryDate.year}',
                               ),
-                            if (data.expiring.length + data.expired.length >
-                                20)
-                              const Text(
-                                'Showing the 20 most urgent — see the CSV export for the full list.',
+                              trailing: Text(
+                                '${row.daysLeft}d left • ${row.quantity} units',
                               ),
-                          ],
+                            );
+                          },
                         ),
                 ),
                 const SizedBox(height: 24),
@@ -460,6 +457,16 @@ class _AdvancedSections extends ConsumerWidget {
       data: (advanced) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Counters caption (D106): the reader can see whether the
+          // figures below came from the pre-aggregated daily
+          // counters or were computed live for this window.
+          Text(
+            advanced.countersUsed
+                ? 'Pre-aggregated daily counters • ${advanced.counterDays} day(s) covered'
+                : 'Live computed — no daily counters yet for this window',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 16),
           _ReportSection(
             title: 'Sales trend — weekly',
             actionLabel: 'Export CSV',
@@ -469,24 +476,22 @@ class _AdvancedSections extends ConsumerWidget {
             ),
             child: advanced.weeklyTrend.isEmpty
                 ? const Text('No sales in this window.')
-                : Column(
-                    children: [
-                      for (final week in advanced.weeklyTrend)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: const Icon(Icons.show_chart_outlined),
-                          title: Text(
-                            'Week of ${week.weekStart.day}/${week.weekStart.month}/${week.weekStart.year}',
-                          ),
-                          subtitle: Text('${week.orders} order(s)'),
-                          trailing: Text(
-                            formatPkr(week.salesMinor),
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                : PagedList<WeeklyTrendPoint>(
+                    items: advanced.weeklyTrend,
+                    itemBuilder: (context, week) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.show_chart_outlined),
+                      title: Text(
+                        'Week of ${week.weekStart.day}/${week.weekStart.month}/${week.weekStart.year}',
+                      ),
+                      subtitle: Text('${week.orders} order(s)'),
+                      trailing: Text(
+                        formatPkr(week.salesMinor),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
                         ),
-                    ],
+                      ),
+                    ),
                   ),
           ),
           const SizedBox(height: 24),
@@ -500,9 +505,11 @@ class _AdvancedSections extends ConsumerWidget {
             child: advanced.branchComparison.isEmpty
                 ? const Text('No branches in this scope.')
                 : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      for (final row in advanced.branchComparison)
-                        ListTile(
+                      PagedList<BranchAnalyticsRow>(
+                        items: advanced.branchComparison,
+                        itemBuilder: (context, row) => ListTile(
                           contentPadding: EdgeInsets.zero,
                           leading: const Icon(Icons.store_outlined),
                           title: Text(row.branchName),
@@ -519,6 +526,7 @@ class _AdvancedSections extends ConsumerWidget {
                             ),
                           ),
                         ),
+                      ),
                       const SizedBox(height: 4),
                       const Text(
                         'Outstanding counts only khata entries linked to '
@@ -541,26 +549,24 @@ class _AdvancedSections extends ConsumerWidget {
                 ? const Text(
                     'No slow movers — every stocked medicine sold in this window.',
                   )
-                : Column(
-                    children: [
-                      for (final mover in advanced.slowMovers)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: const Icon(
-                            Icons.trending_down_outlined,
-                          ),
-                          title: Text(mover.medicineName),
-                          subtitle: Text(
-                            '0 sold • ${mover.quantityOnHand} on hand',
-                          ),
-                          trailing: Text(
-                            formatPkr(mover.stockValueMinor),
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                : PagedList<SlowMover>(
+                    items: advanced.slowMovers,
+                    itemBuilder: (context, mover) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(
+                        Icons.trending_down_outlined,
+                      ),
+                      title: Text(mover.medicineName),
+                      subtitle: Text(
+                        '0 sold • ${mover.quantityOnHand} on hand',
+                      ),
+                      trailing: Text(
+                        formatPkr(mover.stockValueMinor),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
                         ),
-                    ],
+                      ),
+                    ),
                   ),
           ),
           const SizedBox(height: 24),
@@ -697,31 +703,27 @@ class _ProfitLossSection extends ConsumerWidget {
         PharmaCard(
           child: expenses.isEmpty
               ? const Text('No expenses recorded in this window.')
-              : Column(
-                  children: [
-                    for (var i = 0; i < expenses.length; i++) ...[
-                      if (i > 0) const Divider(height: 1),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.receipt_outlined),
-                        title: Text(
-                          expenses[i].description.isEmpty
-                              ? expenses[i].category
-                              : expenses[i].description,
-                        ),
-                        subtitle: Text(
-                          '${expenses[i].category} • '
-                          '${expenses[i].expenseDate.day}/${expenses[i].expenseDate.month}/${expenses[i].expenseDate.year}',
-                        ),
-                        trailing: Text(
-                          formatPkr(expenses[i].amountMinor),
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+              : PagedList<Expense>(
+                  items: expenses,
+                  itemBuilder: (context, expense) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.receipt_outlined),
+                    title: Text(
+                      expense.description.isEmpty
+                          ? expense.category
+                          : expense.description,
+                    ),
+                    subtitle: Text(
+                      '${expense.category} • '
+                      '${expense.expenseDate.day}/${expense.expenseDate.month}/${expense.expenseDate.year}',
+                    ),
+                    trailing: Text(
+                      formatPkr(expense.amountMinor),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
                       ),
-                    ],
-                  ],
+                    ),
+                  ),
                 ),
         ),
       ],
@@ -924,23 +926,23 @@ class _DailySalesTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Newest first for reading; the CSV keeps oldest → newest.
+    // Paged at the shared page size (D107) — a 30-day window is
+    // three pages instead of a 30-row scroll.
     final rows = days.toList().reversed.toList();
-    return Column(
-      children: [
-        for (final day in rows)
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.calendar_today_outlined),
-            title: Text(
-              '${day.date.day}/${day.date.month}/${day.date.year}',
-            ),
-            subtitle: Text('${day.orders} order(s)'),
-            trailing: Text(
-              formatPkr(day.salesMinor),
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-      ],
+    return PagedList<ReportDay>(
+      items: rows,
+      itemBuilder: (context, day) => ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.calendar_today_outlined),
+        title: Text(
+          '${day.date.day}/${day.date.month}/${day.date.year}',
+        ),
+        subtitle: Text('${day.orders} order(s)'),
+        trailing: Text(
+          formatPkr(day.salesMinor),
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+      ),
     );
   }
 }

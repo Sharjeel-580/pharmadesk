@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/data/report_counters.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/services/repositories.dart';
 import '../../models/customer_ledger.dart';
@@ -51,6 +52,8 @@ class AdvancedReportData {
     required this.expiryLoss,
     required this.profitLoss,
     required this.expenses,
+    this.countersUsed = false,
+    this.counterDays = 0,
   });
 
   /// Weekly sales trend (oldest → newest), grouped from the daily
@@ -75,6 +78,18 @@ class AdvancedReportData {
   /// Expenses recorded in the window (newest first) — the detail
   /// behind the P&L's expense line.
   final List<Expense> expenses;
+
+  /// True when the weekly trend, branch comparison and P&L revenue /
+  /// COGS were read from the pre-aggregated daily counters (Week 3
+  /// Day 3, D106) instead of computed live. False means no counter
+  /// covered the whole window and every figure is live-computed —
+  /// the screen says so, so a stale-looking figure is never
+  /// mistaken for a counter-backed one.
+  final bool countersUsed;
+
+  /// How many days of the window the counters covered (== window
+  /// length when [countersUsed] is true, 0 when no counter existed).
+  final int counterDays;
 }
 
 final advancedReportDataProvider =
@@ -146,19 +161,66 @@ final advancedReportDataProvider =
           )
           .map((branch) => (id: branch.id, name: branch.name))
           .toList();
+      // Counters first (Week 3 Day 3, D106): when the daily rollup
+      // counters cover EVERY day of the window for EVERY branch in
+      // scope, the weekly trend, branch comparison sales/profit and
+      // P&L revenue/COGS come from the counters. Anything short of
+      // full coverage falls back to the live computation for the
+      // whole window — a partial counter set is never mixed with
+      // live figures (the two would double-count or disagree).
+      // Stock value, outstanding, expiry loss, slow movers and
+      // expenses always stay live — no counter covers them.
+      final counterCoverage = await _counterCoverage(
+        ref,
+        branches: branches,
+        days: days,
+        now: now,
+      );
+      final weeklyTrend = counterCoverage == null
+          ? computeWeeklyTrend(base.dailySales)
+          : weeklyTrendFromCounters(counterCoverage.counters);
+      final liveComparison = computeBranchAnalytics(
+        orders: orders,
+        sales: sales,
+        returns: returns,
+        inventory: inventory,
+        ledgers: ledgers,
+        branches: branches,
+        medicinesById: medicinesById,
+        now: now,
+        days: days,
+      );
+      final branchComparison = counterCoverage == null
+          ? liveComparison
+          : [
+              for (final row in liveComparison)
+                row.copyWith(
+                  salesMinor: counterCoverage.salesByBranch[row.branchId] ?? 0,
+                  grossProfitMinor:
+                      counterCoverage.profitByBranch[row.branchId] ?? 0,
+                ),
+            ];
+      final liveProfitLoss = computeProfitAndLoss(
+        orders: orders,
+        sales: sales,
+        returns: returns,
+        inventory: inventory,
+        expenses: expenses,
+        transactions: transactions,
+        medicinesById: medicinesById,
+        branchId: branchId,
+        now: now,
+        days: days,
+      );
+      final profitLoss = counterCoverage == null
+          ? liveProfitLoss
+          : liveProfitLoss.copyWith(
+              revenueMinor: counterCoverage.totalSalesMinor,
+              cogsMinor: counterCoverage.totalCogsMinor,
+            );
       return AdvancedReportData(
-        weeklyTrend: computeWeeklyTrend(base.dailySales),
-        branchComparison: computeBranchAnalytics(
-          orders: orders,
-          sales: sales,
-          returns: returns,
-          inventory: inventory,
-          ledgers: ledgers,
-          branches: branches,
-          medicinesById: medicinesById,
-          now: now,
-          days: days,
-        ),
+        weeklyTrend: weeklyTrend,
+        branchComparison: branchComparison,
         slowMovers: computeSlowMovers(
           orders: orders,
           sales: sales,
@@ -173,18 +235,79 @@ final advancedReportDataProvider =
           branchId: branchId,
           now: now,
         ),
-        profitLoss: computeProfitAndLoss(
-          orders: orders,
-          sales: sales,
-          returns: returns,
-          inventory: inventory,
-          expenses: expenses,
-          transactions: transactions,
-          medicinesById: medicinesById,
-          branchId: branchId,
-          now: now,
-          days: days,
-        ),
+        profitLoss: profitLoss,
         expenses: windowExpenses,
+        countersUsed: counterCoverage != null,
+        counterDays: counterCoverage == null ? 0 : days,
       );
     });
+
+/// Full counter coverage for a window, or `null` when any day or
+/// branch is missing a rollup doc (D106 — the caller falls back to
+/// the live computation instead of mixing).
+class _CounterCoverage {
+  const _CounterCoverage({
+    required this.counters,
+    required this.salesByBranch,
+    required this.profitByBranch,
+    required this.totalSalesMinor,
+    required this.totalCogsMinor,
+  });
+
+  /// Every daily counter in the window, all branches in scope.
+  final List<DailyCounter> counters;
+
+  /// Windowed sales per branch (counter-backed).
+  final Map<String, int> salesByBranch;
+
+  /// Windowed gross profit per branch (counter-backed).
+  final Map<String, int> profitByBranch;
+
+  /// Windowed sales across the scope (counter-backed).
+  final int totalSalesMinor;
+
+  /// Windowed COGS across the scope (counter-backed).
+  final int totalCogsMinor;
+}
+
+Future<_CounterCoverage?> _counterCoverage(
+  Ref ref, {
+  required List<({String id, String name})> branches,
+  required int days,
+  required DateTime now,
+}) async {
+  final today = DateTime(now.year, now.month, now.day);
+  final start = today.subtract(Duration(days: days - 1));
+  final repo = ref.read(reportCounterRepositoryProvider);
+  final all = <DailyCounter>[];
+  for (final branch in branches) {
+    final counters = await repo.getDailyCounters(
+      branchId: branch.id,
+      start: start,
+      end: today,
+    );
+    // Full coverage means one counter per day — a missing day is a
+    // day the rollup has not run for yet, not a zero day.
+    if (counters.length != days) return null;
+    all.addAll(counters);
+  }
+  final salesByBranch = <String, int>{};
+  final profitByBranch = <String, int>{};
+  var totalSales = 0;
+  var totalCogs = 0;
+  for (final counter in all) {
+    salesByBranch[counter.branchId] =
+        (salesByBranch[counter.branchId] ?? 0) + counter.salesTotalMinor;
+    profitByBranch[counter.branchId] =
+        (profitByBranch[counter.branchId] ?? 0) + counter.grossProfitMinor;
+    totalSales += counter.salesTotalMinor;
+    totalCogs += counter.cogsMinor;
+  }
+  return _CounterCoverage(
+    counters: all,
+    salesByBranch: salesByBranch,
+    profitByBranch: profitByBranch,
+    totalSalesMinor: totalSales,
+    totalCogsMinor: totalCogs,
+  );
+}

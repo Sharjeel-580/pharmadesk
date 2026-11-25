@@ -49,6 +49,24 @@ class ProfitLoss {
 
   /// `gross profit + other income − expenses`.
   final int netProfitMinor;
+
+  /// Rebuilds the P&L with overridden revenue / COGS (Week 3 Day 3,
+  /// D106: when daily counters cover the window, revenue and COGS
+  /// come from the counters; gross profit and net are re-derived so
+  /// the row can never disagree with its inputs).
+  ProfitLoss copyWith({int? revenueMinor, int? cogsMinor}) {
+    final revenue = revenueMinor ?? this.revenueMinor;
+    final cogs = cogsMinor ?? this.cogsMinor;
+    final grossProfit = revenue - cogs;
+    return ProfitLoss(
+      revenueMinor: revenue,
+      cogsMinor: cogs,
+      grossProfitMinor: grossProfit,
+      otherIncomeMinor: otherIncomeMinor,
+      expensesMinor: expensesMinor,
+      netProfitMinor: grossProfit + otherIncomeMinor - expensesMinor,
+    );
+  }
 }
 
 /// Computes the P&L for [branchId] (`null` = all branches) over
@@ -347,6 +365,22 @@ class BranchAnalyticsRow {
 
   /// Value of expired stock at cost.
   final int expiryLossMinor;
+
+  /// Rebuilds the row with counter-backed sales / profit (Week 3
+  /// Day 3, D106): stock value, outstanding and expiry loss stay
+  /// live-computed — only the windowed sales figures come from the
+  /// counters.
+  BranchAnalyticsRow copyWith({int? salesMinor, int? grossProfitMinor}) {
+    return BranchAnalyticsRow(
+      branchId: branchId,
+      branchName: branchName,
+      salesMinor: salesMinor ?? this.salesMinor,
+      grossProfitMinor: grossProfitMinor ?? this.grossProfitMinor,
+      stockValueMinor: stockValueMinor,
+      outstandingMinor: outstandingMinor,
+      expiryLossMinor: expiryLossMinor,
+    );
+  }
 }
 
 /// Branch comparison over the window: sales, profit, stock value,
