@@ -30,6 +30,12 @@ class Medicine {
   final String packSize; // e.g. "20 tablets"
   final double price;
   final double? mrp;
+
+  /// Purchase (cost) price in int minor units (paisa). D76: the SRS §3
+  /// `medicines` doc requires `purchasePrice`, and the Day 0 model had
+  /// no cost field — the mapper writes this, defaulting to 0 (unknown)
+  /// for demo seed rows until a purchase price is recorded.
+  final int purchasePriceMinor;
   final StockStatus stockStatus;
   final bool requiresPrescription;
   final String? genericAlternativeId;
@@ -51,6 +57,7 @@ class Medicine {
     required this.packSize,
     required this.price,
     this.mrp,
+    this.purchasePriceMinor = 0,
     this.stockStatus = StockStatus.inStock,
     this.requiresPrescription = false,
     this.genericAlternativeId,
@@ -75,6 +82,7 @@ class Medicine {
       packSize: map['packSize'] as String? ?? '',
       price: (map['price'] as num?)?.toDouble() ?? 0,
       mrp: (map['mrp'] as num?)?.toDouble(),
+      purchasePriceMinor: (map['purchasePriceMinor'] as num?)?.toInt() ?? 0,
       stockStatus: stockStatusFromString(map['stockStatus'] as String?),
       requiresPrescription: map['requiresPrescription'] as bool? ?? false,
       genericAlternativeId: map['genericAlternativeId'] as String?,
@@ -95,6 +103,7 @@ class Medicine {
       'packSize': packSize,
       'price': price,
       'mrp': mrp,
+      'purchasePriceMinor': purchasePriceMinor,
       'stockStatus': stockStatus.name,
       'requiresPrescription': requiresPrescription,
       'genericAlternativeId': genericAlternativeId,

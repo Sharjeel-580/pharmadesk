@@ -27,6 +27,31 @@ String salePaymentMethodLabel(SalePaymentMethod method) => switch (method) {
   SalePaymentMethod.credit => 'Credit (khata)',
 };
 
+/// Lifecycle of a completed sale (SRS §3.4 `sales.status`, Week 2
+/// Day 4 — FR-POS-08 returns).
+///
+/// A sale is `completed` when rung through the POS. Returning items
+/// moves it to `partiallyReturned` (some items back) or `returned`
+/// (everything back). `voided` is reserved for a future void flow —
+/// returns never void a sale, they restock and refund it.
+enum SaleStatus { completed, partiallyReturned, returned, voided }
+
+SaleStatus saleStatusFromString(String? value) => switch (value) {
+  // Snake_case is the Firestore spelling (SRS §3.4); camelCase is
+  // the local toMap spelling — both read back to the same status.
+  'partially_returned' || 'partiallyReturned' => SaleStatus.partiallyReturned,
+  'returned' => SaleStatus.returned,
+  'voided' => SaleStatus.voided,
+  _ => SaleStatus.completed,
+};
+
+String saleStatusLabel(SaleStatus status) => switch (status) {
+  SaleStatus.completed => 'Completed',
+  SaleStatus.partiallyReturned => 'Partially returned',
+  SaleStatus.returned => 'Returned',
+  SaleStatus.voided => 'Voided',
+};
+
 /// One line of a completed sale: a snapshot of the medicine at sale
 /// time (name + unit price are copied so later price changes don't
 /// rewrite history), plus the batch it was picked from.
@@ -164,6 +189,10 @@ class Sale {
   /// it as the document id in Week 2, so a retried write can never
   /// create a duplicate sale.
   final String idempotencyKey;
+
+  /// Lifecycle status (SRS §3.4): `completed` until items are
+  /// returned, then `partiallyReturned` / `returned` (FR-POS-08).
+  final SaleStatus status;
   final DateTime? createdAt;
 
   const Sale({
@@ -181,6 +210,7 @@ class Sale {
     this.cashReceivedMinor = 0,
     this.changeMinor = 0,
     required this.idempotencyKey,
+    this.status = SaleStatus.completed,
     this.createdAt,
   });
 
@@ -206,6 +236,7 @@ class Sale {
       cashReceivedMinor: (map['cashReceivedMinor'] as num?)?.toInt() ?? 0,
       changeMinor: (map['changeMinor'] as num?)?.toInt() ?? 0,
       idempotencyKey: map['idempotencyKey'] as String? ?? id,
+      status: saleStatusFromString(map['status'] as String?),
       createdAt: parseDate(map['createdAt']),
     );
   }
@@ -225,6 +256,7 @@ class Sale {
       'cashReceivedMinor': cashReceivedMinor,
       'changeMinor': changeMinor,
       'idempotencyKey': idempotencyKey,
+      'status': status.name,
       'createdAt': dateToMap(createdAt),
     };
   }
@@ -253,6 +285,7 @@ class Sale {
     int? cashReceivedMinor,
     int? changeMinor,
     String? idempotencyKey,
+    SaleStatus? status,
     DateTime? createdAt,
   }) {
     return Sale(
@@ -270,6 +303,7 @@ class Sale {
       cashReceivedMinor: cashReceivedMinor ?? this.cashReceivedMinor,
       changeMinor: changeMinor ?? this.changeMinor,
       idempotencyKey: idempotencyKey ?? this.idempotencyKey,
+      status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
     );
   }

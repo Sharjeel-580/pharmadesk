@@ -1,5 +1,34 @@
 import 'model_utils.dart';
 
+/// Lifecycle status of one stock batch (SRS §3 `batches.status`,
+/// Week 2 Day 3 — D68).
+///
+/// Only [available] batches may be sold: the Day 5 sellable guard
+/// ([isBatchSellable] in `inventory_logic.dart`) requires this status
+/// in addition to a future expiry date and stock on hand. A batch
+/// marked [quarantined] (damaged / suspect / held for inspection),
+/// [expired] or [returned] (sent back to the supplier) is excluded
+/// from usable stock everywhere — POS, orders and the Day 2 auto
+/// purchase list all read the same guard, so the rule cannot drift.
+///
+/// Legacy rows without a status (demo seed, pre-Day 3 maps) parse as
+/// [available].
+enum BatchStatus { available, quarantined, expired, returned }
+
+BatchStatus batchStatusFromString(String? value) {
+  switch (value) {
+    case 'quarantined':
+      return BatchStatus.quarantined;
+    case 'expired':
+      return BatchStatus.expired;
+    case 'returned':
+      return BatchStatus.returned;
+    case 'available':
+    default:
+      return BatchStatus.available;
+  }
+}
+
 /// Stock of one medicine at one branch.
 ///
 /// Firestore collection: `inventory`.
@@ -23,6 +52,10 @@ class InventoryItem {
   final int costMinor;
   final DateTime? updatedAt;
 
+  /// SRS §3 batch status (D68). Defaults to [BatchStatus.available];
+  /// quarantined / expired / returned batches are never sellable.
+  final BatchStatus status;
+
   const InventoryItem({
     required this.id,
     required this.medicineId,
@@ -34,6 +67,7 @@ class InventoryItem {
     this.mfgDate,
     this.costMinor = 0,
     this.updatedAt,
+    this.status = BatchStatus.available,
   });
 
   InventoryItem copyWith({
@@ -48,6 +82,7 @@ class InventoryItem {
     DateTime? mfgDate,
     int? costMinor,
     DateTime? updatedAt,
+    BatchStatus? status,
   }) {
     return InventoryItem(
       id: id ?? this.id,
@@ -60,6 +95,7 @@ class InventoryItem {
       mfgDate: mfgDate ?? this.mfgDate,
       costMinor: costMinor ?? this.costMinor,
       updatedAt: updatedAt ?? this.updatedAt,
+      status: status ?? this.status,
     );
   }
 
@@ -75,6 +111,9 @@ class InventoryItem {
       mfgDate: parseDate(map['mfgDate']),
       costMinor: (map['costMinor'] as num?)?.toInt() ?? 0,
       updatedAt: parseDate(map['updatedAt']),
+      status: batchStatusFromString(
+        map['status'] as String? ?? map['batchStatus'] as String?,
+      ),
     );
   }
 
@@ -89,11 +128,16 @@ class InventoryItem {
       'mfgDate': dateToMap(mfgDate),
       'costMinor': costMinor,
       'updatedAt': dateToMap(updatedAt),
+      'status': status.name,
     };
   }
 
   /// True when stock has fallen to (or below) the branch's alert level.
   bool get isLowStock => quantity <= lowStockThreshold;
+
+  /// True when the batch is held for inspection / damaged — never
+  /// sellable, never counted as usable stock (D68).
+  bool get isQuarantined => status == BatchStatus.quarantined;
 
   /// True when the batch is expired (or expires today).
   bool get isExpired {
