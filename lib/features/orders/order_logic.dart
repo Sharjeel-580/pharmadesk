@@ -76,15 +76,44 @@ String advanceLabel(OrderStatus status) {
 /// Prescription guard (Day 0 model rule, SRS §8): an order with a
 /// linked prescription that is still `pending` review must never be
 /// dispatched — the pharmacist has to clear it first (Day 7 review).
+/// Week 2 Day 5 (D90): an APPROVED prescription whose validity has
+/// expired blocks dispatch too — the medicine was cleared against
+/// a prescription that is no longer valid. Pass
+/// [linkedPrescriptionValidUntil] (null = no expiry recorded, so
+/// the validity rule does not apply) and [now] for the check; both
+/// default to "no expiry / now".
 String? advanceBlockedReason({
   required Order order,
   required OrderStatus next,
   PrescriptionStatus? linkedPrescriptionStatus,
+  DateTime? linkedPrescriptionValidUntil,
+  DateTime? now,
 }) {
-  if (canonicalStatus(next) == OrderStatus.dispatched &&
-      linkedPrescriptionStatus == PrescriptionStatus.pending) {
-    return 'Prescription ${order.prescriptionId ?? ''} is still pending '
-        'pharmacist review — the order cannot be dispatched yet.';
+  if (canonicalStatus(next) == OrderStatus.dispatched) {
+    if (linkedPrescriptionStatus == PrescriptionStatus.pending) {
+      return 'Prescription ${order.prescriptionId ?? ''} is still pending '
+          'pharmacist review — the order cannot be dispatched yet.';
+    }
+    if (linkedPrescriptionStatus == PrescriptionStatus.approved &&
+        linkedPrescriptionValidUntil != null) {
+      final reference = now ?? DateTime.now();
+      final refDay = DateTime(
+        reference.year,
+        reference.month,
+        reference.day,
+      );
+      final lastDay = DateTime(
+        linkedPrescriptionValidUntil.year,
+        linkedPrescriptionValidUntil.month,
+        linkedPrescriptionValidUntil.day,
+      );
+      if (lastDay.isBefore(refDay)) {
+        return 'Prescription ${order.prescriptionId ?? ''} was approved '
+            'but its validity expired on '
+            '${lastDay.day}/${lastDay.month}/${lastDay.year} — ask the '
+            'patient for a new prescription before dispatch.';
+      }
+    }
   }
   return null;
 }

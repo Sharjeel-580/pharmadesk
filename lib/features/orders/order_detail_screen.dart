@@ -61,6 +61,7 @@ class OrderDetailScreen extends ConsumerWidget {
             order: order,
             next: next,
             linkedPrescriptionStatus: prescription?.status,
+            linkedPrescriptionValidUntil: prescription?.validUntil,
           );
 
     return SingleChildScrollView(

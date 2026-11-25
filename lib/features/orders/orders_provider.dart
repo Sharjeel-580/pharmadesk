@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/data/production_data_layer.dart';
 import '../../core/services/repositories.dart';
 import '../../core/utils/money.dart';
+import '../../features/authentication/auth_state.dart';
 import '../../models/customer.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
@@ -43,6 +44,7 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
   Future<bool> advanceOrder(
     Order order, {
     PrescriptionStatus? linkedPrescriptionStatus,
+    DateTime? linkedPrescriptionValidUntil,
   }) async {
     final next = nextOrderStatus(order.status);
     if (next == null) return false;
@@ -50,6 +52,7 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
           order: order,
           next: next,
           linkedPrescriptionStatus: linkedPrescriptionStatus,
+          linkedPrescriptionValidUntil: linkedPrescriptionValidUntil,
         ) !=
         null) {
       return false;
@@ -64,10 +67,9 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
   /// Cancelled).
   Future<bool> cancelOrder(Order order) async {
     if (!canCancel(order.status)) return false;
-    await ref.read(orderRepositoryProvider).updateStatus(
-      order.id,
-      OrderStatus.cancelled,
-    );
+    await ref
+        .read(orderRepositoryProvider)
+        .updateStatus(order.id, OrderStatus.cancelled);
     await refresh();
     return true;
   }
@@ -76,13 +78,16 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
   /// id). The write goes through the production data layer (Week 2
   /// Day 1): idempotency dedupe, audit entry, sync enqueue. A retry
   /// with the same [idempotencyKey] returns the original order.
-  Future<Order> createOrder(
-    Order order, {
-    String? idempotencyKey,
-  }) async {
+  Future<Order> createOrder(Order order, {String? idempotencyKey}) async {
+    final user = ref.read(authProvider);
     final result = await ref
         .read(productionDataLayerProvider)
-        .createOrder(order: order, idempotencyKey: idempotencyKey);
+        .createOrder(
+          order: order,
+          idempotencyKey: idempotencyKey,
+          actorId: user?.uid ?? demoActorId,
+          actorName: user?.name ?? demoActorName,
+        );
     await refresh();
     return result.order;
   }
