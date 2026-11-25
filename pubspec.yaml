@@ -47,6 +47,13 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   pdf: ^3.13.1
   web: ^1.1.2
+  # Week 3 Day 4 (D110): the FFI backend sqflite needs on Windows.
+  # The desktop entry point (`lib/app/desktop_bootstrap.dart`) calls
+  # `sqfliteFfiInit()` and sets `databaseFactory = databaseFactoryFfi`
+  # before the sync store opens, so the queue persists on Windows.
+  # Web never imports this — the web sync store is in-memory
+  # (`sync_store_web.dart`).
+  sqflite_common_ffi: ^2.4.7
 
 dev_dependencies:
   flutter_test:
