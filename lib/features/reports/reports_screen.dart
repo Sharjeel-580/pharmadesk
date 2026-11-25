@@ -2,11 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/data/permission_service.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/file_download.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../models/expense.dart';
+import '../authentication/auth_state.dart';
 import '../billing/receipt_print.dart';
+import '../finance/finance_provider.dart';
+import 'analytics_logic.dart';
 import 'reports_logic.dart';
 import 'reports_provider.dart';
 
@@ -371,6 +376,14 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                           ],
                         ),
                 ),
+                const SizedBox(height: 24),
+                _AdvancedSections(
+                  branchId: _branchId,
+                  days: _days,
+                  expiredRows: data.expired,
+                  onExportCsv: (filename, csv) =>
+                      _exportCsv(context, filename, csv),
+                ),
               ],
             ),
           ),
@@ -406,6 +419,498 @@ class _ReportSection extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         PharmaCard(child: child),
+      ],
+    );
+  }
+}
+
+/// Week 2 Day 5 advanced sections: sales trend (weekly), branch
+/// comparison, slow movers, expiry loss, profit & loss + expenses.
+/// Computed by [advancedReportDataProvider] for the same branch +
+/// window as the Day 7 sections above.
+class _AdvancedSections extends ConsumerWidget {
+  const _AdvancedSections({
+    required this.branchId,
+    required this.days,
+    required this.expiredRows,
+    required this.onExportCsv,
+  });
+
+  final String? branchId;
+  final int days;
+  final List<ReportExpiryRow> expiredRows;
+  final void Function(String filename, String csv) onExportCsv;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final advancedAsync = ref.watch(
+      advancedReportDataProvider((branchId, days)),
+    );
+    return advancedAsync.when(
+      loading: () => const SkeletonList(count: 3),
+      error: (error, _) => PharmaEmptyState(
+        icon: Icons.error_outline,
+        title: 'Advanced reports could not load',
+        message: 'The trend, comparison and P&L sections failed to load.',
+        actionLabel: 'Retry',
+        onAction: () => ref.invalidate(
+          advancedReportDataProvider((branchId, days)),
+        ),
+      ),
+      data: (advanced) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ReportSection(
+            title: 'Sales trend — weekly',
+            actionLabel: 'Export CSV',
+            onExport: () => onExportCsv(
+              'pharmadesk-weekly-trend.csv',
+              weeklyTrendCsv(advanced.weeklyTrend),
+            ),
+            child: advanced.weeklyTrend.isEmpty
+                ? const Text('No sales in this window.')
+                : Column(
+                    children: [
+                      for (final week in advanced.weeklyTrend)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.show_chart_outlined),
+                          title: Text(
+                            'Week of ${week.weekStart.day}/${week.weekStart.month}/${week.weekStart.year}',
+                          ),
+                          subtitle: Text('${week.orders} order(s)'),
+                          trailing: Text(
+                            formatPkr(week.salesMinor),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 24),
+          _ReportSection(
+            title: 'Branch comparison',
+            actionLabel: 'Export CSV',
+            onExport: () => onExportCsv(
+              'pharmadesk-branch-comparison.csv',
+              branchComparisonCsv(advanced.branchComparison),
+            ),
+            child: advanced.branchComparison.isEmpty
+                ? const Text('No branches in this scope.')
+                : Column(
+                    children: [
+                      for (final row in advanced.branchComparison)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.store_outlined),
+                          title: Text(row.branchName),
+                          subtitle: Text(
+                            'Profit ${formatPkr(row.grossProfitMinor)} • '
+                            'Stock ${formatPkr(row.stockValueMinor)} • '
+                            'Outstanding ${formatPkr(row.outstandingMinor)} • '
+                            'Expiry loss ${formatPkr(row.expiryLossMinor)}',
+                          ),
+                          trailing: Text(
+                            formatPkr(row.salesMinor),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Outstanding counts only khata entries linked to '
+                        'that branch\'s credit sales (D79) — manual '
+                        'entries are unattributed.',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 24),
+          _ReportSection(
+            title: 'Slow movers — ${advanced.slowMovers.length} medicine(s)',
+            actionLabel: 'Export CSV',
+            onExport: () => onExportCsv(
+              'pharmadesk-slow-movers.csv',
+              slowMoversCsv(advanced.slowMovers),
+            ),
+            child: advanced.slowMovers.isEmpty
+                ? const Text(
+                    'No slow movers — every stocked medicine sold in this window.',
+                  )
+                : Column(
+                    children: [
+                      for (final mover in advanced.slowMovers)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(
+                            Icons.trending_down_outlined,
+                          ),
+                          title: Text(mover.medicineName),
+                          subtitle: Text(
+                            '0 sold • ${mover.quantityOnHand} on hand',
+                          ),
+                          trailing: Text(
+                            formatPkr(mover.stockValueMinor),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 24),
+          _ReportSection(
+            title:
+                'Expiry loss — ${formatPkr(advanced.expiryLoss.lossMinor)} '
+                '(${advanced.expiryLoss.batches} batches, '
+                '${advanced.expiryLoss.units} units)',
+            actionLabel: 'Export CSV',
+            onExport: () => onExportCsv(
+              'pharmadesk-expiry-loss.csv',
+              expiryLossCsv(
+                expiredRows,
+                totalLossMinor: advanced.expiryLoss.lossMinor,
+              ),
+            ),
+            child: Text(
+              advanced.expiryLoss.lossMinor == 0
+                  ? 'No expired stock on hand — nothing lost to expiry in this scope.'
+                  : 'Expired batches on hand are worth '
+                        '${formatPkr(advanced.expiryLoss.lossMinor)} at '
+                        'cost price (${advanced.expiryLoss.units} units '
+                        'across ${advanced.expiryLoss.batches} batches). '
+                        'See the Expiry section above for the batch list.',
+            ),
+          ),
+          const SizedBox(height: 24),
+          _ProfitLossSection(
+            profitLoss: advanced.profitLoss,
+            expenses: advanced.expenses,
+            branchId: branchId,
+            onExportCsv: onExportCsv,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Profit & loss + the expense list behind it, with a Record
+/// expense action (gated on `financeEntry`).
+class _ProfitLossSection extends ConsumerWidget {
+  const _ProfitLossSection({
+    required this.profitLoss,
+    required this.expenses,
+    required this.branchId,
+    required this.onExportCsv,
+  });
+
+  final ProfitLoss profitLoss;
+  final List<Expense> expenses;
+  final String? branchId;
+  final void Function(String filename, String csv) onExportCsv;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final user = ref.watch(authProvider);
+    final activeBranchId = ref.watch(activeBranchProvider).id;
+    final expenseBranchId = branchId ?? activeBranchId;
+    final mayRecord = permissionService.canWrite(
+      user,
+      'financeEntry',
+      expenseBranchId,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _ReportSection(
+          title: 'Profit & loss',
+          actionLabel: 'Export CSV',
+          onExport: () => onExportCsv(
+            'pharmadesk-profit-loss.csv',
+            profitLossCsv(profitLoss),
+          ),
+          child: Column(
+            children: [
+              _PlRow(
+                label: 'Sales revenue',
+                amountMinor: profitLoss.revenueMinor,
+              ),
+              _PlRow(
+                label: 'Cost of goods sold',
+                amountMinor: -profitLoss.cogsMinor,
+              ),
+              _PlRow(
+                label: 'Gross profit',
+                amountMinor: profitLoss.grossProfitMinor,
+                bold: true,
+              ),
+              _PlRow(
+                label: 'Other income',
+                amountMinor: profitLoss.otherIncomeMinor,
+              ),
+              _PlRow(
+                label: 'Operating expenses',
+                amountMinor: -profitLoss.expensesMinor,
+              ),
+              const Divider(height: 16),
+              _PlRow(
+                label: 'Net profit',
+                amountMinor: profitLoss.netProfitMinor,
+                bold: true,
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Revenue is orders + POS sales with refunds subtracted; '
+                'cost of goods uses the sold batch cost (D81). Expenses '
+                'come from the list below.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        SectionHeader(
+          title: 'Expenses — ${expenses.length} in this window',
+          actionLabel: 'Record expense',
+          actionIcon: Icons.add_outlined,
+          onAction: mayRecord
+              ? () => _showExpenseDialog(context, ref, expenseBranchId)
+              : null,
+        ),
+        const SizedBox(height: 12),
+        if (!mayRecord)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text(
+              'Recording expenses needs the "Finance: income/expense '
+              'entry" permission (SRS §5.1) — Owner, HO Admin, '
+              'Accountant, or your own Branch Manager / Cashier.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        PharmaCard(
+          child: expenses.isEmpty
+              ? const Text('No expenses recorded in this window.')
+              : Column(
+                  children: [
+                    for (var i = 0; i < expenses.length; i++) ...[
+                      if (i > 0) const Divider(height: 1),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.receipt_outlined),
+                        title: Text(
+                          expenses[i].description.isEmpty
+                              ? expenses[i].category
+                              : expenses[i].description,
+                        ),
+                        subtitle: Text(
+                          '${expenses[i].category} • '
+                          '${expenses[i].expenseDate.day}/${expenses[i].expenseDate.month}/${expenses[i].expenseDate.year}',
+                        ),
+                        trailing: Text(
+                          formatPkr(expenses[i].amountMinor),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showExpenseDialog(
+    BuildContext context,
+    WidgetRef ref,
+    String branchId,
+  ) async {
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => _ExpenseDialog(branchId: branchId),
+    );
+    if (saved == true && context.mounted) {
+      ref.invalidate(advancedReportDataProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Expense recorded.')),
+      );
+    }
+  }
+}
+
+class _PlRow extends StatelessWidget {
+  const _PlRow({
+    required this.label,
+    required this.amountMinor,
+    this.bold = false,
+  });
+
+  final String label;
+  final int amountMinor;
+  final bool bold;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: style)),
+          Text(formatPkr(amountMinor), style: style),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExpenseDialog extends ConsumerStatefulWidget {
+  const _ExpenseDialog({required this.branchId});
+
+  final String branchId;
+
+  @override
+  ConsumerState<_ExpenseDialog> createState() => _ExpenseDialogState();
+}
+
+class _ExpenseDialogState extends ConsumerState<_ExpenseDialog> {
+  final _amount = TextEditingController();
+  final _description = TextEditingController();
+  String _category = expenseCategories.first;
+  DateTime _date = DateTime.now();
+  String? _error;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final rupees = double.tryParse(_amount.text.trim()) ?? -1;
+    final amountMinor = (rupees * 100).round();
+    setState(() => _saving = true);
+    final result = await ref
+        .read(expensesProvider.notifier)
+        .recordExpense(
+          branchId: widget.branchId,
+          category: _category,
+          amountMinor: amountMinor,
+          description: _description.text,
+          expenseDate: _date,
+        );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (result.error != null) {
+      setState(() => _error = result.error);
+      return;
+    }
+    Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Record expense'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_error != null) ...[
+              PharmaErrorBox(errors: [_error!]),
+              const SizedBox(height: 12),
+            ],
+            DropdownButtonFormField<String>(
+              initialValue: _category,
+              decoration: const InputDecoration(labelText: 'Category'),
+              items: [
+                for (final category in expenseCategories)
+                  DropdownMenuItem<String>(
+                    value: category,
+                    child: Text(category),
+                  ),
+              ],
+              onChanged: (selected) {
+                if (selected != null) setState(() => _category = selected);
+              },
+            ),
+            const SizedBox(height: 12),
+            PharmaTextField(
+              controller: _amount,
+              label: 'Amount (Rs)',
+              hintText: 'e.g. 5000',
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            PharmaTextField(
+              controller: _description,
+              label: 'Description',
+              hintText: 'e.g. Electricity bill — November',
+              maxLines: 2,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Date: ${_date.day}/${_date.month}/${_date.year}',
+                  ),
+                ),
+                PharmaButton(
+                  label: 'Change date',
+                  variant: PharmaButtonVariant.secondary,
+                  size: PharmaButtonSize.small,
+                  onPressed: () async {
+                    final now = DateTime.now();
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: _date,
+                      firstDate: now.subtract(const Duration(days: 365)),
+                      lastDate: now,
+                    );
+                    if (picked != null) setState(() => _date = picked);
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Recording also writes a financial-transactions entry, '
+              'so the P&L and the transaction feed always agree.',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        PharmaButton(
+          label: 'Cancel',
+          variant: PharmaButtonVariant.text,
+          size: PharmaButtonSize.small,
+          onPressed: () => Navigator.of(context).pop(false),
+        ),
+        PharmaButton(
+          label: 'Record',
+          size: PharmaButtonSize.small,
+          loading: _saving,
+          onPressed: _save,
+        ),
       ],
     );
   }
