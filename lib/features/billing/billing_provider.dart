@@ -1,7 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/data/production_data_layer.dart';
+import '../../core/data/sync_queue.dart';
 import '../../core/services/repositories.dart';
+import '../../features/authentication/auth_state.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/sale.dart';
 import '../customers/customer_logic.dart';
@@ -31,8 +33,21 @@ import 'billing_logic.dart';
 /// sale: [_completing] blocks a second run while one is in flight, and
 /// every sale carries a client-generated idempotency key (SRS
 /// FR-POS-11) that the data layer uses as the Firestore document id.
+/// The key is minted once per cart ([pendingSaleKey], D54) and held
+/// across retries: a failed attempt keeps the key, so the retry
+/// dedupes against the original commit instead of minting a new key
+/// and double-charging stock. A successful sale clears it.
 class SaleNotifier extends AsyncNotifier<List<Sale>> {
   bool _completing = false;
+
+  /// Idempotency key for the cart currently being completed, minted
+  /// on the first attempt and held until the sale succeeds (D54).
+  /// `null` when no completion is in progress.
+  String? _pendingSaleKey;
+
+  /// The key a retry would reuse (`null` when no completion is in
+  /// progress). Test seam for the D54 guarantee.
+  String? get pendingSaleKey => _pendingSaleKey;
 
   @override
   Future<List<Sale>> build() async {
@@ -51,6 +66,10 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
   /// `null` sale + an error message when validation, stock or the
   /// credit limit forbids it. On failure nothing is saved and no
   /// stock is decremented.
+  ///
+  /// [idempotencyKey] mints the held key when none is held yet
+  /// (tests / callers that mint their own). A key already held from
+  /// an earlier attempt wins — the retry must reuse it (D54).
   Future<({Sale? sale, String? error})> completeSale({
     required String branchId,
     String? customerId,
@@ -60,14 +79,16 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
     int taxRatePercent = 0,
     required SalePaymentMethod paymentMethod,
     int cashReceivedMinor = 0,
+    String? idempotencyKey,
   }) async {
     if (_completing) {
-      return (
-        sale: null,
-        error: 'Sale already in progress — please wait.',
-      );
+      return (sale: null, error: 'Sale already in progress — please wait.');
     }
     _completing = true;
+    // Mint once per cart, hold across retries (D54): a retry after a
+    // failed attempt reuses this key, so the layer dedupes instead
+    // of committing a second sale.
+    _pendingSaleKey ??= idempotencyKey ?? newIdempotencyKey('sale-$branchId');
     try {
       // Live stock for this branch, grouped per medicine.
       final inventory = await ref
@@ -121,6 +142,7 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
         taxRatePercent: taxRatePercent,
         paymentMethod: paymentMethod,
         cashReceivedMinor: cashReceivedMinor,
+        idempotencyKey: _pendingSaleKey,
       );
 
       // Commit through the production data layer (Week 2 Day 1):
@@ -145,11 +167,15 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
       final commit = await layer.commitSale(
         sale: sale,
         decrements: allocation.decrements,
+        actorId: ref.read(authProvider)?.uid ?? demoActorId,
         actorName: cashierName,
         creditLedgerEntry: creditEntry,
       );
-      final saved = commit.sale;
+      final Sale saved = commit.sale;
 
+      // The sale committed (or was a duplicate of an earlier commit
+      // with the same key): the held key is spent.
+      _pendingSaleKey = null;
       await refresh();
       _invalidateDependents();
       return (sale: saved, error: null);
@@ -167,13 +193,14 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
     ref.invalidate(inventoryProvider);
     ref.invalidate(dashboardKpisProvider);
     ref.invalidate(dashboardAlertsProvider);
-    ref.invalidate(branchPerformanceProvider);
+    ref.invalidate(branchComparisonProvider);
     ref.invalidate(orderInventoryProvider);
   }
 }
 
-final salesProvider =
-    AsyncNotifierProvider<SaleNotifier, List<Sale>>(SaleNotifier.new);
+final salesProvider = AsyncNotifierProvider<SaleNotifier, List<Sale>>(
+  SaleNotifier.new,
+);
 
 /// Sales for one branch, newest first (sales history is branch-scoped).
 final branchSalesProvider = Provider.family<List<Sale>, String>((
@@ -183,9 +210,8 @@ final branchSalesProvider = Provider.family<List<Sale>, String>((
   final sales = ref.watch(salesProvider).asData?.value ?? const [];
   final scoped = sales.where((sale) => sale.branchId == branchId).toList()
     ..sort(
-      (a, b) => (b.createdAt ?? DateTime(0)).compareTo(
-        a.createdAt ?? DateTime(0),
-      ),
+      (a, b) =>
+          (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)),
     );
   return scoped;
 });

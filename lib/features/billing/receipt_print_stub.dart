@@ -8,3 +8,6 @@ bool get canPrintReceipt => false;
 
 /// No-op on non-web targets.
 void printReceipt() {}
+
+/// No-op on non-web targets.
+void printText(String text) {}

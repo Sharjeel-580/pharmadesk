@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../models/customer.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/sale.dart';
@@ -12,8 +13,10 @@ import '../authentication/auth_state.dart';
 import '../inventory/inventory_logic.dart';
 import '../inventory/inventory_provider.dart';
 import '../medicines/medicine_logic.dart';
+import 'barcode_scanner.dart';
 import 'billing_logic.dart';
 import 'billing_provider.dart';
+import 'parked_sales.dart';
 import '../customers/customers_provider.dart';
 
 /// POS / billing screen (Day 6, SRS §8 + FR-POS-01–04, FR-POS-09).
@@ -45,18 +48,32 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   final _billDiscountController = TextEditingController();
   final _cashReceivedController = TextEditingController();
 
+  /// Barcode scan field (Week 2 Day 4): a hardware wedge scanner
+  /// types the code here + Enter; the field keeps focus after a scan
+  /// so the next scan lands in it without a tap.
+  final _scanController = TextEditingController();
+  final _scanFocusNode = FocusNode();
+
+  /// Free-text note held with a parked sale (not part of the saved
+  /// sale — the Sale model has no notes field).
+  final _notesController = TextEditingController();
+
   String _query = '';
   List<CartLine> _lines = [];
   String? _customerId;
   SalePaymentMethod _paymentMethod = SalePaymentMethod.cash;
   int _taxRatePercent = 0;
   List<String> _errors = [];
+  String? _scanMessage;
   bool _completing = false;
 
   @override
   void dispose() {
     _billDiscountController.dispose();
     _cashReceivedController.dispose();
+    _scanController.dispose();
+    _scanFocusNode.dispose();
+    _notesController.dispose();
     super.dispose();
   }
 
@@ -83,9 +100,21 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     taxMinor: _taxMinor,
   );
 
-  void _addMedicine(Medicine medicine) {
+  void _addMedicine(Medicine medicine, {required int sellableStock}) {
     final index = _lines.indexWhere((l) => l.medicineId == medicine.id);
+    // The cart may never hold more than the sellable stock — the
+    // pick row, the scan path and the + stepper all funnel through
+    // here, so the cap is enforced once.
+    if (index != -1 && _lines[index].quantity >= sellableStock) {
+      setState(
+        () => _errors = [
+          '${medicine.name}: only $sellableStock unit(s) sellable in stock.',
+        ],
+      );
+      return;
+    }
     setState(() {
+      _errors = [];
       if (index == -1) {
         _lines = [
           ..._lines,
@@ -101,6 +130,115 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           ..[index] = line.copyWith(quantity: line.quantity + 1);
       }
     });
+  }
+
+  /// Submits the scan field: barcode → medicine → FEFO batch pick,
+  /// through the pure scan lookup (barcode_scanner.dart). Expired
+  /// stock is refused with the reason shown — never added.
+  void _submitScan() {
+    final code = _scanController.text.trim();
+    if (code.isEmpty) return;
+    final branch = ref.read(activeBranchProvider);
+    final medicines = ref.read(medicinesProvider).asData?.value ?? [];
+    final inventory = ref.read(branchInventoryProvider(branch.id));
+    final result = scanBarcode(
+      medicines: medicines,
+      batchesByMedicine: groupBatchesByMedicine(inventory),
+      code: code,
+    );
+    _scanController.clear();
+    switch (result.outcome) {
+      case BarcodeScanOutcome.found:
+        setState(() => _scanMessage = null);
+        _addMedicine(
+          result.medicine!,
+          sellableStock: result.sellableQuantity,
+        );
+      case BarcodeScanOutcome.notFound:
+        setState(
+          () => _scanMessage = 'No medicine with barcode "$code".',
+        );
+      case BarcodeScanOutcome.notSellable:
+        setState(
+          () => _scanMessage =
+              '${result.medicine!.name}: all batches expired or out of '
+              'stock — cannot be added.',
+        );
+    }
+    _scanFocusNode.requestFocus();
+  }
+
+  /// Demo action: feeds the first sellable catalogue barcode through
+  /// the same scan path a hardware scan would take (typed/pasted
+  /// codes use the field above).
+  void _simulateScan() {
+    final branch = ref.read(activeBranchProvider);
+    final medicines = ref.read(medicinesProvider).asData?.value ?? [];
+    final inventory = ref.read(branchInventoryProvider(branch.id));
+    final byMedicine = groupBatchesByMedicine(inventory);
+    for (final medicine in medicines) {
+      final barcode = medicine.barcode;
+      if (barcode == null) continue;
+      if (canSellMedicine(byMedicine[medicine.id] ?? const [])) {
+        _scanController.text = barcode;
+        _submitScan();
+        return;
+      }
+    }
+    setState(
+      () => _scanMessage = 'No sellable medicine with a barcode right now.',
+    );
+  }
+
+  /// Parks the current cart (lines + customer + notes) so the
+  /// cashier can serve the next customer. Payment method, discounts
+  /// and tax are set again on resume — only the cart itself is held.
+  /// Nothing is reserved: stock is checked again at completion.
+  void _holdSale() {
+    if (_lines.isEmpty) return;
+    final branch = ref.read(activeBranchProvider);
+    final user = ref.read(authProvider);
+    final parked = ref.read(parkedSalesProvider.notifier).park(
+      branchId: branch.id,
+      lines: _lines,
+      customerId: _customerId,
+      notes: _notesController.text.trim(),
+      cashierName: user?.name ?? 'Counter Staff',
+    );
+    if (parked == null) return;
+    setState(() {
+      _lines = [];
+      _customerId = null;
+      _errors = [];
+      _scanMessage = null;
+      _notesController.clear();
+      _billDiscountController.clear();
+      _cashReceivedController.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Sale held — resume it from Held sales below.'),
+      ),
+    );
+  }
+
+  /// Resumes a held sale back into the cart (lines + customer +
+  /// notes) and removes it from the held list.
+  void _resumeParked(ParkedSale parked) {
+    final resumed = ref.read(parkedSalesProvider.notifier).resume(parked.id);
+    if (resumed == null) return;
+    setState(() {
+      _lines = List.of(resumed.lines);
+      _customerId = resumed.customerId;
+      _notesController.text = resumed.notes;
+      _errors = [];
+      _scanMessage = null;
+    });
+  }
+
+  void _discardParked(ParkedSale parked) {
+    ref.read(parkedSalesProvider.notifier).discard(parked.id);
+    setState(() {});
   }
 
   void _changeQuantity(String medicineId, int delta) {
@@ -205,9 +343,27 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             title: 'Billing & POS',
             subtitle:
                 '${branch.name} • Cashier: ${user?.name ?? 'Counter Staff'}',
-            actionLabel: 'Sales history',
-            actionIcon: Icons.history_outlined,
-            onAction: () => context.go('/billing/history'),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              PharmaButton(
+                label: 'Sales history',
+                icon: Icons.history_outlined,
+                variant: PharmaButtonVariant.secondary,
+                size: PharmaButtonSize.small,
+                onPressed: () => context.go('/billing/history'),
+              ),
+              PharmaButton(
+                label: 'Returns & refunds',
+                icon: Icons.keyboard_return_outlined,
+                variant: PharmaButtonVariant.secondary,
+                size: PharmaButtonSize.small,
+                onPressed: () => context.go('/billing/returns'),
+              ),
+            ],
           ),
           if (_errors.isNotEmpty) ...[
             const SizedBox(height: 16),
@@ -227,6 +383,50 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   hintText: 'Search medicines or scan a barcode…',
                   onChanged: (value) => setState(() => _query = value),
                 ),
+                const SizedBox(height: 12),
+                // Dedicated barcode scan input (Week 2 Day 4): a wedge
+                // scanner types the code + Enter; the field keeps
+                // focus after a scan. "Simulate scan" feeds the first
+                // sellable catalogue barcode through the same path.
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: const ValueKey('pos-scan-field'),
+                        controller: _scanController,
+                        focusNode: _scanFocusNode,
+                        autofocus: true,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          labelText: 'Scan barcode',
+                          hintText: 'Scan or type a barcode, then Enter',
+                          prefixIcon: Icon(Icons.barcode_reader),
+                          isDense: true,
+                        ),
+                        onSubmitted: (_) => _submitScan(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    PharmaButton(
+                      key: const ValueKey('pos-simulate-scan'),
+                      label: 'Simulate scan',
+                      icon: Icons.qr_code_scanner_outlined,
+                      variant: PharmaButtonVariant.secondary,
+                      size: PharmaButtonSize.small,
+                      onPressed: _simulateScan,
+                    ),
+                  ],
+                ),
+                if (_scanMessage != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _scanMessage!,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: StatusKind.danger.color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 if (matching.isEmpty)
                   const Padding(
@@ -239,7 +439,12 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                       medicine: medicine,
                       batches:
                           inventoryByMedicine[medicine.id] ?? const [],
-                      onAdd: () => _addMedicine(medicine),
+                      onAdd: () => _addMedicine(
+                        medicine,
+                        sellableStock: sellableStockFor(
+                          inventoryByMedicine[medicine.id] ?? const [],
+                        ),
+                      ),
                     ),
               ],
             ),
@@ -313,6 +518,13 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                 ],
               ],
             ),
+          ),
+          const SizedBox(height: 16),
+          _HeldSalesCard(
+            parkedSales: ref.watch(branchParkedSalesProvider(branch.id)),
+            customers: customers,
+            onResume: _resumeParked,
+            onDiscard: _discardParked,
           ),
           const SizedBox(height: 16),
           PharmaCard(
@@ -439,17 +651,131 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                     onChanged: (_) => setState(() {}),
                   ),
                 ],
+                const SizedBox(height: 12),
+                PharmaTextField(
+                  controller: _notesController,
+                  label: 'Sale notes (optional)',
+                  hintText: 'Held with the sale when parked — e.g. coming back in an hour',
+                ),
               ],
             ),
           ),
           const SizedBox(height: 24),
-          PharmaButton(
-            label: _completing ? 'Completing sale…' : 'Complete Sale',
-            icon: Icons.point_of_sale_outlined,
-            loading: _completing,
-            expand: true,
-            onPressed: _completing || _lines.isEmpty ? null : _completeSale,
+          Row(
+            children: [
+              PharmaButton(
+                key: const ValueKey('pos-hold-sale'),
+                label: 'Hold sale',
+                icon: Icons.pause_circle_outline,
+                variant: PharmaButtonVariant.secondary,
+                onPressed: _lines.isEmpty ? null : _holdSale,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: PharmaButton(
+                  label: _completing ? 'Completing sale…' : 'Complete Sale',
+                  icon: Icons.point_of_sale_outlined,
+                  loading: _completing,
+                  expand: true,
+                  onPressed: _completing || _lines.isEmpty
+                      ? null
+                      : _completeSale,
+                ),
+              ),
+            ],
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Held (parked) sales for this branch (Week 2 Day 4): lines +
+/// customer + notes, held in the session. Resuming loads the cart
+/// back; discarding drops it. Held carts never touch stock, so a
+/// held sale that can no longer be fulfilled fails at completion
+/// like any other sale.
+class _HeldSalesCard extends StatelessWidget {
+  const _HeldSalesCard({
+    required this.parkedSales,
+    required this.customers,
+    required this.onResume,
+    required this.onDiscard,
+  });
+
+  final List<ParkedSale> parkedSales;
+  final List<Customer> customers;
+  final ValueChanged<ParkedSale> onResume;
+  final ValueChanged<ParkedSale> onDiscard;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return PharmaCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SectionHeader(
+            title: 'Held sales (${parkedSales.length})',
+            subtitle: parkedSales.isEmpty
+                ? 'No held sales — hold the current cart to serve the next customer first.'
+                : 'Lines, customer and notes are held; payment and discounts are set again on resume.',
+          ),
+          if (parkedSales.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final parked in parkedSales)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${parked.lines.length} item(s) • ${formatPkr(parked.subtotalMinor)}',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Text(
+                            [
+                              if (parked.customerId != null)
+                                customers
+                                    .where(
+                                      (c) => c.id == parked.customerId,
+                                    )
+                                    .map((c) => c.name)
+                                    .firstOrNull ??
+                                'Walk-in',
+                              'Held ${parked.parkedAt.hour.toString().padLeft(2, '0')}:${parked.parkedAt.minute.toString().padLeft(2, '0')} • ${parked.cashierName}',
+                              if (parked.notes.isNotEmpty) parked.notes,
+                            ].join(' • '),
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    PharmaButton(
+                      key: ValueKey('pos-resume-${parked.id}'),
+                      label: 'Resume',
+                      icon: Icons.play_circle_outline,
+                      size: PharmaButtonSize.small,
+                      onPressed: () => onResume(parked),
+                    ),
+                    const SizedBox(width: 8),
+                    PharmaButton(
+                      key: ValueKey('pos-discard-${parked.id}'),
+                      label: 'Discard',
+                      icon: Icons.delete_outline,
+                      variant: PharmaButtonVariant.secondary,
+                      size: PharmaButtonSize.small,
+                      onPressed: () => onDiscard(parked),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         ],
       ),
     );

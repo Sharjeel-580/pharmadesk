@@ -70,10 +70,7 @@ int cartSubtotalMinor(Iterable<CartLine> lines) {
 
 /// Tax on a taxable amount at a whole-percent rate, in int paisa.
 /// Integer division truncates — the demo never rounds tax up.
-int computeTaxMinor({
-  required int taxableMinor,
-  required int taxRatePercent,
-}) {
+int computeTaxMinor({required int taxableMinor, required int taxRatePercent}) {
   if (taxableMinor <= 0 || taxRatePercent <= 0) return 0;
   return taxableMinor * taxRatePercent ~/ 100;
 }
@@ -90,10 +87,7 @@ int billTotalMinor({
 
 /// Change owed to a cash customer: received − total, or 0 when the
 /// customer paid exact or short.
-int changeDueMinor({
-  required int totalMinor,
-  required int cashReceivedMinor,
-}) {
+int changeDueMinor({required int totalMinor, required int cashReceivedMinor}) {
   final change = cashReceivedMinor - totalMinor;
   return change < 0 ? 0 : change;
 }
@@ -188,8 +182,7 @@ List<String> validateSale({
       if (customerId == null || customerId.isEmpty) {
         errors.add('Credit sales need a customer — pick one first.');
       }
-      if (creditLimitMinor > 0 &&
-          outstandingMinor + total > creditLimitMinor) {
+      if (creditLimitMinor > 0 && outstandingMinor + total > creditLimitMinor) {
         errors.add(
           'Credit limit exceeded: outstanding ${formatPkr(outstandingMinor)} '
           '+ this sale ${formatPkr(total)} is over the limit '
@@ -259,7 +252,9 @@ allocateFefo({
 /// Builds the [Sale] to save from a validated cart. The id and invoice
 /// number are assigned by the repository; [idempotencyKey] is
 /// client-generated (SRS FR-POS-11) so a retried write can never
-/// duplicate the sale.
+/// duplicate the sale. When omitted a fresh key is minted — callers
+/// that retry (the POS notifier, D54) pass the key they minted on the
+/// first attempt so the retry dedupes against the original commit.
 Sale buildSale({
   required String branchId,
   String? customerId,
@@ -269,6 +264,7 @@ Sale buildSale({
   required int taxRatePercent,
   required SalePaymentMethod paymentMethod,
   int cashReceivedMinor = 0,
+  String? idempotencyKey,
 }) {
   final subtotal = items.fold(0, (sum, item) => sum + item.lineTotalMinor);
   final tax = computeTaxMinor(
@@ -287,6 +283,7 @@ Sale buildSale({
       ? changeDueMinor(totalMinor: total, cashReceivedMinor: received)
       : 0;
   final key =
+      idempotencyKey ??
       'sale-$branchId-${DateTime.now().millisecondsSinceEpoch}';
   return Sale(
     id: '',

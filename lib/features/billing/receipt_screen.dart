@@ -249,6 +249,13 @@ class ReceiptScreen extends ConsumerWidget {
                 variant: PharmaButtonVariant.secondary,
                 onPressed: () => context.go('/billing'),
               ),
+              PharmaButton(
+                label: 'Return items',
+                icon: Icons.keyboard_return_outlined,
+                variant: PharmaButtonVariant.secondary,
+                onPressed: () =>
+                    context.go('/billing/returns/new?sale=${sale.id}'),
+              ),
               if (customer != null)
                 PharmaButton(
                   label: 'View customer',
