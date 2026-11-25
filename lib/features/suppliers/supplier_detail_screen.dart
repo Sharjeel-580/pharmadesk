@@ -2,11 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/permission_service.dart';
+import '../../core/services/branch_context.dart';
+import '../../core/utils/file_download.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/purchase_order.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
+import '../../models/supplier_payment.dart';
+import '../authentication/auth_state.dart';
+import '../finance/finance_logic.dart';
+import '../finance/finance_provider.dart';
 import '../purchases/purchases_provider.dart';
 import 'supplier_logic.dart';
 import 'suppliers_provider.dart';
@@ -41,6 +48,17 @@ class SupplierDetailScreen extends ConsumerWidget {
       );
     }
     final outstanding = ref.watch(supplierOutstandingProvider(supplierId));
+    final aging = ref.watch(supplierAgingProvider(supplierId));
+    final user = ref.watch(authProvider);
+    final activeBranchId = ref.watch(activeBranchProvider).id;
+    // Supplier payment is an Owner / HO Admin / Accountant action
+    // (SRS §5.1 `supplierPay`) — a Branch Manager may NOT pay a
+    // supplier, even for their own branch (D89).
+    final mayPay = permissionService.canWrite(
+      user,
+      'supplierPay',
+      activeBranchId,
+    );
     final theme = Theme.of(context);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -131,6 +149,8 @@ class SupplierDetailScreen extends ConsumerWidget {
                   ],
                 ),
                 const SizedBox(height: 12),
+                _AgingChips(aging: aging),
+                const SizedBox(height: 12),
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
@@ -147,7 +167,7 @@ class SupplierDetailScreen extends ConsumerWidget {
                       label: 'Record payment',
                       size: PharmaButtonSize.small,
                       icon: Icons.payments_outlined,
-                      onPressed: outstanding <= 0
+                      onPressed: outstanding <= 0 || !mayPay
                           ? null
                           : () => _showLedgerDialog(
                               context,
@@ -167,11 +187,22 @@ class SupplierDetailScreen extends ConsumerWidget {
                     ),
                   ],
                 ),
+                if (!mayPay) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Paying a supplier needs the "Supplier payment" '
+                    'permission (SRS §5.1) — Owner, HO Admin or '
+                    'Accountant. You are signed in as '
+                    '${user?.roleLabel ?? 'staff'}.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
                 const SizedBox(height: 8),
                 Text(
                   'Outstanding is always computed from the ledger below — '
                   'never stored (same append-only pattern as the customer '
-                  'khata).',
+                  'khata). Payments are allocated against the oldest open '
+                  'payables first.',
                   style: theme.textTheme.bodySmall,
                 ),
               ],
@@ -194,7 +225,66 @@ class SupplierDetailScreen extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
+          Row(
+            children: [
+              PharmaButton(
+                label: 'Export statement (CSV)',
+                variant: PharmaButtonVariant.secondary,
+                size: PharmaButtonSize.small,
+                icon: Icons.download_outlined,
+                onPressed: () => _exportStatement(context, ref, supplier),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
           _LedgerList(supplierId: supplier.id),
+          const SizedBox(height: 24),
+          const SectionHeader(title: 'Payments'),
+          const SizedBox(height: 12),
+          _PaymentsList(supplierId: supplier.id),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _exportStatement(
+    BuildContext context,
+    WidgetRef ref,
+    Supplier supplier,
+  ) async {
+    final entries = ref
+            .read(supplierLedgerProvider(supplier.id))
+            .asData
+            ?.value ??
+        const <SupplierLedgerEntry>[];
+    final csv = supplierStatementCsv(entries);
+    if (canDownloadFile) {
+      downloadTextFile(
+        'pharmadesk-supplier-statement-${supplier.id}.csv',
+        csv,
+        'text/csv',
+      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Statement downloaded.')),
+        );
+      }
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Supplier statement'),
+        content: SingleChildScrollView(
+          child: SelectableText(csv),
+        ),
+        actions: [
+          PharmaButton(
+            label: 'Close',
+            variant: PharmaButtonVariant.text,
+            size: PharmaButtonSize.small,
+            onPressed: () => Navigator.of(dialogContext).pop(),
+          ),
         ],
       ),
     );
@@ -298,6 +388,97 @@ class _PurchaseHistory extends ConsumerWidget {
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
               onTap: () => context.go('/purchases/${orders[i].id}'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AgingChips extends StatelessWidget {
+  const _AgingChips({required this.aging});
+
+  final AgingSummary aging;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Payable aging',
+          style: Theme.of(
+            context,
+          ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final bucket in AgingBucket.values)
+              StatusBadge(
+                label:
+                    '${agingBucketLabel(bucket)}: ${formatPkr(aging.bucket(bucket))}',
+                kind: bucket == AgingBucket.days90plus &&
+                        aging.bucket(bucket) > 0
+                    ? StatusKind.danger
+                    : bucket == AgingBucket.current
+                        ? StatusKind.success
+                        : StatusKind.warning,
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Payments settle the oldest purchases first, so each bucket '
+          'shows what is still owed from purchases of that age.',
+          style: TextStyle(fontSize: 12),
+        ),
+      ],
+    );
+  }
+}
+
+class _PaymentsList extends ConsumerWidget {
+  const _PaymentsList({required this.supplierId});
+
+  final String supplierId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final payments = ref.watch(
+      supplierPaymentsForSupplierProvider(supplierId),
+    );
+    if (payments.isEmpty) {
+      return const PharmaCard(
+        child: Text(
+          'No payments recorded through the payment flow yet. '
+          'Historical payments (e.g. the MedServe bank transfer in '
+          'the opening ledger) live as ledger entries below.',
+        ),
+      );
+    }
+    return PharmaCard(
+      child: Column(
+        children: [
+          for (var i = 0; i < payments.length; i++) ...[
+            if (i > 0) const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.payments_outlined),
+              title: Text(
+                '${supplierPaymentMethodLabel(payments[i].method)}'
+                '${payments[i].reference.isEmpty ? '' : ' • ${payments[i].reference}'}',
+              ),
+              subtitle: Text(
+                '${payments[i].paidAt.day}/${payments[i].paidAt.month}/${payments[i].paidAt.year} • '
+                'allocated to ${payments[i].allocations.length} open payable(s)',
+              ),
+              trailing: Text(
+                formatPkr(payments[i].amountMinor),
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
             ),
           ],
         ],
@@ -524,6 +705,8 @@ class _LedgerEntryDialog extends ConsumerStatefulWidget {
 class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
   final _amount = TextEditingController();
   final _reason = TextEditingController();
+  final _reference = TextEditingController();
+  SupplierPaymentMethod _method = SupplierPaymentMethod.cash;
   bool _isIncrease = true;
   String? _error;
   bool _saving = false;
@@ -539,12 +722,37 @@ class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
   void dispose() {
     _amount.dispose();
     _reason.dispose();
+    _reference.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     final rupees = double.tryParse(_amount.text.trim()) ?? -1;
     final amountMinor = (rupees * 100).round();
+    // Payments go through the allocated payment flow (Week 2 Day 5):
+    // oldest payables first, plus the ledger entry and the finance
+    // transaction — not a bare ledger write.
+    if (widget.kind == SupplierLedgerEntryKind.payment) {
+      setState(() => _saving = true);
+      final result = await ref
+          .read(supplierPaymentsProvider.notifier)
+          .recordPayment(
+            supplierId: widget.supplierId,
+            branchId: ref.read(activeBranchProvider).id,
+            amountMinor: amountMinor,
+            method: _method,
+            reference: _reference.text,
+            reason: _reason.text,
+          );
+      if (!mounted) return;
+      setState(() => _saving = false);
+      if (result.error != null) {
+        setState(() => _error = result.error);
+        return;
+      }
+      Navigator.of(context).pop(true);
+      return;
+    }
     final entries =
         ref.read(supplierLedgerProvider(widget.supplierId)).asData?.value ??
         const <SupplierLedgerEntry>[];
@@ -603,6 +811,35 @@ class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
               label: 'Reason',
               hintText: 'e.g. Payment made — bank transfer',
             ),
+            if (widget.kind == SupplierLedgerEntryKind.payment) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<SupplierPaymentMethod>(
+                initialValue: _method,
+                decoration: const InputDecoration(labelText: 'Method'),
+                items: [
+                  for (final method in SupplierPaymentMethod.values)
+                    DropdownMenuItem<SupplierPaymentMethod>(
+                      value: method,
+                      child: Text(supplierPaymentMethodLabel(method)),
+                    ),
+                ],
+                onChanged: (selected) {
+                  if (selected != null) setState(() => _method = selected);
+                },
+              ),
+              const SizedBox(height: 12),
+              PharmaTextField(
+                controller: _reference,
+                label: 'Reference (optional)',
+                hintText: 'e.g. bank transaction id / cheque no.',
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'The payment is allocated against the oldest open '
+                'payables first and also recorded in finance.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
             if (widget.kind == SupplierLedgerEntryKind.adjustment) ...[
               const SizedBox(height: 12),
               SwitchListTile(
