@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/data/sync_queue.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/inventory_item.dart';
@@ -96,6 +97,14 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 3 Day 5, D115 — closes the
+  /// D54 UI gap for this dialog): minted once for the dialog's
+  /// lifetime and reused on a retried submit, so a retry after a
+  /// failed submit dedupes in the layer instead of creating a
+  /// second batch. Same pattern as the PO receiving dialog (D103).
+  late final String _idempotencyKey =
+      newIdempotencyKey('stock-receive-${widget.branchId}');
+
   @override
   void initState() {
     super.initState();
@@ -153,17 +162,32 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
       _error = null;
       _saving = true;
     });
-    final created = await ref
-        .read(inventoryProvider.notifier)
-        .receiveStock(
-          branchId: widget.branchId,
-          medicineId: _medicineId!,
-          batchNo: _batchNoController.text.trim(),
-          mfgDate: _mfgDate,
-          expiryDate: _expiryDate,
-          quantity: qty!,
-          costMinor: rupeesToMinorUnits(costRupees!),
-        );
+    // A failed submit stays in the dialog with the error shown and
+    // the button re-enabled, so the user CAN retry — and the retry
+    // reuses [_idempotencyKey] (D115). Before this, a layer throw
+    // left the dialog stuck on loading with no retry path at all.
+    InventoryItem? created;
+    try {
+      created = await ref
+          .read(inventoryProvider.notifier)
+          .receiveStock(
+            branchId: widget.branchId,
+            medicineId: _medicineId!,
+            batchNo: _batchNoController.text.trim(),
+            mfgDate: _mfgDate,
+            expiryDate: _expiryDate,
+            quantity: qty!,
+            costMinor: rupeesToMinorUnits(costRupees!),
+            idempotencyKey: _idempotencyKey,
+          );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = 'Receive failed — please try again.';
+      });
+      return;
+    }
     if (!mounted) return;
     Navigator.of(context).pop(created);
   }
@@ -285,6 +309,11 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 3 Day 5, D115 — closes the
+  /// D54 UI gap for this dialog): minted once, reused on retry.
+  late final String _idempotencyKey =
+      newIdempotencyKey('stock-adjust-${widget.batch.id}');
+
   @override
   void initState() {
     super.initState();
@@ -327,6 +356,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
           batchId: widget.batch.id,
           deltaQty: _increase ? amount : -amount,
           reason: reason,
+          idempotencyKey: _idempotencyKey,
         );
     if (!mounted) return;
     if (updated == null) {
@@ -436,6 +466,11 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 3 Day 5, D115 — closes the
+  /// D54 UI gap for this dialog): minted once, reused on retry.
+  late final String _idempotencyKey =
+      newIdempotencyKey('stock-count-${widget.batch.id}');
+
   @override
   void initState() {
     super.initState();
@@ -472,6 +507,7 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
           note: _noteController.text.trim().isEmpty
               ? null
               : _noteController.text.trim(),
+          idempotencyKey: _idempotencyKey,
         );
     if (!mounted) return;
     if (result == null) {

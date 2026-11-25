@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import 'inventory_logic.dart';
@@ -88,6 +89,16 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
             actionLabel: 'Receive stock',
             actionIcon: Icons.add_box_outlined,
             onAction: () => _openReceive(context, ref, branch.id),
+          ),
+          const SizedBox(height: 12),
+          // Sync status (Week 3 Day 3, D108; Day 4, D111; Day 5,
+          // D114): stock receive / adjust / count now write through
+          // the production data layer and enqueue one sync payload
+          // each, so this chip shows a live pending count for stock
+          // work.
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: SyncStatusChip(),
           ),
           const SizedBox(height: 16),
           SegmentedButton<bool>(
