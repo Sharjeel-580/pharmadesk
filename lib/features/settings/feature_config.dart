@@ -87,6 +87,13 @@ const featureModules = <FeatureModuleConfig>[
     route: '/reports',
   ),
   FeatureModuleConfig(
+    key: 'staff',
+    title: 'Staff & HR',
+    description:
+        'Staff directory, roles, attendance and shifts.',
+    route: '/staff',
+  ),
+  FeatureModuleConfig(
     key: 'notifications',
     title: 'Notifications',
     description: 'Low-stock, expiry and order alerts.',

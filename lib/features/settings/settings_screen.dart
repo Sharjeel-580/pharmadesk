@@ -5,6 +5,7 @@ import '../../core/services/branch_context.dart';
 import '../../core/theme/theme_mode_provider.dart';
 import '../../core/theme/white_label.dart';
 import '../../core/widgets/design_system.dart';
+import '../../features/billing/receipt_printer.dart';
 import 'feature_config.dart';
 import 'roles_permissions.dart';
 
@@ -165,6 +166,8 @@ class _GeneralTab extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 16),
+          const _PrinterCard(),
+          const SizedBox(height: 16),
           PharmaCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -185,6 +188,156 @@ class _GeneralTab extends ConsumerWidget {
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Printer ------------------------------------------------------------
+
+/// Receipt printer settings (Week 2 Day 4): printer name + type,
+/// with a test print that actually prints and a cash-drawer test.
+/// The browser type prints through the web print dialog today;
+/// network / USB report their (not yet implemented) status honestly
+/// instead of pretending to print (see `receipt_printer.dart`).
+class _PrinterCard extends ConsumerStatefulWidget {
+  const _PrinterCard();
+
+  @override
+  ConsumerState<_PrinterCard> createState() => _PrinterCardState();
+}
+
+class _PrinterCardState extends ConsumerState<_PrinterCard> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
+  bool _printing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = ref.read(printerSettingsProvider);
+    _nameController = TextEditingController(text: settings.name);
+    _hostController = TextEditingController(text: settings.networkHost);
+    _portController = TextEditingController(text: '${settings.networkPort}');
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _hostController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runPrinterAction(
+    Future<PrinterResult> Function(ReceiptPrinter printer) action,
+  ) async {
+    setState(() => _printing = true);
+    final printer = ref.read(receiptPrinterProvider);
+    final result = await action(printer);
+    if (!mounted) return;
+    setState(() => _printing = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(result.message)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(printerSettingsProvider);
+    final printer = ref.watch(receiptPrinterProvider);
+    final theme = Theme.of(context);
+    final notifier = ref.read(printerSettingsProvider.notifier);
+    return PharmaCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Receipt printer',
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(printer.status.message),
+          const SizedBox(height: 12),
+          PharmaTextField(
+            controller: _nameController,
+            label: 'Printer name',
+            hintText: 'e.g. Counter printer',
+            onChanged: (value) => notifier.setName(value),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Printer type',
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          DropdownButton<PrinterType>(
+            key: const ValueKey('printer-type-dropdown'),
+            value: settings.type,
+            isExpanded: true,
+            items: [
+              for (final type in PrinterType.values)
+                DropdownMenuItem(
+                  value: type,
+                  child: Text(printerTypeLabel(type)),
+                ),
+            ],
+            onChanged: (type) {
+              if (type != null) notifier.setType(type);
+            },
+          ),
+          if (settings.type == PrinterType.network) ...[
+            const SizedBox(height: 12),
+            PharmaTextField(
+              controller: _hostController,
+              label: 'Printer IP / hostname',
+              hintText: 'e.g. 192.168.1.50',
+              onChanged: (value) => notifier.setNetworkHost(value),
+            ),
+            const SizedBox(height: 12),
+            PharmaTextField(
+              controller: _portController,
+              label: 'Port',
+              hintText: '9100',
+              keyboardType: TextInputType.number,
+              onChanged: (value) {
+                final port = int.tryParse(value.trim());
+                if (port != null && port > 0) notifier.setNetworkPort(port);
+              },
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              PharmaButton(
+                key: const ValueKey('printer-test-print'),
+                label: _printing ? 'Printing…' : 'Test print',
+                icon: Icons.print_outlined,
+                loading: _printing,
+                onPressed: _printing
+                    ? null
+                    : () => _runPrinterAction(
+                        (p) => p.printText(
+                          testReceiptText(ref.read(printerSettingsProvider)),
+                        ),
+                      ),
+              ),
+              PharmaButton(
+                label: 'Open cash drawer',
+                icon: Icons.point_of_sale_outlined,
+                variant: PharmaButtonVariant.secondary,
+                onPressed: _printing
+                    ? null
+                    : () => _runPrinterAction((p) => p.openCashDrawer()),
+              ),
+            ],
           ),
         ],
       ),

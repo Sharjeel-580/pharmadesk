@@ -76,6 +76,8 @@ const roleCapabilities = <RoleCapability>[
   RoleCapability(key: 'financeEntry', label: 'Finance: income/expense entry'),
   RoleCapability(key: 'financeReports', label: 'Finance: P&L, statements'),
   RoleCapability(key: 'reports', label: 'Reports (all)'),
+  RoleCapability(key: 'hrAttendance', label: 'HR: attendance, shifts'),
+  RoleCapability(key: 'hrSalary', label: 'HR: salary records'),
   RoleCapability(key: 'auditLog', label: 'Audit log view'),
   RoleCapability(key: 'sysSettings', label: 'System settings / backup'),
 ];
@@ -308,6 +310,40 @@ const rolePermissionMatrix = <String, List<RolePermission>>{
     RolePermission.own,
     RolePermission.own,
     RolePermission.own,
+    RolePermission.allowed,
+    RolePermission.readOnly,
+  ],
+  // SRS §5.1 "HR: attendance, shifts" (Week 2 Day 5, D89): Super
+  // Admin none, Owner allowed, HO Admin allowed, Regional Mgr
+  // none, Branch Mgr own, Pharmacist none, Cashier none, Inventory
+  // Mgr none, Accountant none, Auditor read-only.
+  'hrAttendance': [
+    RolePermission.none,
+    RolePermission.allowed,
+    RolePermission.allowed,
+    RolePermission.none,
+    RolePermission.own,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.readOnly,
+  ],
+  // SRS §5.1 "HR: salary records" (Week 2 Day 5, D89): only Owner,
+  // HO Admin and the Accountant hold it (all-branches); Auditor
+  // read-only; everyone else none. Salary figures are not shown in
+  // the Day 5 staff directory — the capability exists so the
+  // salary screen, when it lands, gates on the matrix instead of
+  // a job title.
+  'hrSalary': [
+    RolePermission.none,
+    RolePermission.allowed,
+    RolePermission.allowed,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.none,
     RolePermission.allowed,
     RolePermission.readOnly,
   ],
