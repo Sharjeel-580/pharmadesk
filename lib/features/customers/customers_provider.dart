@@ -1,8 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/services/branch_context.dart';
 import '../../core/services/repositories.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/financial_transaction.dart';
 import 'customer_logic.dart';
 
 /// Day 6 customer state.
@@ -70,6 +72,9 @@ class CustomerDirectoryNotifier extends AsyncNotifier<List<Customer>> {
                       ),
                     ],
             ),
+            // The Firestore implementation stores customers in branch
+            // subcollections (Week 2 Day 3); the mock ignores this.
+            branchId: ref.read(activeBranchProvider).id,
           );
       await refresh();
       return (customer: created, error: null);
@@ -158,6 +163,27 @@ class LedgerNotifier extends AsyncNotifier<List<LedgerEntry>> {
               createdAt: DateTime.now(),
             ),
           );
+      // Week 2 Day 5: a khata payment is money in — mirror it in
+      // the financial-transactions feed (type `customerPayment`,
+      // positive amount), the same pairing the expense and supplier
+      // payment flows write. Credit sales and adjustments are not
+      // money movement, so they write no transaction.
+      if (kind == LedgerEntryKind.payment) {
+        await ref
+            .read(financialTransactionRepositoryProvider)
+            .addTransaction(
+              FinancialTransaction(
+                id: '',
+                branchId: ref.read(activeBranchProvider).id,
+                type: FinancialTransactionType.customerPayment,
+                amountMinor: amountMinor,
+                category: 'Customer payment',
+                referenceType: 'customer_payment',
+                referenceId: created.id,
+                createdAt: DateTime.now(),
+              ),
+            );
+      }
       await refresh();
       return (entry: created, error: null);
     } on ArgumentError catch (error) {
@@ -166,15 +192,15 @@ class LedgerNotifier extends AsyncNotifier<List<LedgerEntry>> {
   }
 }
 
-final ledgerProvider = AsyncNotifierProvider.family<
-  LedgerNotifier,
-  List<LedgerEntry>,
-  String
->(LedgerNotifier.new);
+final ledgerProvider =
+    AsyncNotifierProvider.family<LedgerNotifier, List<LedgerEntry>, String>(
+      LedgerNotifier.new,
+    );
 
 /// Outstanding khata balance for one customer, in int paisa —
 /// computed from the ledger, never stored.
 final outstandingProvider = Provider.family<int, String>((ref, customerId) {
-  final entries = ref.watch(ledgerProvider(customerId)).asData?.value ?? const [];
+  final entries =
+      ref.watch(ledgerProvider(customerId)).asData?.value ?? const [];
   return outstandingMinor(entries);
 });

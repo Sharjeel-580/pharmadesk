@@ -9,6 +9,8 @@ import '../../models/order.dart';
 import '../../models/sale.dart';
 import '../billing/billing_provider.dart';
 import '../dashboard/dashboard_data.dart';
+import '../finance/finance_logic.dart';
+import '../finance/finance_provider.dart';
 import '../orders/orders_provider.dart';
 import 'customers_provider.dart';
 
@@ -44,6 +46,7 @@ class CustomerDetailScreen extends ConsumerWidget {
       );
     }
     final outstanding = ref.watch(outstandingProvider(customerId));
+    final aging = ref.watch(customerAgingProvider(customerId));
     final ledgerAsync = ref.watch(ledgerProvider(customerId));
     final orders = ref
         .watch(orderQueueProvider)
@@ -130,6 +133,41 @@ class CustomerDetailScreen extends ConsumerWidget {
                   bold: true,
                   danger: outstanding > 0,
                 ),
+                if (outstanding > 0) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    'Khata aging',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final bucket in AgingBucket.values)
+                        StatusBadge(
+                          label:
+                              '${agingBucketLabel(bucket)}: ${formatPkr(aging.bucket(bucket))}',
+                          kind:
+                              bucket == AgingBucket.days90plus &&
+                                  aging.bucket(bucket) > 0
+                              ? StatusKind.danger
+                              : bucket == AgingBucket.current
+                                  ? StatusKind.success
+                                  : StatusKind.warning,
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Payments settle the oldest credit first, so each '
+                    'bucket shows what is still owed from credit of '
+                    'that age.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ],
               ],
             ),
           ),
