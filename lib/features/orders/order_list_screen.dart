@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../models/customer.dart';
 import '../../models/order.dart';
 import '../dashboard/dashboard_data.dart';
@@ -57,6 +58,13 @@ class _OrderListScreenState extends ConsumerState<OrderListScreen> {
             actionLabel: 'New Order',
             actionIcon: Icons.add_shopping_cart_outlined,
             onAction: () => context.go('/orders/new'),
+          ),
+          const SizedBox(height: 12),
+          // Sync status (Week 3 Day 3, D108/D109): order creation
+          // enqueues one sync op through the production data layer.
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: SyncStatusChip(),
           ),
           const SizedBox(height: 16),
           PharmaSearchField(

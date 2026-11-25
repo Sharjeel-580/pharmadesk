@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/data/production_data_layer.dart';
 import '../../core/services/repositories.dart';
 import '../../core/utils/money.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../features/authentication/auth_state.dart';
 import '../../models/customer.dart';
 import '../../models/inventory_item.dart';
@@ -89,6 +90,9 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
           actorName: user?.name ?? demoActorName,
         );
     await refresh();
+    // Order creation enqueues one sync op (D108) — the sync chip on
+    // the orders screen re-reads the queue.
+    ref.invalidate(syncStatusProvider);
     return result.order;
   }
 
