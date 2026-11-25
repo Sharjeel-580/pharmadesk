@@ -499,6 +499,25 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Salary records (Week 3 Day 2, D102): readable only by the
+    // `hrSalary` holders (owner / ho_admin / accountant; auditor
+    // reads via inBranch, like the other read rules — the matrix's
+    // read-only is a UI rule, the server rule is branch-scoped
+    // read). Writes are owner / ho_admin / accountant only; the
+    // net must equal base + allowances − deductions and all money
+    // must be ints.
+    match /branches/{branchId}/salaries/{salaryId} {
+      allow read: if inBranch(branchId, resource.data.organizationId)
+        && role() in ['owner', 'ho_admin', 'accountant', 'auditor'];
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['owner', 'ho_admin', 'accountant']
+        && hasCommonFields()
+        && moneyIsInt('baseSalaryMinor')
+        && moneyIsInt('netMinor');
+      allow delete: if false;
+    }
+
     match /branches/{branchId}/attendances/{attId} {
       allow read: if inBranch(branchId, resource.data.organizationId);
       allow create, update: if inBranchForWrite(branchId,
@@ -565,9 +584,18 @@ service cloud.firestore {
 
     // Pre-computed counters / sequential numbers (SRS §2.9). Only
     // head-office + branch manager roles move them, always upward.
+    // Daily rollup counters (Week 3 Day 3, D105) are the exception:
+    // `counters/daily-{yyyy-MM-dd}` docs are written ONLY by the
+    // counters rollup Function with the Admin SDK (rules do not
+    // apply to Admin SDK writes), so clients can never write them —
+    // a client that could write its own counters could fake the
+    // reports. The write rule below excludes `daily-*` ids, and the
+    // `value is int` check would reject the rollup's map value
+    // anyway; the read rule still lets branch members read them.
     match /branches/{branchId}/counters/{counterId} {
       allow read: if inBranch(branchId, resource.data.organizationId);
-      allow create, update: if inBranchForWrite(branchId,
+      allow create, update: if !counterId.matches('daily-.*')
+        && inBranchForWrite(branchId,
             request.resource.data.organizationId)
         && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
         && request.resource.data.value is int
