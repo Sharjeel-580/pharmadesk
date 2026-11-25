@@ -8,6 +8,8 @@ import '../../features/authentication/profile_screen.dart';
 import '../../features/authentication/splash_screen.dart';
 import '../../features/billing/pos_screen.dart';
 import '../../features/billing/receipt_screen.dart';
+import '../../features/billing/return_form_screen.dart';
+import '../../features/billing/returns_list_screen.dart';
 import '../../features/billing/sales_history_screen.dart';
 import '../../features/customers/customer_detail_screen.dart';
 import '../../features/customers/customer_list_screen.dart';
@@ -21,12 +23,16 @@ import '../../features/orders/order_form_screen.dart';
 import '../../features/orders/order_list_screen.dart';
 import '../../features/prescriptions/prescription_detail_screen.dart';
 import '../../features/prescriptions/prescription_list_screen.dart';
+import '../../features/purchases/auto_purchase_list_screen.dart';
 import '../../features/purchases/purchase_detail_screen.dart';
 import '../../features/purchases/purchase_form_screen.dart';
 import '../../features/purchases/purchase_list_screen.dart';
 import '../../features/reports/reports_screen.dart';
 import '../../features/settings/feature_gate.dart';
 import '../../features/settings/settings_screen.dart';
+import '../../features/staff/attendance_screen.dart';
+import '../../features/staff/shifts_screen.dart';
+import '../../features/staff/staff_list_screen.dart';
 import '../../features/suppliers/supplier_detail_screen.dart';
 import '../../features/suppliers/supplier_list_screen.dart';
 import '../widgets/design_system.dart';
@@ -127,6 +133,14 @@ const appModules = <AppModule>[
     icon: Icons.bar_chart_outlined,
     description: 'Sales, profit, stock valuation and expiry reports.',
     day: 'Week 1 — Day 7',
+  ),
+  AppModule(
+    title: 'Staff & HR',
+    route: '/staff',
+    icon: Icons.badge_outlined,
+    description:
+        'Staff directory, roles, attendance and shifts.',
+    day: 'Week 2 — Day 5',
   ),
   AppModule(
     title: 'Notifications',
@@ -305,6 +319,22 @@ GoRouter createAppRouter({
             ),
           ),
           GoRoute(
+            path: '/billing/returns',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const ReturnsListScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/billing/returns/new',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: ReturnFormScreen(
+                saleId: state.uri.queryParameters['sale'],
+              ),
+            ),
+          ),
+          GoRoute(
             path: '/billing/receipt/:id',
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
@@ -363,6 +393,13 @@ GoRouter createAppRouter({
             ),
           ),
           GoRoute(
+            path: '/purchases/auto',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const AutoPurchaseListScreen(),
+            ),
+          ),
+          GoRoute(
             path: '/purchases/:id',
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
@@ -392,6 +429,27 @@ GoRouter createAppRouter({
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
               child: const ReportsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/staff',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const StaffListScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/staff/attendance',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const AttendanceScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/staff/shifts',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const ShiftsScreen(),
             ),
           ),
           GoRoute(
