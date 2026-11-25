@@ -58,15 +58,14 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
     return null;
   }
 
-  void _requestCode() {
+  Future<void> _requestCode() async {
     if (!(_emailFormKey.currentState?.validate() ?? false)) return;
-    final code = ref
+    final code = await ref
         .read(authProvider.notifier)
         .requestPasswordReset(_emailController.text);
     if (code == null) {
       setState(
-        () => _error =
-            'No demo account found for this email. Use one of the demo accounts from the sign-in screen.',
+        () => _error = 'No demo account found for this email. Use one of the demo accounts from the sign-in screen.',
       );
       return;
     }
@@ -77,9 +76,9 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
     });
   }
 
-  void _resetPassword() {
+  Future<void> _resetPassword() async {
     if (!(_resetFormKey.currentState?.validate() ?? false)) return;
-    final error = ref
+    final error = await ref
         .read(authProvider.notifier)
         .resetPassword(
           email: _emailController.text,
@@ -167,11 +166,7 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              Icons.error_outline,
-              size: 18,
-              color: theme.colorScheme.error,
-            ),
+            Icon(Icons.error_outline, size: 18, color: theme.colorScheme.error),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -261,9 +256,8 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
             hintText: '6-digit code shown above',
             prefixIcon: Icons.pin_outlined,
             keyboardType: TextInputType.number,
-            validator: (value) => (value ?? '').trim().isEmpty
-                ? 'Enter the reset code.'
-                : null,
+            validator: (value) =>
+                (value ?? '').trim().isEmpty ? 'Enter the reset code.' : null,
           ),
           const SizedBox(height: 12),
           PharmaTextField(
@@ -272,10 +266,9 @@ class _ForgotPasswordScreenState extends ConsumerState<ForgotPasswordScreen> {
             hintText: 'At least 6 characters',
             prefixIcon: Icons.lock_outline,
             obscureText: true,
-            validator: (value) =>
-                (value ?? '').length < 6
-                    ? 'Password must be at least 6 characters.'
-                    : null,
+            validator: (value) => (value ?? '').length < 6
+                ? 'Password must be at least 6 characters.'
+                : null,
           ),
           const SizedBox(height: 12),
           PharmaTextField(

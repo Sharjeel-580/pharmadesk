@@ -50,9 +50,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     return null;
   }
 
-  void _signIn() {
+  Future<void> _signIn() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    final error = ref
+    final error = await ref
         .read(authProvider.notifier)
         .signIn(_emailController.text, _passwordController.text);
     if (error != null) {
@@ -62,8 +62,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     if (mounted) context.go('/dashboard');
   }
 
-  void _signInAsDemo(DemoRole role) {
-    ref.read(authProvider.notifier).signInAsDemo(role);
+  Future<void> _signInAsDemo(DemoRole role) async {
+    await ref.read(authProvider.notifier).signInAsDemo(role);
     if (mounted) context.go('/dashboard');
   }
 
@@ -282,10 +282,7 @@ class _DemoAccountCard extends StatelessWidget {
               color: theme.colorScheme.primary.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(
-              role.icon,
-              color: theme.colorScheme.primary,
-            ),
+            child: Icon(role.icon, color: theme.colorScheme.primary),
           ),
           const SizedBox(width: 12),
           Expanded(
