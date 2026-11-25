@@ -5,13 +5,15 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/pagination_controls.dart';
 import '../../models/sale.dart';
 import '../customers/customers_provider.dart';
 import 'billing_provider.dart';
 
 /// Sales history (Day 6): every completed POS sale for the active
 /// branch, newest first. Route `/billing/history`. Tapping a sale
-/// opens its receipt.
+/// opens its receipt. Paged at the shared page size (Week 3 Day 3,
+/// D107) — a long session's history is pages, not one endless list.
 class SalesHistoryScreen extends ConsumerWidget {
   const SalesHistoryScreen({super.key});
 
@@ -42,20 +44,9 @@ class SalesHistoryScreen extends ConsumerWidget {
             )
           else
             PharmaCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (var i = 0; i < sales.length; i++) ...[
-                    _SaleRow(sale: sales[i]),
-                    if (i < sales.length - 1)
-                      Divider(
-                        height: 1,
-                        color: Theme.of(
-                          context,
-                        ).dividerColor.withValues(alpha: 0.4),
-                      ),
-                  ],
-                ],
+              child: PagedList<Sale>(
+                items: sales,
+                itemBuilder: (context, sale) => _SaleRow(sale: sale),
               ),
             ),
         ],

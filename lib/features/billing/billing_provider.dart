@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/data/production_data_layer.dart';
 import '../../core/data/sync_queue.dart';
 import '../../core/services/repositories.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../features/authentication/auth_state.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/sale.dart';
@@ -195,6 +196,9 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
     ref.invalidate(dashboardAlertsProvider);
     ref.invalidate(branchComparisonProvider);
     ref.invalidate(orderInventoryProvider);
+    // A completed sale enqueues one sync op (D103/D108) — the sync
+    // chip on the POS screen re-reads the queue.
+    ref.invalidate(syncStatusProvider);
   }
 }
 

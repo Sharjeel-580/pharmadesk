@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../models/customer.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
@@ -343,6 +344,14 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             title: 'Billing & POS',
             subtitle:
                 '${branch.name} • Cashier: ${user?.name ?? 'Counter Staff'}',
+          ),
+          const SizedBox(height: 12),
+          // Sync status (Week 3 Day 3, D108/D109): every completed
+          // sale enqueues one sync op through the production data
+          // layer — the chip shows the pending count live.
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: SyncStatusChip(),
           ),
           const SizedBox(height: 12),
           Wrap(
