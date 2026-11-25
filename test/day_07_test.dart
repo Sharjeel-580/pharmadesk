@@ -984,6 +984,7 @@ void main() {
         '/purchases',
         '/prescriptions',
         '/staff',
+        '/staff/salary',
         '/reports',
         '/notifications',
         '/settings',
