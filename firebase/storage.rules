@@ -1,0 +1,136 @@
+rules_version = '2';
+
+// PharmaDesk — Cloud Storage security rules (DRAFT, Week 2 Day 1).
+//
+// STATUS: DRAFT ONLY. There is no Firebase project yet (D13), so these
+// rules are NOT deployed anywhere. The backend is Firebase **Blaze**
+// (D62, 25 Nov 2026) — Cloud Storage is available on Blaze, so
+// prescription photos live in Cloud Storage, NOT on-device only.
+// Deploy with the Firebase CLI once the project exists:
+//   firebase deploy --only storage
+//
+// LAYOUT (branch-scoped, mirrors the Firestore model):
+//   organizations/{orgId}/branches/{branchId}/prescriptions/{prescriptionId}.jpg
+//   organizations/{orgId}/medicines/{medicineId}.jpg
+//   organizations/{orgId}/brand/logo.png
+//
+// The Firestore prescription doc carries the metadata
+// (`photoStoragePath`, `photoContentType`, `photoUploadedAt`,
+// `photoUploadedBy`); the bytes live here. `localPhotoPath` on the
+// doc is the on-device cache copy, not the source of truth.
+//
+// DESIGN (same claims model as `firestore.rules`):
+// - Deny by default; every rule grants a narrow permission.
+// - Roles and branch access come from Firebase Auth CUSTOM CLAIMS
+//   (`orgId`, `branchIds[]`, `role` — see `firebase/README.md`).
+// - A user may read/write objects only under their org, and only for
+//   branches in their claims (head-office roles read all branches).
+// - Auditor is read-only everywhere.
+// - Prescription photos: images only, ≤ 10 MB. No public URLs are
+//   ever stored in Firestore — clients fetch a short-lived download
+//   URL from Storage at read time, or read through the SDK with the
+//   same auth.
+// - The bundled SAMPLE prescription images in the demo stay local
+//   assets (`assets/images/prescriptions/`) — they are never uploaded
+//   here.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function orgId() {
+      return request.auth.token.get('orgId', '');
+    }
+
+    function role() {
+      return request.auth.token.get('role', '');
+    }
+
+    function branchIds() {
+      return request.auth.token.get('branchIds', []);
+    }
+
+    function isAuditor() {
+      return role() == 'auditor';
+    }
+
+    function isHeadOffice() {
+      return role() in ['super_admin', 'owner', 'ho_admin',
+                        'accountant', 'auditor'];
+    }
+
+    function inBranch(branchId) {
+      return isSignedIn()
+        && (branchId in branchIds() || isHeadOffice());
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function sizeWithin(mb) {
+      return request.resource.size < mb * 1024 * 1024;
+    }
+
+    // ---------- prescription photos ----------
+    // organizations/{orgId}/branches/{branchId}/prescriptions/{file}
+    match /organizations/{orgId}/branches/{branchId}/prescriptions/{file} {
+      allow read: if isSignedIn() && orgId() == orgId
+        && inBranch(branchId);
+      // Uploaded by staff who take the prescription at the counter.
+      allow create: if isSignedIn() && orgId() == orgId
+        && branchId in branchIds()
+        && !isAuditor()
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'cashier']
+        && isImage() && sizeWithin(10);
+      // Re-upload (clearer photo) replaces the object; metadata
+      // update on the Firestore doc is a separate write.
+      allow update: if isSignedIn() && orgId() == orgId
+        && branchId in branchIds()
+        && !isAuditor()
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist']
+        && isImage() && sizeWithin(10);
+      // Only the owner / HO admin may delete a prescription photo.
+      allow delete: if isSignedIn() && orgId() == orgId
+        && role() in ['super_admin', 'owner', 'ho_admin'];
+    }
+
+    // ---------- medicine catalogue images ----------
+    // organizations/{orgId}/medicines/{file}
+    match /organizations/{orgId}/medicines/{file} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow create, update: if isSignedIn() && orgId() == orgId
+        && !isAuditor()
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'pharmacist']
+        && isImage() && sizeWithin(5);
+      allow delete: if isSignedIn() && orgId() == orgId
+        && role() in ['super_admin', 'owner', 'ho_admin'];
+    }
+
+    // ---------- organization brand logo ----------
+    // organizations/{orgId}/brand/logo.png
+    match /organizations/{orgId}/brand/{file} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow create, update: if isSignedIn() && orgId() == orgId
+        && role() in ['super_admin', 'owner', 'ho_admin']
+        && isImage() && sizeWithin(5);
+      allow delete: if isSignedIn() && orgId() == orgId
+        && role() in ['super_admin', 'owner'];
+    }
+
+    // ---------- scheduled backups (Functions only) ----------
+    // organizations/{orgId}/backups/{file} — written by the scheduled
+    // backup Cloud Function with the Admin SDK (bypasses rules), read
+    // by owner / HO admin only. No client write is ever allowed here.
+    match /organizations/{orgId}/backups/{file} {
+      allow read: if isSignedIn() && orgId() == orgId
+        && role() in ['super_admin', 'owner', 'ho_admin'];
+      allow create, update, delete: if false;
+    }
+  }
+}

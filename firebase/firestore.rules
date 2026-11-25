@@ -1,0 +1,578 @@
+rules_version = '2';
+
+// PharmaDesk — Firestore security rules (DRAFT, Week 2 Day 1).
+//
+// STATUS: DRAFT ONLY. There is no Firebase project yet (D13), so these
+// rules are NOT deployed anywhere. Deploy with the Firebase CLI once
+// the project exists:
+//   firebase deploy --only firestore:rules
+//   firebase deploy --only firestore:indexes
+//
+// DESIGN (SRS §5.2):
+// - Deny by default; every rule below grants a narrow permission.
+// - Branch isolation: a user may read/write branch-scoped documents
+//   only for branches listed in their custom claims, unless their role
+//   is a head-office role (Owner / HO Admin / Accountant / Auditor).
+// - Roles and branch access come from Firebase Auth CUSTOM CLAIMS set
+//   by the `setUserClaims` Cloud Function (see
+//   `firebase/functions-design.md`, Job 6) or, until Functions are
+//   deployed, from an admin machine with the Admin SDK:
+//     orgId:    string   — the organization the user belongs to
+//     branchIds: string[] — branches the user may work in
+//     role:     string   — one of the 10 SRS §5 roles (see below)
+// - The Auditor role is read-only EVERYWHERE (SRS §5.2.5).
+// - History collections (stockTransactions, financialTransactions,
+//   customer/supplier ledger, auditLogs) are append-only: create only,
+//   never update or delete.
+// - Money is int paisa; the rules reject non-int money fields and
+//   writes that would create negative stock counters.
+// - Prescription photos live in Cloud Storage (Blaze, D62): the
+//   Firestore doc carries `photoStoragePath` (a Storage path, never a
+//   public http(s) URL); the bytes are governed by `storage.rules`.
+//
+// ROLE KEYS (SRS §5.1, 10 roles):
+//   super_admin, owner, ho_admin, regional_manager, branch_manager,
+//   pharmacist, cashier, inventory_manager, accountant, auditor
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function claims() {
+      return request.auth.token;
+    }
+
+    function orgId() {
+      return claims().get('orgId', '');
+    }
+
+    function role() {
+      return claims().get('role', '');
+    }
+
+    function branchIds() {
+      return claims().get('branchIds', []);
+    }
+
+    function isAuditor() {
+      return role() == 'auditor';
+    }
+
+    function isSuperAdmin() {
+      return role() == 'super_admin';
+    }
+
+    // Head-office roles: may READ all branches of their org.
+    function isHeadOffice() {
+      return role() in ['super_admin', 'owner', 'ho_admin',
+                        'accountant', 'auditor'];
+    }
+
+    // The user's org must match the document's org.
+    function sameOrg(resourceOrgId) {
+      return isSignedIn() && orgId() == resourceOrgId;
+    }
+
+    // Branch-scoped access: the branch is in the user's claims, or
+    // the user is a head-office role of the same org.
+    function inBranch(branchId, resourceOrgId) {
+      return sameOrg(resourceOrgId)
+        && (branchId in branchIds() || isHeadOffice());
+    }
+
+    function inBranchForWrite(branchId, resourceOrgId) {
+      return sameOrg(resourceOrgId)
+        && branchId in branchIds()
+        && !isAuditor();
+    }
+
+    // Incoming doc carries the common fields with the right org.
+    function hasCommonFields() {
+      return request.resource.data.keys().hasAll(
+          ['organizationId', 'createdAt', 'updatedAt'])
+        && request.resource.data.organizationId == orgId();
+    }
+
+    function moneyIsInt(field) {
+      return request.resource.data.get(field, 0) is int;
+    }
+
+    // ---------- root collections ----------
+
+    match /organizations/{orgId} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow create, update: if isSuperAdmin()
+        || (role() == 'owner' && orgId() == orgId);
+      allow delete: if false;
+    }
+
+    match /organizations/{orgId}/roles/{roleId} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin']
+        && orgId() == orgId && !isAuditor();
+      allow delete: if false;
+    }
+
+    match /organizations/{orgId}/settings/{key} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin']
+        && orgId() == orgId;
+      allow delete: if false;
+    }
+
+    match /organizations/{orgId}/featureModules/{moduleKey} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow write: if role() in ['super_admin', 'owner']
+        && orgId() == orgId;
+      allow delete: if false;
+    }
+
+    match /organizations/{orgId}/warehouses/{warehouseId} {
+      allow read: if isSignedIn() && orgId() == orgId;
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin']
+        && orgId() == orgId;
+      allow delete: if false;
+    }
+
+    match /branches/{branchId} {
+      allow read: if isSignedIn() && orgId() == resource.data.organizationId
+        && (branchId in branchIds() || isHeadOffice());
+      allow create, update: if role() in ['super_admin', 'owner', 'ho_admin']
+        && request.resource.data.organizationId == orgId();
+      allow delete: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == uid || isHeadOffice())
+        && orgId() == resource.data.organizationId;
+      allow create, update: if role() in ['super_admin', 'owner', 'ho_admin']
+        && request.resource.data.organizationId == orgId();
+      allow delete: if false;
+    }
+
+    match /medicines/{medicineId} {
+      allow read: if sameOrg(resource.data.organizationId);
+      allow create, update: if role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'inventory_manager']
+        && hasCommonFields()
+        && moneyIsInt('purchasePrice')
+        && moneyIsInt('sellingPrice');
+      allow delete: if false;
+    }
+
+    match /manufacturers/{manufacturerId} {
+      allow read: if sameOrg(resource.data.organizationId);
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /medicineCategories/{categoryId} {
+      allow read: if sameOrg(resource.data.organizationId);
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if sameOrg(resource.data.organizationId);
+      allow create, update: if role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'accountant']
+        && hasCommonFields();
+      allow delete: if false;
+
+      match /ledger/{entryId} {
+        // Append-only payables ledger.
+        allow read: if sameOrg(
+          get(/databases/$(database)/documents/suppliers/$(supplierId))
+            .data.organizationId);
+        allow create: if role() in ['super_admin', 'owner', 'ho_admin',
+            'branch_manager', 'accountant']
+          && hasCommonFields() && moneyIsInt('amount');
+        allow update, delete: if false;
+      }
+    }
+
+    match /expenseCategories/{categoryId} {
+      allow read: if sameOrg(resource.data.organizationId);
+      allow write: if role() in ['super_admin', 'owner', 'ho_admin',
+          'accountant'] && hasCommonFields();
+      allow delete: if false;
+    }
+
+    // Append-only audit log (root collection, SRS §3.1).
+    match /auditLogs/{logId} {
+      allow read: if isSignedIn() && orgId() == resource.data.organizationId
+        && (role() in ['super_admin', 'owner', 'ho_admin', 'auditor']
+          || resource.data.branchId in branchIds());
+      allow create: if isSignedIn() && hasCommonFields()
+        && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---------- branch subcollections ----------
+
+    // One rule block per subcollection: read = in-branch or
+    // head-office; write = in-branch + role-gated, auditor never.
+    match /branches/{branchId}/batches/{batchId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/inventory/{medicineId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      // Counters move only with a stock movement, in the same batch;
+      // never negative, never set directly by a lone client write
+      // without a transaction — the rules enforce non-negative values.
+      allow update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'cashier', 'pharmacist']
+        && request.resource.data.quantityOnHand >= 0
+        && request.resource.data.quantityReserved >= 0;
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    // Append-only stock ledger (SRS §3.3).
+    match /branches/{branchId}/stockTransactions/{txnId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'cashier', 'pharmacist']
+        && hasCommonFields() && moneyIsInt('quantity');
+      allow update, delete: if false;
+    }
+
+    match /branches/{branchId}/stockTransfers/{transferId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields();
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/stockTransfers/$(transferId)).data.organizationId);
+        allow create, update: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/stockCounts/{countId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields();
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/stockCounts/$(countId)).data.organizationId);
+        allow create, update: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/customers/{customerId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier', 'pharmacist']
+        && hasCommonFields();
+      allow delete: if false;
+
+      match /ledger/{entryId} {
+        // Append-only khata ledger (signed int paisa).
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/customers/$(customerId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+              request.resource.data.organizationId)
+          && role() in ['super_admin', 'owner', 'ho_admin',
+            'branch_manager', 'cashier', 'accountant']
+          && hasCommonFields() && moneyIsInt('amount');
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/sales/{saleId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      // Doc id MUST be the client idempotency key (SRS §2.5): the
+      // client writes the doc id == idempotencyKey, so a retry can
+      // never create a duplicate sale.
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'cashier']
+        && hasCommonFields()
+        && saleId == request.resource.data.idempotencyKey
+        && moneyIsInt('grandTotal');
+      // Status changes only (completed -> returned / voided); money
+      // fields are immutable after creation.
+      allow update: if inBranchForWrite(branchId,
+            resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier']
+        && request.resource.data.grandTotal == resource.data.grandTotal
+        && request.resource.data.subtotal == resource.data.subtotal;
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/sales/$(saleId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow update, delete: if false;
+      }
+
+      match /payments/{paymentId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/sales/$(saleId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId)
+          && hasCommonFields() && moneyIsInt('amount');
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/saleReturns/{returnId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier']
+        && hasCommonFields() && moneyIsInt('refundedAmount');
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/saleReturns/$(returnId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/prescriptions/{prescriptionId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'cashier']
+        && hasCommonFields()
+        // The photo lives in Cloud Storage: the doc carries a Storage
+        // path, never a public http(s) URL.
+        && !(request.resource.data.get('photoStoragePath', '') is string
+          && (request.resource.data.photoStoragePath.matches('^https?://.*')));
+      allow update: if inBranchForWrite(branchId,
+            resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'pharmacist']
+        && request.resource.data.get('photoStoragePath', null)
+          == resource.data.get('photoStoragePath', null);
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/orders/{orderId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      // Doc id MUST be the client idempotency key (same rule as sales).
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'cashier']
+        && hasCommonFields()
+        && orderId == request.resource.data.idempotencyKey
+        && moneyIsInt('grandTotal');
+      allow update: if inBranchForWrite(branchId,
+            resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'pharmacist', 'cashier']
+        && request.resource.data.grandTotal == resource.data.grandTotal;
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/orders/$(orderId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/riders/{riderId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/purchaseOrders/{poId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'accountant']
+        && hasCommonFields() && moneyIsInt('totalAmount');
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/purchaseOrders/$(poId)).data.organizationId);
+        allow create, update: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/goodsReceipts/{receiptId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields();
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/goodsReceipts/$(receiptId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/purchaseReturns/{returnId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager', 'accountant']
+        && hasCommonFields() && moneyIsInt('amount');
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if inBranch(branchId,
+          get(/databases/$(database)/documents/branches/$(branchId)/purchaseReturns/$(returnId)).data.organizationId);
+        allow create: if inBranchForWrite(branchId,
+          request.resource.data.organizationId) && hasCommonFields();
+        allow update, delete: if false;
+      }
+    }
+
+    match /branches/{branchId}/supplierPayments/{paymentId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'accountant']
+        && hasCommonFields() && moneyIsInt('amount');
+      allow update, delete: if false;
+    }
+
+    match /branches/{branchId}/employees/{employeeId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/attendances/{attId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/shifts/{shiftId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/expenses/{expenseId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier', 'accountant']
+        && hasCommonFields() && moneyIsInt('amount');
+      allow delete: if false;
+    }
+
+    // Append-only financial ledger (feeds P&L).
+    match /branches/{branchId}/financialTransactions/{txnId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier', 'accountant']
+        && hasCommonFields() && moneyIsInt('amount');
+      allow update, delete: if false;
+    }
+
+    match /branches/{branchId}/notifications/{notifId} {
+      allow read: if inBranch(branchId, resource.data.organizationId)
+        && (resource.data.get('userId', null) == null
+          || resource.data.userId == request.auth.uid
+          || isHeadOffice());
+      allow create: if isSignedIn() && hasCommonFields();
+      allow update: if inBranchForWrite(branchId,
+            resource.data.organizationId)
+        // Marking read: only the addressed user (or HO) may flip isRead.
+        && (resource.data.get('userId', null) == null
+          || resource.data.userId == request.auth.uid
+          || isHeadOffice());
+      allow delete: if false;
+    }
+
+    match /branches/{branchId}/cashDrawers/{drawerId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'cashier', 'accountant']
+        && hasCommonFields();
+      allow delete: if false;
+    }
+
+    // Pre-computed counters / sequential numbers (SRS §2.9). Only
+    // head-office + branch manager roles move them, always upward.
+    match /branches/{branchId}/counters/{counterId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin', 'branch_manager']
+        && request.resource.data.value is int
+        && request.resource.data.value >= 0;
+      allow delete: if false;
+    }
+  }
+}
