@@ -293,6 +293,14 @@ class SyncQueue {
 
   DateTime get now => _now();
 
+  /// When the last operation synced successfully (`null` = nothing
+  /// has synced yet in this session / since the store was created).
+  /// Week 3 Day 3 (D108): the sync-status UI reads this — it is the
+  /// only "last sync" the app can state honestly, because until the
+  /// Firebase project exists the queue is only enqueued, never
+  /// drained. Set only on a real successful send, never on enqueue.
+  DateTime? lastSyncedAt;
+
   /// Enqueues a mutation. Dedupe: the same idempotency key always
   /// returns the SAME operation — a retry can never create a second
   /// queued write for the same document.
@@ -353,6 +361,7 @@ class SyncQueue {
         updatedAt: now,
       );
       await store.update(done);
+      lastSyncedAt = now;
       return SyncProcessResult(
         outcome: SyncProcessOutcome.synced,
         operation: done,

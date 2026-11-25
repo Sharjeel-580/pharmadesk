@@ -1,11 +1,17 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/customer_ledger.dart';
+import '../../models/goods_receipt.dart';
+import '../../models/inventory_item.dart';
 import '../../models/order.dart';
+import '../../models/purchase_order.dart';
 import '../../models/sale.dart';
+import '../../models/supplier_ledger.dart';
+import '../../features/purchases/purchases_logic.dart';
 import '../services/repositories.dart';
 import 'audit_log.dart';
 import 'backup_export.dart';
+import 'firestore_mappers.dart';
 import 'firestore_schema.dart';
 import 'inventory_engine.dart';
 import 'sync_queue.dart';
@@ -14,13 +20,18 @@ import 'sync_store.dart';
 /// Production data layer (Week 2 Day 1, SRS Phase 6 adapted).
 ///
 /// Wraps the existing repository interfaces and becomes the WRITE path
-/// for POS sale completion and order creation. Screens do not change:
-/// the notifiers call this layer instead of the repositories directly,
-/// and the layer does the production work around the same mock writes:
+/// for POS sale completion, order creation and — since Week 3 Day 2
+/// (D103) — goods receiving, and — since Week 3 Day 4 (D111) —
+/// standalone stock receive / adjust (including returns restock,
+/// which calls `adjustStock`), and — since Week 3 Day 5 (D114) —
+/// stock counts. Screens do not change: the notifiers
+/// call this layer instead of the repositories directly, and the
+/// layer does the production work around the same mock writes:
 ///
-/// 1. **Idempotency** — the sale/order's client key is the Firestore
-///    document id (SRS §2.5). A commit retried with the same key
-///    returns the original sale/order and moves NO stock or money.
+/// 1. **Idempotency** — the sale/order/receipt client key is the
+///    Firestore document id (SRS §2.5). A commit retried with the
+///    same key returns the original sale/order/receipt and moves NO
+///    stock or money.
 /// 2. **Stock reservation** — the engine reserves FEFO batches, the
 ///    sale is saved, then the reservation is confirmed (stock
 ///    decremented + ledger entries + audit). On any failure the
@@ -71,6 +82,77 @@ class OrderCreateResult {
   final bool isDuplicate;
 }
 
+/// Result of [ProductionDataLayer.receiveStock].
+class StockReceiveResult {
+  const StockReceiveResult({
+    required this.batch,
+    required this.movements,
+    required this.isDuplicate,
+  });
+
+  /// The batch row the repository created (the original, when
+  /// [isDuplicate] is true).
+  final InventoryItem batch;
+
+  /// Stock ledger movements the engine booked for the receive
+  /// (empty on a duplicate — the original receive already wrote
+  /// them).
+  final List<StockMovement> movements;
+
+  /// True when this key was already received: no stock moved a
+  /// second time.
+  final bool isDuplicate;
+}
+/// Result of [ProductionDataLayer.recordStockCount].
+class StockCountResult {
+  const StockCountResult({
+    required this.item,
+    required this.variance,
+    required this.movement,
+    required this.isDuplicate,
+  });
+
+  /// The batch row after the count (the original, when
+  /// [isDuplicate] is true).
+  final InventoryItem item;
+
+  /// Counted quantity minus the system quantity before the count.
+  final int variance;
+
+  /// The engine movement booked for the correction — `null` when the
+  /// count matched the system (variance 0: nothing to correct, so
+  /// no ledger movement and no sync payload).
+  final StockMovement? movement;
+
+  /// True when this key was already counted: no stock moved twice.
+  final bool isDuplicate;
+}
+
+class GoodsReceiptResult {
+  const GoodsReceiptResult({
+    required this.receipt,
+    required this.order,
+    required this.movements,
+    required this.isDuplicate,
+  });
+
+  /// The saved goods receipt (the original, when [isDuplicate] is
+  /// true).
+  final GoodsReceipt receipt;
+
+  /// The PO after this receiving step (the original's post-receive
+  /// state, when [isDuplicate] is true).
+  final PurchaseOrder order;
+
+  /// Stock ledger movements written by the receive (empty on a
+  /// duplicate — the original receive already wrote them).
+  final List<StockMovement> movements;
+
+  /// True when this key was already received: no stock or money
+  /// moved a second time.
+  final bool isDuplicate;
+}
+
 class ProductionDataLayer {
   ProductionDataLayer({
     required this.organizationId,
@@ -83,10 +165,12 @@ class ProductionDataLayer {
     required this.prescriptionRepo,
     required this.purchaseOrderRepo,
     required this.riderRepo,
+    GoodsReceiptRepository? goodsReceiptRepo,
     required this.audit,
     required this.syncQueue,
     required this.engine,
-  });
+  }) : goodsReceiptRepo =
+           goodsReceiptRepo ?? MockGoodsReceiptRepository();
 
   final String organizationId;
   final InventoryRepository inventoryRepo;
@@ -98,6 +182,13 @@ class ProductionDataLayer {
   final PrescriptionRepository prescriptionRepo;
   final PurchaseOrderRepository purchaseOrderRepo;
   final RiderRepository riderRepo;
+
+  /// The goods-receipts store. Optional in the constructor so
+  /// direct constructions (Week 2 Day 1 tests) keep working — they
+  /// get a fresh mock; the app provider passes the bundle's repo,
+  /// so the receipts the layer writes are the ones the app reads.
+  final GoodsReceiptRepository goodsReceiptRepo;
+
   final AuditLogWriter audit;
   final SyncQueue syncQueue;
   final InventoryEngine engine;
@@ -108,6 +199,26 @@ class ProductionDataLayer {
 
   /// Committed orders by idempotency key.
   final Map<String, Order> _committedOrderKeys = {};
+
+  /// Committed receiving events by idempotency key: the full
+  /// result, so a duplicate retry returns the original receipt AND
+  /// the PO state that receive produced.
+  final Map<String, GoodsReceiptResult> _committedReceiptKeys = {};
+
+  /// Committed standalone stock adjustments by idempotency key
+  /// (Week 3 Day 4, D111): a retry with the same key returns the
+  /// original movement instead of applying the delta twice.
+  final Map<String, StockMovement> _committedAdjustKeys = {};
+
+  /// Committed standalone stock receives by idempotency key
+  /// (Week 3 Day 4, D111): a retry with the same key returns the
+  /// original batch instead of creating a second batch row.
+  final Map<String, StockReceiveResult> _committedReceiveKeys = {};
+
+  /// Committed stock counts by idempotency key (Week 3 Day 5,
+  /// D114): a retry with the same key returns the original count
+  /// instead of applying the correction twice.
+  final Map<String, StockCountResult> _committedCountKeys = {};
 
   /// Restore target for backup imports (see `backup_export.dart`).
   final InMemoryRestoreSink _restoreSink = InMemoryRestoreSink();
@@ -309,8 +420,325 @@ class ProductionDataLayer {
     return OrderCreateResult(order: saved, isDuplicate: false);
   }
 
+  /// Receives goods against a purchase order through the production
+  /// write path (Week 3 Day 2, D103 — closes D95).
+  ///
+  /// The Day 7 receiving flow (per-line quantity, batch number,
+  /// mfg/expiry, partial receiving) is unchanged for the user; what
+  /// changes is WHERE the write happens. Before this, the purchases
+  /// notifier wrote straight to the inventory / PO / supplier repos
+  /// (the mock path only). Now the notifier calls this method and
+  /// the layer is the single write path:
+  ///
+  /// 1. **Idempotency** — [idempotencyKey] (minted once per receiving
+  ///    dialog submit, held across retries in the dialog) is the
+  ///    receipt's document id. A retry with the same key returns the
+  ///    original receipt and moves NO stock or money.
+  /// 2. **Receipt document** — one `goodsReceipts` doc (+ its `items`
+  ///    subcollection docs) for this delivery, via the
+  ///    [GoodsReceiptRepository] interface (mock now, Firestore when
+  ///    the bundle switches).
+  /// 3. **Stock** — one batch per received line via the inventory
+  ///    repo, booked into the engine (`receive` ledger movements +
+  ///    audit, one per batch).
+  /// 4. **Money** — the received value is charged to the supplier
+  ///    ledger as a purchase entry (same as before).
+  /// 5. **PO** — received quantities + Partially received / Received
+  ///    status, via the PO repo.
+  /// 6. **Audit + sync** — one audit entry for the receipt, and one
+  ///    batched-write sync payload (receipt doc + items + batch docs
+  ///    + stock transactions + ledger entry + PO update).
+  ///
+  /// Throws [ArgumentError] when the PO cannot receive, the lines
+  /// fail validation, or the key is invalid — the caller (the
+  /// purchases notifier) turns that into the error it already
+  /// returns, and nothing is partially applied: validation runs
+  /// before the first write.
+  Future<GoodsReceiptResult> receiveGoods({
+    required PurchaseOrder order,
+    required List<ReceivingLine> lines,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+  }) async {
+    final key =
+        idempotencyKey ?? newIdempotencyKey('receipt-${order.branchId}');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Receiving idempotency key is not valid.');
+    }
+    final existing = _committedReceiptKeys[key];
+    if (existing != null) {
+      await audit.write(
+        AuditLogEntry.create(
+          organizationId: organizationId,
+          branchId: order.branchId,
+          userId: actorId,
+          actorName: actorName,
+          action: 'goods.duplicate_receipt',
+          entityType: 'goodsReceipt',
+          entityId: existing.receipt.id,
+          summary:
+              'Duplicate receiving ignored for ${order.poNumber} '
+              '(key $key) — original receipt ${existing.receipt.receiptNumber} kept.',
+        ),
+      );
+      return GoodsReceiptResult(
+        receipt: existing.receipt,
+        order: existing.order,
+        movements: const [],
+        isDuplicate: true,
+      );
+    }
+    // A receipt with this key already in the store but NOT in the
+    // registry means a previous attempt wrote the receipt and then
+    // failed before finishing (stock / PO / ledger): retrying the
+    // same key would receive the stock a second time (the inventory
+    // repo creates a new batch row per call). Fail loudly instead
+    // of double-receiving — the receipt on file says what arrived.
+    final orphan = await goodsReceiptRepo.getById(key);
+    if (orphan != null) {
+      throw StateError(
+        'A previous receiving for ${order.poNumber} with this key '
+        'did not complete (receipt ${orphan.receiptNumber} is on '
+        'file). Check the receipt before receiving again.',
+      );
+    }
+    if (!canReceivePo(order)) {
+      throw ArgumentError(
+        'This purchase order cannot receive goods in its current state.',
+      );
+    }
+    final errors = validateReceiving(lines);
+    if (errors.isNotEmpty) {
+      throw ArgumentError(errors.first);
+    }
+    final receivedLines = lines
+        .where((line) => line.quantityReceivedNow > 0)
+        .toList();
+    final receivedValueMinor = receivedLines.fold(
+      0,
+      (sum, line) => sum + line.quantityReceivedNow * line.item.unitCostMinor,
+    );
+
+    // The receipt documents this delivery (id = the idempotency key).
+    final receipt = GoodsReceipt(
+      id: key,
+      poId: order.id,
+      supplierId: order.supplierId,
+      branchId: order.branchId,
+      receivedBy: actorName,
+      receivedAt: DateTime.now(),
+      items: [
+        for (final line in receivedLines)
+          GoodsReceiptItem(
+            medicineId: line.item.medicineId,
+            medicineName: line.item.medicineName,
+            quantityReceived: line.quantityReceivedNow,
+            batchNo: line.batchNo.trim(),
+            mfgDate: line.mfgDate!,
+            expiryDate: line.expiryDate!,
+            unitCostMinor: line.item.unitCostMinor,
+          ),
+      ],
+    );
+    final saved = await goodsReceiptRepo.createGoodsReceipt(receipt);
+
+    // Load the engine from live stock, then receive each line: the
+    // repo creates the batch row, the engine books it (counter +
+    // receive ledger movement + audit).
+    final batches = await inventoryRepo.getInventory(
+      branchId: order.branchId,
+    );
+    engine.loadBatches(batches);
+    final createdBatches = <InventoryItem>[];
+    for (final line in receivedLines) {
+      final created = await inventoryRepo.receiveStock(
+        branchId: order.branchId,
+        medicineId: line.item.medicineId,
+        batchNo: line.batchNo.trim(),
+        mfgDate: line.mfgDate!,
+        expiryDate: line.expiryDate!,
+        quantity: line.quantityReceivedNow,
+        costMinor: line.item.unitCostMinor,
+      );
+      createdBatches.add(created);
+    }
+    final movements = await engine.receive(
+      batches: createdBatches,
+      receiptId: saved.id,
+      userId: actorId,
+      actorName: actorName,
+      reason: 'Goods received — ${order.poNumber}',
+    );
+
+    // PO: received quantities + new status.
+    final updatedItems = applyReceiving(order.items, lines);
+    final updated = order.copyWith(
+      items: updatedItems,
+      status: statusAfterReceiving(order.copyWith(items: updatedItems)),
+    );
+    await purchaseOrderRepo.updatePurchaseOrder(updated);
+
+    // Supplier ledger: the received value is charged as a purchase.
+    SupplierLedgerEntry? ledgerEntry;
+    if (receivedValueMinor > 0) {
+      ledgerEntry = await supplierRepo.addLedgerEntry(
+        SupplierLedgerEntry(
+          id: '',
+          supplierId: order.supplierId,
+          kind: SupplierLedgerEntryKind.purchase,
+          amountMinor: receivedValueMinor,
+          reason: 'Goods received — ${order.poNumber}',
+          referenceId: order.id,
+          balanceAfterMinor: 0, // set by the repository
+          createdAt: DateTime.now(),
+        ),
+      );
+      await audit.write(
+        AuditLogEntry.moneyMovement(
+          organizationId: organizationId,
+          branchId: order.branchId,
+          userId: actorId,
+          actorName: actorName,
+          ledgerType: 'supplierLedger',
+          ledgerOwnerId: order.supplierId,
+          entryKind: 'purchase',
+          amountMinor: ledgerEntry.amountMinor,
+          balanceAfterMinor: ledgerEntry.balanceAfterMinor,
+          referenceId: saved.id,
+        ),
+      );
+    }
+
+    await audit.write(
+      AuditLogEntry.create(
+        organizationId: organizationId,
+        branchId: order.branchId,
+        userId: actorId,
+        actorName: actorName,
+        action: 'goods.received',
+        entityType: 'goodsReceipt',
+        entityId: saved.id,
+        summary:
+            'Received ${receivedLines.length} line(s) against '
+            '${order.poNumber} (${saved.receiptNumber}) — '
+            '$receivedValueMinor paisa, ${createdBatches.length} batch(es)',
+      ),
+    );
+
+    await _enqueueReceiveSync(
+      saved,
+      updated,
+      movements,
+      ledgerEntry,
+      createdBatches,
+    );
+
+    final result = GoodsReceiptResult(
+      receipt: saved,
+      order: updated,
+      movements: movements,
+      isDuplicate: false,
+    );
+    _committedReceiptKeys[key] = result;
+    return result;
+  }
+
+  /// Receives new stock through the production write path (Week 3
+  /// Day 4, D111 — closes the D109 inventory-receive follow-up).
+  ///
+  /// The standalone receive dialog used to write straight to the
+  /// inventory repo, so the sync queue never saw it. Now the layer
+  /// is the single write path, like `receiveGoods`:
+  ///
+  /// 1. **Idempotency** — [idempotencyKey] (minted per call when
+  ///    omitted) is the dedupe key: a retry with the same key
+  ///    returns the original batch and creates NO second batch row
+  ///    (the inventory repo creates a new row per call, so the
+  ///    registry check runs BEFORE the repo write).
+  /// 2. **Stock** — the repo creates the batch row, the engine
+  ///    books it (`receive` ledger movement + audit). The movement's
+  ///    reference is this key — a manual receive has no
+  ///    `goodsReceipts` document, so the key stands in for a receipt
+  ///    id (reference type `stockReceive`, not `goodsReceipt`).
+  /// 3. **Sync** — one batched-write payload (batch doc + stock
+  ///    transaction) is enqueued, so the Day 3 sync-status chip
+  ///    moves for stock work.
+  ///
+  /// Throws [ArgumentError] when the repository rejects the receive
+  /// (e.g. a non-positive quantity) — nothing is enqueued then.
+  Future<StockReceiveResult> receiveStock({
+    required String branchId,
+    required String medicineId,
+    required String batchNo,
+    required DateTime mfgDate,
+    required DateTime expiryDate,
+    required int quantity,
+    required int costMinor,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+    String reason = 'Stock received',
+  }) async {
+    final key =
+        idempotencyKey ?? newIdempotencyKey('stock-receive-$branchId');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Stock receive idempotency key is not valid.');
+    }
+    final existing = _committedReceiveKeys[key];
+    if (existing != null) {
+      return StockReceiveResult(
+        batch: existing.batch,
+        movements: const [],
+        isDuplicate: true,
+      );
+    }
+    // Load the engine from live stock BEFORE the repo creates the
+    // batch: `loadBatches` resets the counters from the physical
+    // rows, so loading after the create (which already includes the
+    // new batch) and then booking it would count the batch twice.
+    // Same order as `receiveGoods` (D103).
+    engine.loadBatches(
+      await inventoryRepo.getInventory(branchId: branchId),
+    );
+    final created = await inventoryRepo.receiveStock(
+      branchId: branchId,
+      medicineId: medicineId,
+      batchNo: batchNo,
+      mfgDate: mfgDate,
+      expiryDate: expiryDate,
+      quantity: quantity,
+      costMinor: costMinor,
+    );
+    final movements = await engine.receive(
+      batches: [created],
+      receiptId: key,
+      userId: actorId,
+      actorName: actorName,
+      reason: reason,
+      referenceType: 'stockReceive',
+    );
+    await _enqueueStockReceiveSync(created, movements, key);
+    final result = StockReceiveResult(
+      batch: created,
+      movements: movements,
+      isDuplicate: false,
+    );
+    _committedReceiveKeys[key] = result;
+    return result;
+  }
+
   /// Adjusts one batch's quantity through the engine (validation +
   /// ledger + audit) and the repository (screens' source of truth).
+  ///
+  /// Week 3 Day 4 (D111 — closes the D109 inventory-adjust
+  /// follow-up): the adjustment now also enqueues one sync payload
+  /// (stock transaction + inventory-doc update), so the Day 3
+  /// sync-status chip moves for stock work — and so do returns
+  /// restocks, which already call this method
+  /// (`returns_provider.dart`). A retry with the same
+  /// [idempotencyKey] returns the original movement instead of
+  /// applying the delta twice.
   Future<StockMovement> adjustStock({
     required String batchId,
     required int deltaQty,
@@ -318,7 +746,15 @@ class ProductionDataLayer {
     String actorId = demoActorId,
     String actorName = demoActorName,
     String? referenceId,
+    String? idempotencyKey,
   }) async {
+    final key =
+        idempotencyKey ?? newIdempotencyKey('stock-adjust-$batchId');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Stock adjustment idempotency key is not valid.');
+    }
+    final existing = _committedAdjustKeys[key];
+    if (existing != null) return existing;
     final batch = (await inventoryRepo.getInventory()).firstWhere(
       (item) => item.id == batchId,
       orElse: () => throw ArgumentError('No batch with id "$batchId".'),
@@ -339,7 +775,110 @@ class ProductionDataLayer {
       deltaQty: deltaQty,
       reason: reason,
     );
+    await _enqueueAdjustSync(movement, key);
+    _committedAdjustKeys[key] = movement;
     return movement;
+  }
+
+  /// Records a physical stock count through the production write
+  /// path (Week 3 Day 5, D114 — closes the D111 follow-up).
+  ///
+  /// The count dialog used to write straight to the inventory repo,
+  /// so the sync queue never saw it. Now the layer is the single
+  /// write path, like `adjustStock`:
+  ///
+  /// 1. **Idempotency** — [idempotencyKey] (minted per call when
+  ///    omitted; the dialog holds one key across retries, D115) is
+  ///    the dedupe key: a retry with the same key returns the
+  ///    original count and applies NO correction twice.
+  /// 2. **Correction** — the variance (counted − system) is booked
+  ///    through the engine (`adjust`, reason "Stock count", ledger
+  ///    movement + audit) and the repository is set to the counted
+  ///    quantity — the same end state as the old repo-direct write,
+  ///    now with a ledger trail.
+  /// 3. **Sync** — a non-zero correction enqueues one sync payload
+  ///    (stock transaction + inventory-doc update, the same payload
+  ///    as an adjustment), so the Day 3 sync-status chip moves for
+  ///    stock counts. A count that matches the system (variance 0)
+  ///    books no movement and enqueues nothing — there is no
+  ///    quantity change to sync.
+  ///
+  /// Throws [ArgumentError] when the batch is missing or the counted
+  /// quantity is negative — nothing is written then.
+  Future<StockCountResult> recordStockCount({
+    required String batchId,
+    required int countedQty,
+    String? note,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+  }) async {
+    final key =
+        idempotencyKey ?? newIdempotencyKey('stock-count-$batchId');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Stock count idempotency key is not valid.');
+    }
+    final existing = _committedCountKeys[key];
+    if (existing != null) {
+      return StockCountResult(
+        item: existing.item,
+        variance: existing.variance,
+        movement: existing.movement,
+        isDuplicate: true,
+      );
+    }
+    final batch = (await inventoryRepo.getInventory()).firstWhere(
+      (item) => item.id == batchId,
+      orElse: () => throw ArgumentError('No batch with id "$batchId".'),
+    );
+    if (countedQty < 0) {
+      throw ArgumentError('Counted quantity cannot be negative.');
+    }
+    final variance = countedQty - batch.quantity;
+    if (variance == 0) {
+      // Count matches the system: record it (the repo stamps
+      // updatedAt) but book no movement and enqueue nothing.
+      final updated = await inventoryRepo.recordStockCount(
+        batchId: batchId,
+        countedQty: countedQty,
+        note: note,
+      );
+      final result = StockCountResult(
+        item: updated,
+        variance: 0,
+        movement: null,
+        isDuplicate: false,
+      );
+      _committedCountKeys[key] = result;
+      return result;
+    }
+    engine.loadBatches(
+      await inventoryRepo.getInventory(branchId: batch.branchId),
+    );
+    final movement = await engine.adjust(
+      batchId: batchId,
+      deltaQty: variance,
+      reason: note == null || note.trim().isEmpty
+          ? 'Stock count'
+          : 'Stock count — ${note.trim()}',
+      userId: actorId,
+      actorName: actorName,
+      referenceId: key,
+    );
+    final updated = await inventoryRepo.recordStockCount(
+      batchId: batchId,
+      countedQty: countedQty,
+      note: note,
+    );
+    await _enqueueAdjustSync(movement, key);
+    final result = StockCountResult(
+      item: updated,
+      variance: variance,
+      movement: movement,
+      isDuplicate: false,
+    );
+    _committedCountKeys[key] = result;
+    return result;
   }
 
   /// Audit entries (optionally filtered).
@@ -362,6 +901,13 @@ class ProductionDataLayer {
       syncQueue.pendingOperations();
 
   Future<int> pendingSyncCount() => syncQueue.pendingCount();
+
+  /// When the queue last synced an operation successfully (`null` =
+  /// nothing has synced yet). Week 3 Day 3 (D108): the sync-status
+  /// UI shows this; it is `null` in the demo until a sync sender
+  /// exists, and the UI says "Never synced" instead of inventing a
+  /// time.
+  DateTime? get lastSyncAt => syncQueue.lastSyncedAt;
 
   /// Attempts to drain the queue with [send] (the Firestore transport
   /// in production; a fake sender in tests). Returns how many ops
@@ -478,6 +1024,178 @@ class ProductionDataLayer {
     );
   }
 
+  /// Builds the Firestore batched-write payload for a committed
+  /// receiving event and enqueues it as one sync operation: the
+  /// receipt doc + its item docs + the new batch docs + the stock
+  /// transactions + the supplier-ledger entry + the PO status
+  /// update. The future Firestore transport executes one chunk per
+  /// real batched write — atomically, so a retried sync can never
+  /// double-receive the way a retried local call could (D103).
+  Future<void> _enqueueReceiveSync(
+    GoodsReceipt receipt,
+    PurchaseOrder updatedOrder,
+    List<StockMovement> movements,
+    SupplierLedgerEntry? ledgerEntry,
+    List<InventoryItem> batches,
+  ) async {
+    final batch = LocalWriteBatch();
+    batch.set(
+      FirestoreSchema.goodsReceiptDocPath(receipt.branchId, receipt.id),
+      goodsReceiptToFirestore(receipt, orgId: organizationId),
+    );
+    for (var i = 0; i < receipt.items.length; i++) {
+      batch.set(
+        '${FirestoreSchema.goodsReceiptItemsPath(receipt.branchId, receipt.id)}/item-$i',
+        goodsReceiptItemToFirestore(
+          receipt.items[i],
+          orgId: organizationId,
+          branchId: receipt.branchId,
+        ),
+      );
+    }
+    for (final item in batches) {
+      batch.set(
+        FirestoreSchema.branchDocPath(
+          receipt.branchId,
+          FirestoreSchema.batches,
+          item.id,
+        ),
+        _stamped(item.toMap(), receipt.branchId),
+      );
+    }
+    for (final movement in movements) {
+      batch.set(
+        '${FirestoreSchema.stockTransactionsPath(receipt.branchId)}/${movement.id}',
+        movement.toMap(),
+      );
+    }
+    if (ledgerEntry != null) {
+      batch.set(
+        '${FirestoreSchema.supplierLedgerPath(receipt.supplierId)}/${ledgerEntry.id}',
+        supplierLedgerEntryToFirestore(ledgerEntry, orgId: organizationId),
+      );
+    }
+    batch.update(
+      FirestoreSchema.branchDocPath(
+        receipt.branchId,
+        FirestoreSchema.purchaseOrders,
+        updatedOrder.id,
+      ),
+      {
+        'status': purchaseOrderStatusToFirestore(updatedOrder.status),
+        'updatedAt': DateTime.now().toIso8601String(),
+      },
+    );
+    final chunks = batch.chunks();
+    await syncQueue.enqueue(
+      idempotencyKey: receipt.id,
+      entityType: 'goodsReceipt',
+      entityId: receipt.id,
+      branchId: receipt.branchId,
+      organizationId: organizationId,
+      kind: SyncOperationKind.create,
+      payload: {
+        'path': FirestoreSchema.goodsReceiptDocPath(
+          receipt.branchId,
+          receipt.id,
+        ),
+        'operations': batch.toMap()['operations'],
+        'chunks': chunks.length,
+        'operationCount': batch.operationCount,
+      },
+    );
+  }
+
+  /// Builds the Firestore batched-write payload for one stock
+  /// adjustment and enqueues it as one sync operation (Week 3 Day
+  /// 4, D111): the stock-transaction doc + the inventory-doc
+  /// quantity update. Stock is money-or-stock (SRS §2.5.4), so a
+  /// sync conflict on it is flagged for a human, never silently
+  /// overwritten — the queue's conflict policy already covers
+  /// `stockTransaction` entities.
+  Future<void> _enqueueAdjustSync(StockMovement movement, String key) async {
+    final batch = LocalWriteBatch();
+    batch.set(
+      '${FirestoreSchema.stockTransactionsPath(movement.branchId)}/${movement.id}',
+      movement.toMap(),
+    );
+    batch.update(
+      FirestoreSchema.inventoryDocPath(
+        movement.branchId,
+        movement.medicineId,
+      ),
+      {
+        'quantityOnHand': engine
+            .counterFor(movement.medicineId)
+            .quantityOnHand,
+        'quantityReserved': engine
+            .counterFor(movement.medicineId)
+            .quantityReserved,
+        'updatedAt': DateTime.now().toIso8601String(),
+      },
+    );
+    final chunks = batch.chunks();
+    await syncQueue.enqueue(
+      idempotencyKey: key,
+      entityType: 'stockTransaction',
+      entityId: movement.id,
+      branchId: movement.branchId,
+      organizationId: organizationId,
+      kind: SyncOperationKind.update,
+      payload: {
+        'path':
+            '${FirestoreSchema.stockTransactionsPath(movement.branchId)}/${movement.id}',
+        'operations': batch.toMap()['operations'],
+        'chunks': chunks.length,
+        'operationCount': batch.operationCount,
+      },
+    );
+  }
+
+  /// Builds the Firestore batched-write payload for one standalone
+  /// stock receive and enqueues it as one sync operation (Week 3
+  /// Day 4, D111): the new batch doc + the stock-transaction doc.
+  Future<void> _enqueueStockReceiveSync(
+    InventoryItem created,
+    List<StockMovement> movements,
+    String key,
+  ) async {
+    final batch = LocalWriteBatch();
+    batch.set(
+      FirestoreSchema.branchDocPath(
+        created.branchId,
+        FirestoreSchema.batches,
+        created.id,
+      ),
+      _stamped(created.toMap(), created.branchId),
+    );
+    for (final movement in movements) {
+      batch.set(
+        '${FirestoreSchema.stockTransactionsPath(movement.branchId)}/${movement.id}',
+        movement.toMap(),
+      );
+    }
+    final chunks = batch.chunks();
+    await syncQueue.enqueue(
+      idempotencyKey: key,
+      entityType: 'stockTransaction',
+      entityId: created.id,
+      branchId: created.branchId,
+      organizationId: organizationId,
+      kind: SyncOperationKind.create,
+      payload: {
+        'path': FirestoreSchema.branchDocPath(
+          created.branchId,
+          FirestoreSchema.batches,
+          created.id,
+        ),
+        'operations': batch.toMap()['operations'],
+        'chunks': chunks.length,
+        'operationCount': batch.operationCount,
+      },
+    );
+  }
+
   /// Adds the common Firestore fields to a document map.
   Map<String, dynamic> _stamped(Map<String, dynamic> doc, String branchId) {
     return {
@@ -512,6 +1230,7 @@ final productionDataLayerProvider = Provider<ProductionDataLayer>((ref) {
     prescriptionRepo: ref.read(prescriptionRepositoryProvider),
     purchaseOrderRepo: ref.read(purchaseOrderRepositoryProvider),
     riderRepo: ref.read(riderRepositoryProvider),
+    goodsReceiptRepo: ref.read(goodsReceiptRepositoryProvider),
     audit: audit,
     syncQueue: syncQueue,
     engine: engine,

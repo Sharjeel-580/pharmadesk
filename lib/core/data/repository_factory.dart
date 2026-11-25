@@ -8,6 +8,7 @@ import 'firestore_repositories.dart';
 import 'firestore_schema.dart';
 import 'firestore_transport.dart';
 import 'prescription_storage.dart';
+import 'report_counters.dart';
 
 /// Repository factory + backend switch (Week 2 Day 3, D75).
 ///
@@ -61,6 +62,15 @@ class RepositoryBundle {
     required this.prescriptions,
     required this.purchaseOrders,
     required this.riders,
+    required this.staff,
+    required this.attendance,
+    required this.shifts,
+    required this.expenses,
+    required this.financialTransactions,
+    required this.supplierPayments,
+    required this.goodsReceipts,
+    required this.salary,
+    required this.reportCounters,
     required this.auth,
     required this.photoUploader,
   });
@@ -76,6 +86,28 @@ class RepositoryBundle {
   final PrescriptionRepository prescriptions;
   final PurchaseOrderRepository purchaseOrders;
   final RiderRepository riders;
+
+  /// Week 3 Day 1 (D101): the six Day 5 repos join the bundle —
+  /// Firestore implementations behind the same interfaces, mock
+  /// by default like the Day 3 repos.
+  final StaffRepository staff;
+  final AttendanceRepository attendance;
+  final ShiftRepository shifts;
+  final ExpenseRepository expenses;
+  final FinancialTransactionRepository financialTransactions;
+  final SupplierPaymentRepository supplierPayments;
+
+  /// Week 3 Day 2 (D102/D103): goods receipts + salary records
+  /// join the bundle the same way.
+  final GoodsReceiptRepository goodsReceipts;
+  final SalaryRepository salary;
+
+  /// Week 3 Day 3 (D105/D106): daily report counters join the
+  /// bundle the same way — the mock computes them from the seeded
+  /// demo data, the Firestore implementation reads the rollup
+  /// Function's output docs.
+  final ReportCounterRepository reportCounters;
+
   final AuthRepository auth;
   final PrescriptionPhotoUploader photoUploader;
 }
@@ -147,6 +179,42 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      staff: FirestoreStaffRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      attendance: FirestoreAttendanceRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      shifts: FirestoreShiftRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      expenses: FirestoreExpenseRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      financialTransactions: FirestoreFinancialTransactionRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      supplierPayments: FirestoreSupplierPaymentRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      goodsReceipts: FirestoreGoodsReceiptRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      salary: FirestoreSalaryRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      reportCounters: FirestoreReportCounterRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       auth: firebaseAuth == null
           ? MockAuthRepository()
           : FirebaseAuthRepository(firebaseAuth: firebaseAuth),
@@ -155,18 +223,42 @@ RepositoryBundle createRepositoryBundle({
           : FirebasePrescriptionPhotoUploader(storage: firebaseStorage),
     );
   }
+  // The mock counter repository reads from the same mock repos the
+  // live reports read, so its figures are derived from the seeded
+  // demo data (D105) — one shared instance of each repo feeds both
+  // the bundle and the counter computation.
+  final mockOrders = MockOrderRepository();
+  final mockSales = MockSaleRepository();
+  final mockSaleReturns = MockSaleReturnRepository();
+  final mockInventory = MockInventoryRepository();
+  final mockMedicines = MockMedicineRepository();
   return RepositoryBundle(
     kind: kind,
-    medicines: MockMedicineRepository(),
-    orders: MockOrderRepository(),
-    inventory: MockInventoryRepository(),
+    medicines: mockMedicines,
+    orders: mockOrders,
+    inventory: mockInventory,
     customers: MockCustomerRepository(),
-    sales: MockSaleRepository(),
-    saleReturns: MockSaleReturnRepository(),
+    sales: mockSales,
+    saleReturns: mockSaleReturns,
     suppliers: MockSupplierRepository(),
     prescriptions: MockPrescriptionRepository(),
     purchaseOrders: MockPurchaseOrderRepository(),
     riders: MockRiderRepository(),
+    staff: MockStaffRepository(),
+    attendance: MockAttendanceRepository(),
+    shifts: MockShiftRepository(),
+    expenses: MockExpenseRepository(),
+    financialTransactions: MockFinancialTransactionRepository(),
+    supplierPayments: MockSupplierPaymentRepository(),
+    goodsReceipts: MockGoodsReceiptRepository(),
+    salary: MockSalaryRepository(),
+    reportCounters: MockReportCounterRepository(
+      orders: mockOrders,
+      sales: mockSales,
+      returns: mockSaleReturns,
+      inventory: mockInventory,
+      medicines: mockMedicines,
+    ),
     auth: MockAuthRepository(),
     photoUploader: LocalPrescriptionPhotoUploader(),
   );

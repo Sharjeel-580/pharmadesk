@@ -104,6 +104,7 @@ class FirestoreSchema {
   static const String purchaseOrderItems = 'items';
   static const String goodsReceipts = 'goodsReceipts';
   static const String goodsReceiptItems = 'items';
+  static const String salaries = 'salaries';
   static const String purchaseReturns = 'purchaseReturns';
   static const String supplierPayments = 'supplierPayments';
   static const String supplierLedger = 'ledger';
@@ -165,6 +166,23 @@ class FirestoreSchema {
   static String saleReturnsPath(String branchId) =>
       branchCollection(branchId, saleReturns);
 
+  /// `branches/{branchId}/goodsReceipts`.
+  static String goodsReceiptsPath(String branchId) =>
+      branchCollection(branchId, goodsReceipts);
+
+  static String goodsReceiptDocPath(String branchId, String receiptId) =>
+      branchDocPath(branchId, goodsReceipts, receiptId);
+
+  static String goodsReceiptItemsPath(String branchId, String receiptId) =>
+      nestedCollection(branchId, goodsReceipts, receiptId, goodsReceiptItems);
+
+  /// `branches/{branchId}/salaries` (Week 3 Day 2, D102).
+  static String salariesPath(String branchId) =>
+      branchCollection(branchId, salaries);
+
+  static String salaryDocPath(String branchId, String salaryId) =>
+      branchDocPath(branchId, salaries, salaryId);
+
   static String saleReturnDocPath(String branchId, String returnId) =>
       branchDocPath(branchId, saleReturns, returnId);
 
@@ -203,6 +221,16 @@ class FirestoreSchema {
   /// (invoice / order / PO) and pre-computed aggregates (SRS §2.9).
   static String counterDocPath(String branchId, String counterId) =>
       branchDocPath(branchId, counters, counterId);
+
+  /// `branches/{branchId}/counters/daily-{yyyy-MM-dd}` — one doc per
+  /// branch per day, written by the daily counters rollup Function
+  /// (Job 3, `firebase/functions-design.md`; Week 3 Day 3, D105).
+  static String dailyCounterDocId(DateTime date) =>
+      'daily-${date.year}-${date.month.toString().padLeft(2, '0')}-'
+      '${date.day.toString().padLeft(2, '0')}';
+
+  static String dailyCounterDocPath(String branchId, DateTime date) =>
+      counterDocPath(branchId, dailyCounterDocId(date));
 
   // -- Cloud Storage paths (Blaze, D62) -------------------------------
   //
@@ -608,6 +636,40 @@ class FirestoreSchema {
       FirestoreField('receiptNumber', 'string'),
       FirestoreField('receivedBy', 'string'),
       FirestoreField('status', 'string'),
+      // Extended Week 3 Day 2 (D104): the SRS contract named no
+      // receipt date, supplier or value, but a receipt that cannot
+      // say when the goods arrived, from whom, or for how much is
+      // not an audit record — the production receiving write fills
+      // all three, and the mapper validates them.
+      FirestoreField(
+        'receivedAt',
+        'timestamp',
+        required: true,
+        notes: 'Added Week 3 Day 2 (D104)',
+      ),
+      FirestoreField(
+        'supplierId',
+        'string',
+        required: true,
+        notes: 'Added Week 3 Day 2 (D104)',
+      ),
+      FirestoreField(
+        'totalValueMinor',
+        'int (paisa)',
+        required: true,
+        notes:
+            'Added Week 3 Day 2 (D104): the value the supplier '
+            'ledger is charged for this receipt',
+      ),
+    ],
+    'branches/{branchId}/goodsReceipts/{receiptId}/items': [
+      FirestoreField('medicineId', 'string', required: true),
+      FirestoreField('medicineName', 'string'),
+      FirestoreField('quantityReceived', 'int', required: true),
+      FirestoreField('batchNo', 'string'),
+      FirestoreField('mfgDate', 'timestamp'),
+      FirestoreField('expiryDate', 'timestamp'),
+      FirestoreField('unitCostMinor', 'int (paisa)'),
     ],
     'branches/{branchId}/purchaseReturns': [
       FirestoreField('poId', 'string'),
@@ -623,6 +685,24 @@ class FirestoreSchema {
       FirestoreField('method', 'string'),
       FirestoreField('reference', 'string'),
       FirestoreField('paidBy', 'string'),
+      FirestoreField(
+        'paidAt',
+        'timestamp',
+        required: true,
+        notes:
+            'Added Week 3 Day 1 (D99): the SRS contract listed no '
+            'payment date, but the model requires one and the '
+            'statement sorts by it',
+      ),
+      FirestoreField(
+        'allocations',
+        'map[]',
+        notes:
+            'Added Week 3 Day 1 (D99): the FIFO allocations '
+            '({ledgerEntryId, amount}) — the SRS contract listed no '
+            'allocations, but the payment record must show which '
+            'payables it settled (D92)',
+      ),
     ],
     'suppliers/{supplierId}/ledger': [
       FirestoreField(
@@ -642,6 +722,53 @@ class FirestoreSchema {
       FirestoreField('salary', 'int (paisa)', notes: 'Nullable'),
       FirestoreField('joiningDate', 'timestamp'),
       FirestoreField('status', 'string'),
+      // Extras (Week 3 Day 1, D99): the local Staff model carries
+      // these and the mapper writes them so a round-trip is exact.
+      // `salary` / `joiningDate` are NOT written — the model has no
+      // salary field (D89: salary figures are not shown) and no
+      // joining date, so they are never invented. Week 3 Day 2
+      // (D102) settles where salary figures DO live: a separate
+      // `salaries` payroll record per (employee, month) below — the
+      // `salary` field on the employee doc stays unwritten by the
+      // staff mapper and is never the source of truth.
+      FirestoreField('email', 'string', notes: 'Extra: local Staff.email'),
+      FirestoreField(
+        'role',
+        'string',
+        notes: 'Extra: Day 0 StaffRole name (owner / pharmacist / counter / rider)',
+      ),
+      FirestoreField(
+        'roleKey',
+        'string',
+        notes: 'Extra: SRS §5.1 role key (owner / branch_manager / …)',
+      ),
+    ],
+    // Payroll records (Week 3 Day 2, D102): one document per
+    // (employee, month) — the source of truth for salary figures.
+    // The doc id is `sal-{employeeId}-{yyyy-MM}`. `isDemo` marks
+    // seeded demo figures (fictional sample payroll, never real).
+    'branches/{branchId}/salaries': [
+      FirestoreField('employeeId', 'string', required: true),
+      FirestoreField(
+        'month',
+        'string',
+        required: true,
+        notes: 'YYYY-MM, e.g. 2026-11',
+      ),
+      FirestoreField('baseSalaryMinor', 'int (paisa)', required: true),
+      FirestoreField('allowancesMinor', 'int (paisa)'),
+      FirestoreField('deductionsMinor', 'int (paisa)'),
+      FirestoreField(
+        'netMinor',
+        'int (paisa)',
+        required: true,
+        notes: 'Always base + allowances − deductions',
+      ),
+      FirestoreField(
+        'isDemo',
+        'bool',
+        notes: 'True for seeded demo figures (D102)',
+      ),
     ],
     'branches/{branchId}/attendances': [
       FirestoreField('employeeId', 'string', required: true),
@@ -649,6 +776,11 @@ class FirestoreSchema {
       FirestoreField('checkIn', 'timestamp'),
       FirestoreField('checkOut', 'timestamp'),
       FirestoreField('status', 'string'),
+      FirestoreField(
+        'note',
+        'string',
+        notes: 'Extra (Week 3 Day 1, D99): manager note on the record',
+      ),
     ],
     'branches/{branchId}/shifts': [
       FirestoreField('name', 'string', required: true),
@@ -658,6 +790,14 @@ class FirestoreSchema {
     ],
     'branches/{branchId}/expenses': [
       FirestoreField('categoryId', 'string'),
+      FirestoreField(
+        'category',
+        'string',
+        notes:
+            'Extra (Week 3 Day 1, D99): display name of the fixed-list '
+            'category; `categoryId` holds the same name until '
+            'categories become documents',
+      ),
       FirestoreField('amount', 'int (paisa)', required: true),
       FirestoreField('description', 'string'),
       FirestoreField('expenseDate', 'timestamp'),
@@ -704,6 +844,39 @@ class FirestoreSchema {
     ],
     'branches/{branchId}/counters': [
       FirestoreField('value', 'int', required: true),
+    ],
+    // Daily rollup counters (Week 3 Day 3, D105): one doc per branch
+    // per day, written by the counters rollup Function (Job 3). The
+    // sequential counters above keep an int `value`; a daily rollup
+    // doc carries a `value` MAP of that day's totals instead — the
+    // two shapes share the collection but never the same doc id
+    // (`daily-{date}` vs `invoices` / `orders` / …). `cogsMinor` /
+    // `grossProfitMinor` extend the Job 3 spec (which listed only
+    // sales totals + counts) so the P&L and branch comparison can
+    // also read from counters; the rollup subtracts refunds from
+    // `salesTotalMinor` and costs by the D81/D93 rule.
+    'branches/{branchId}/counters/daily-{date}': [
+      FirestoreField(
+        'value',
+        'map',
+        required: true,
+        notes:
+            '{salesTotalMinor, salesCount, ordersCount, cogsMinor, '
+            'grossProfitMinor} — all int paisa / counts for the day',
+      ),
+      FirestoreField(
+        'date',
+        'string',
+        required: true,
+        notes: 'yyyy-MM-dd, matches the doc id',
+      ),
+      FirestoreField('branchId', 'string', required: true),
+      FirestoreField('computedAt', 'timestamp'),
+      FirestoreField(
+        'source',
+        'string',
+        notes: "'rollup' — written by the counters rollup Function",
+      ),
     ],
     'auditLogs': [
       FirestoreField('userId', 'string', required: true),

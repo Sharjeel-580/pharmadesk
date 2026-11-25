@@ -1,7 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 
+import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/expense.dart';
+import '../../models/financial_transaction.dart';
+import '../../models/goods_receipt.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/order.dart';
@@ -10,9 +14,14 @@ import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
+import '../../models/salary_record.dart';
+import '../../models/shift.dart';
+import '../../models/staff.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
+import '../../models/supplier_payment.dart';
 import 'firestore_schema.dart';
+import 'report_counters.dart';
 
 /// Firestore document mappers (Week 2 Day 3, D72).
 ///
@@ -572,6 +581,70 @@ Map<String, dynamic> inventoryCounterToFirestore({
 int counterValueFromFirestore(Map<String, dynamic>? doc) =>
     (doc?['value'] as num?)?.toInt() ?? 0;
 
+// -- Daily report counters (Week 3 Day 3, D105) ------------------------
+
+/// Daily rollup counter doc (§3
+/// `branches/{branchId}/counters/daily-{date}`): one doc per branch
+/// per day, written by the counters rollup Function (Job 3). The
+/// `value` map carries the day's totals — sales revenue (orders +
+/// POS sales, refunds subtracted), counts, and cost / gross profit
+/// by the D81/D93 rule — so the reports screen can read the day
+/// without scanning the sales / orders collections.
+///
+/// Lossy mapping note (D72 pattern): a rollup doc written by an
+/// older Function version may carry only the original Job 3 fields
+/// (`salesTotalMinor`, `salesCount`, `ordersCount`) — the read side
+/// defaults a missing `cogsMinor` to 0 and derives
+/// `grossProfitMinor` as revenue − COGS when it is absent, so old
+/// docs still parse instead of failing the report.
+Map<String, dynamic> dailyCounterToFirestore(
+  DailyCounter counter, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'value': {
+        'salesTotalMinor': counter.salesTotalMinor,
+        'salesCount': counter.salesCount,
+        'ordersCount': counter.ordersCount,
+        'cogsMinor': counter.cogsMinor,
+        'grossProfitMinor': counter.grossProfitMinor,
+      },
+      'date': counter.dateKey,
+      'source': 'rollup',
+    },
+    orgId: orgId,
+    branchId: counter.branchId,
+    now: now,
+  );
+  validateOrThrow(
+    'branches/{branchId}/counters/daily-{date}',
+    doc,
+  );
+  return doc;
+}
+
+DailyCounter dailyCounterFromFirestore(String id, Map<String, dynamic> doc) {
+  final value = (doc['value'] as Map?) ?? const {};
+  int intField(String name) => (value[name] as num?)?.toInt() ?? 0;
+  final salesTotal = intField('salesTotalMinor');
+  final cogs = intField('cogsMinor');
+  final dateKey = doc['date'] as String? ?? id.replaceFirst('daily-', '');
+  final date =
+      DailyCounter.dateFromKey(dateKey) ?? DateTime(1970, 1, 1);
+  return DailyCounter(
+    branchId: doc['branchId'] as String? ?? '',
+    date: date,
+    salesTotalMinor: salesTotal,
+    salesCount: intField('salesCount'),
+    ordersCount: intField('ordersCount'),
+    cogsMinor: cogs,
+    grossProfitMinor:
+        (value['grossProfitMinor'] as num?)?.toInt() ?? salesTotal - cogs,
+  );
+}
+
 // -- Customers + khata --------------------------------------------------
 
 /// Customer doc (§3 `branches/{branchId}/customers`). The address
@@ -969,6 +1042,443 @@ PurchaseOrderItem _purchaseOrderItemFromFirestore(Map<String, dynamic> map) {
     quantityOrdered: (map['quantityOrdered'] as num?)?.toInt() ?? 0,
     quantityReceived: (map['quantityReceived'] as num?)?.toInt() ?? 0,
     unitCostMinor: (map['unitCostMinor'] as num?)?.toInt() ?? 0,
+  );
+}
+
+// -- Staff & HR (Week 3 Day 1, D99/D100) -----------------------------------
+//
+// Lossy mappings (documented, never silent):
+// - **Salary / joining date:** §3 lists `salary` and `joiningDate`
+//   on the employee doc, but the local [Staff] model carries
+//   neither (D89: salary figures are not shown in the directory),
+//   so the mapper writes neither — never invented. A doc that
+//   carries them (written elsewhere) keeps them; the model drops
+//   them on read.
+// - **Status:** §3 `status` is a string; the model has an `active`
+//   bool — `active` ↔ `active`, inactive ↔ `disabled` (the §3
+//   users vocabulary). Legacy docs with a bool `active` field are
+//   accepted on read.
+// - **Email / role / roleKey:** extras on the doc (D99) — the §3
+//   contract lists them as optional fields so a round-trip is
+//   exact; `role` is the Day 0 [StaffRole] name, `roleKey` the
+//   SRS §5.1 key (null = not assigned yet).
+
+/// Staff doc (§3 `branches/{branchId}/employees`).
+Map<String, dynamic> staffToFirestore(
+  Staff staff, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'name': staff.name,
+      'phone': staff.phone,
+      'jobTitle': staff.jobTitle,
+      'status': staff.active ? 'active' : 'disabled',
+      // Extras (D99): needed to rebuild the local model exactly.
+      'email': staff.email,
+      'role': staff.role.name,
+      'roleKey': staff.roleKey,
+    },
+    orgId: orgId,
+    branchId: staff.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/employees', doc);
+  return doc;
+}
+
+Staff staffFromFirestore(String id, Map<String, dynamic> doc) {
+  final status = doc['status'] as String?;
+  return Staff(
+    id: id,
+    name: doc['name'] as String? ?? '',
+    email: doc['email'] as String? ?? '',
+    role: staffRoleFromString(doc['role'] as String?),
+    branchId: doc['branchId'] as String? ?? '',
+    active: status == null
+        ? (doc['active'] as bool? ?? true)
+        : status != 'disabled',
+    createdAt: _parseDate(doc['createdAt']),
+    phone: doc['phone'] as String? ?? '',
+    jobTitle: doc['jobTitle'] as String? ?? '',
+    roleKey: doc['roleKey'] as String?,
+  );
+}
+
+/// Attendance doc (§3 `branches/{branchId}/attendances`): the
+/// calendar day + check-in/out as timestamps, status as the enum
+/// name (`present` / `late` / `absent` / `onLeave` / `halfDay` —
+/// the §3 contract names no values, so the model names are the
+/// stored values). `note` is an extra (D99).
+Map<String, dynamic> attendanceToFirestore(
+  Attendance attendance, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'employeeId': attendance.employeeId,
+      'date': Timestamp.fromDate(attendance.date),
+      'checkIn': attendance.checkIn == null
+          ? null
+          : Timestamp.fromDate(attendance.checkIn!),
+      'checkOut': attendance.checkOut == null
+          ? null
+          : Timestamp.fromDate(attendance.checkOut!),
+      'status': attendance.status.name,
+      'note': attendance.note,
+    },
+    orgId: orgId,
+    branchId: attendance.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/attendances', doc);
+  return doc;
+}
+
+Attendance attendanceFromFirestore(String id, Map<String, dynamic> doc) {
+  return Attendance(
+    id: id,
+    employeeId: doc['employeeId'] as String? ?? '',
+    branchId: doc['branchId'] as String? ?? '',
+    date: _parseDate(doc['date']) ?? DateTime.now(),
+    checkIn: _parseDate(doc['checkIn']),
+    checkOut: _parseDate(doc['checkOut']),
+    status: attendanceStatusFromString(doc['status'] as String?),
+    note: doc['note'] as String?,
+    createdAt: _parseDate(doc['createdAt']),
+  );
+}
+
+/// Shift doc (§3 `branches/{branchId}/shifts`): times stay `HH:MM`
+/// strings (the model parses them to minutes on demand), the
+/// assigned employees stay a `string[]`.
+Map<String, dynamic> shiftToFirestore(
+  Shift shift, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'name': shift.name,
+      'startTime': shift.startTime,
+      'endTime': shift.endTime,
+      'employeeIds': shift.employeeIds,
+    },
+    orgId: orgId,
+    branchId: shift.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/shifts', doc);
+  return doc;
+}
+
+Shift shiftFromFirestore(String id, Map<String, dynamic> doc) {
+  return Shift(
+    id: id,
+    branchId: doc['branchId'] as String? ?? '',
+    name: doc['name'] as String? ?? '',
+    startTime: doc['startTime'] as String? ?? '',
+    endTime: doc['endTime'] as String? ?? '',
+    employeeIds:
+        (doc['employeeIds'] as List?)
+            ?.map((e) => e.toString())
+            .toList() ??
+        const [],
+    createdAt: _parseDate(doc['createdAt']),
+  );
+}
+
+// -- Expenses + financial transactions (Week 3 Day 1, D99/D100) ---------------
+//
+// - **Expense category:** the demo categories are a fixed list
+//   ([expenseCategories]), so the category NAME is the id for now:
+//   the mapper writes it into both `categoryId` (§3) and the
+//   `category` extra (D99). The read side prefers `category` and
+//   falls back to `categoryId`, so docs written either way parse.
+// - **Transaction type:** §3 uses snake_case
+//   (`supplier_payment` / `customer_payment`); the model enum is
+//   camelCase — the mapper translates both ways. Amounts stay
+//   SIGNED int paisa (positive = money in, negative = money out);
+//   a zero amount is rejected by the repository, not the mapper.
+/// Expense doc (§3 `branches/{branchId}/expenses`): amount is
+/// UNSIGNED int paisa (an expense is money out — the matching
+/// negative transaction is a separate doc).
+Map<String, dynamic> expenseToFirestore(
+  Expense expense, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'categoryId': expense.category,
+      'category': expense.category,
+      'amount': expense.amountMinor,
+      'description': expense.description,
+      'expenseDate': Timestamp.fromDate(expense.expenseDate),
+      'createdBy': expense.createdBy,
+      'approvedBy': expense.approvedBy,
+    },
+    orgId: orgId,
+    branchId: expense.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/expenses', doc);
+  return doc;
+}
+
+Expense expenseFromFirestore(String id, Map<String, dynamic> doc) {
+  return Expense(
+    id: id,
+    branchId: doc['branchId'] as String? ?? '',
+    category:
+        doc['category'] as String? ??
+        doc['categoryId'] as String? ??
+        'Other',
+    amountMinor: (doc['amount'] as num?)?.toInt() ?? 0,
+    description: doc['description'] as String? ?? '',
+    expenseDate: _parseDate(doc['expenseDate']) ?? DateTime.now(),
+    createdBy: doc['createdBy'] as String?,
+    approvedBy: doc['approvedBy'] as String?,
+    createdAt: _parseDate(doc['createdAt']),
+  );
+}
+
+/// Local transaction type → §3 snake_case.
+String financialTransactionTypeToFirestore(FinancialTransactionType type) =>
+    switch (type) {
+      FinancialTransactionType.income => 'income',
+      FinancialTransactionType.expense => 'expense',
+      FinancialTransactionType.supplierPayment => 'supplier_payment',
+      FinancialTransactionType.customerPayment => 'customer_payment',
+      FinancialTransactionType.adjustment => 'adjustment',
+    };
+
+/// Financial transaction doc (§3
+/// `branches/{branchId}/financialTransactions`). Append-only —
+/// created, never updated or deleted.
+Map<String, dynamic> financialTransactionToFirestore(
+  FinancialTransaction txn, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'type': financialTransactionTypeToFirestore(txn.type),
+      'amount': txn.amountMinor,
+      'category': txn.category,
+      'referenceType': txn.referenceType,
+      'referenceId': txn.referenceId,
+      'createdBy': txn.createdBy,
+    },
+    orgId: orgId,
+    branchId: txn.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/financialTransactions', doc);
+  return doc;
+}
+
+FinancialTransaction financialTransactionFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  return FinancialTransaction(
+    id: id,
+    branchId: doc['branchId'] as String? ?? '',
+    type: financialTransactionTypeFromString(doc['type'] as String?),
+    amountMinor: (doc['amount'] as num?)?.toInt() ?? 0,
+    category: doc['category'] as String? ?? '',
+    referenceType: doc['referenceType'] as String?,
+    referenceId: doc['referenceId'] as String?,
+    createdBy: doc['createdBy'] as String?,
+    createdAt: _parseDate(doc['createdAt']),
+  );
+}
+
+/// Supplier payment doc (§3 `branches/{branchId}/supplierPayments`):
+/// `method` is the enum name (`bankTransfer` — the read side also
+/// accepts snake_case `bank_transfer`); `paidAt` + `allocations`
+/// are D99 additions to the contract. The allocations are stored
+/// as a list of `{ledgerEntryId, amount}` maps on the doc (the
+/// FIFO record, D92) — they are never a subcollection.
+Map<String, dynamic> supplierPaymentToFirestore(
+  SupplierPayment payment, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'supplierId': payment.supplierId,
+      'amount': payment.amountMinor,
+      'method': payment.method.name,
+      'reference': payment.reference,
+      'paidBy': payment.paidBy,
+      'paidAt': Timestamp.fromDate(payment.paidAt),
+      'allocations': [
+        for (final allocation in payment.allocations) allocation.toMap(),
+      ],
+    },
+    orgId: orgId,
+    branchId: payment.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/supplierPayments', doc);
+  return doc;
+}
+
+SupplierPayment supplierPaymentFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  final rawAllocations = doc['allocations'] as List<dynamic>? ?? [];
+  return SupplierPayment(
+    id: id,
+    branchId: doc['branchId'] as String? ?? '',
+    supplierId: doc['supplierId'] as String? ?? '',
+    amountMinor: (doc['amount'] as num?)?.toInt() ?? 0,
+    method: supplierPaymentMethodFromString(doc['method'] as String?),
+    reference: doc['reference'] as String? ?? '',
+    paidBy: doc['paidBy'] as String?,
+    paidAt: _parseDate(doc['paidAt']) ?? DateTime.now(),
+    allocations: rawAllocations
+        .whereType<Map<String, dynamic>>()
+        .map(PaymentAllocation.fromMap)
+        .toList(),
+    createdAt: _parseDate(doc['createdAt']),
+  );
+}
+
+// -- Goods receipts + salaries (Week 3 Day 2, D103/D104) -----------------
+//
+// - **Receipt items live in the `items` subcollection** (§3), never
+//   embedded in the receipt doc — the local model's embedded list is
+//   for the mock store only. The repo writes the doc + the item docs
+//   in one batched write and reads them back together.
+// - **Receipt money:** `totalValueMinor` is int paisa on the doc
+//   (D104); the item `unitCostMinor` is int paisa too. Dates are
+//   Timestamps.
+// - **Salary month:** the `YYYY-MM` string stays a string (it sorts
+//   and filters as one). `netMinor` is written from the model's
+//   computed getter — the repos refuse a record whose stored net
+//   disagrees, so the field can never drift from its parts.
+
+/// Goods receipt doc (§3 `branches/{branchId}/goodsReceipts`).
+/// Items are written to the `items` subcollection separately — see
+/// [goodsReceiptItemToFirestore].
+Map<String, dynamic> goodsReceiptToFirestore(
+  GoodsReceipt receipt, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'poId': receipt.poId,
+      'receiptNumber': receipt.receiptNumber,
+      'receivedBy': receipt.receivedBy,
+      'status': receipt.status,
+      'receivedAt': Timestamp.fromDate(
+        receipt.receivedAt ?? now ?? DateTime.now(),
+      ),
+      'supplierId': receipt.supplierId,
+      'totalValueMinor': receipt.totalValueMinor,
+    },
+    orgId: orgId,
+    branchId: receipt.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/goodsReceipts', doc);
+  return doc;
+}
+
+/// One receipt item doc (§3 `.../goodsReceipts/{id}/items`).
+Map<String, dynamic> goodsReceiptItemToFirestore(
+  GoodsReceiptItem item, {
+  required String orgId,
+  String? branchId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'medicineId': item.medicineId,
+      'medicineName': item.medicineName,
+      'quantityReceived': item.quantityReceived,
+      'batchNo': item.batchNo,
+      'mfgDate': Timestamp.fromDate(item.mfgDate),
+      'expiryDate': Timestamp.fromDate(item.expiryDate),
+      'unitCostMinor': item.unitCostMinor,
+    },
+    orgId: orgId,
+    branchId: branchId,
+    now: now,
+  );
+  validateOrThrow(
+    'branches/{branchId}/goodsReceipts/{receiptId}/items',
+    doc,
+  );
+  return doc;
+}
+
+GoodsReceipt goodsReceiptFromFirestore(
+  String id,
+  Map<String, dynamic> doc, {
+  List<Map<String, dynamic>> itemDocs = const [],
+}) {
+  return GoodsReceipt(
+    id: id,
+    receiptNumber: doc['receiptNumber'] as String? ?? '',
+    poId: doc['poId'] as String? ?? '',
+    supplierId: doc['supplierId'] as String? ?? '',
+    branchId: doc['branchId'] as String? ?? '',
+    receivedBy: doc['receivedBy'] as String?,
+    receivedAt: _parseDate(doc['receivedAt']),
+    status: doc['status'] as String? ?? 'received',
+    items: [
+      for (final itemDoc in itemDocs)
+        GoodsReceiptItem.fromMap(itemDoc),
+    ],
+    createdAt: _parseDate(doc['createdAt']),
+    updatedAt: _parseDate(doc['updatedAt']),
+  );
+}
+
+/// Salary record doc (§3 `branches/{branchId}/salaries`, D102).
+Map<String, dynamic> salaryRecordToFirestore(
+  SalaryRecord record, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    {
+      'employeeId': record.employeeId,
+      'month': record.month,
+      'baseSalaryMinor': record.baseSalaryMinor,
+      'allowancesMinor': record.allowancesMinor,
+      'deductionsMinor': record.deductionsMinor,
+      'netMinor': record.netMinor,
+      'isDemo': record.isDemo,
+    },
+    orgId: orgId,
+    branchId: record.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/salaries', doc);
+  return doc;
+}
+
+SalaryRecord salaryRecordFromFirestore(String id, Map<String, dynamic> doc) {
+  return SalaryRecord(
+    id: id,
+    employeeId: doc['employeeId'] as String? ?? '',
+    branchId: doc['branchId'] as String? ?? '',
+    month: doc['month'] as String? ?? '',
+    baseSalaryMinor: (doc['baseSalaryMinor'] as num?)?.toInt() ?? 0,
+    allowancesMinor: (doc['allowancesMinor'] as num?)?.toInt() ?? 0,
+    deductionsMinor: (doc['deductionsMinor'] as num?)?.toInt() ?? 0,
+    isDemo: doc['isDemo'] as bool? ?? false,
+    createdAt: _parseDate(doc['createdAt']),
+    updatedAt: _parseDate(doc['updatedAt']),
   );
 }
 

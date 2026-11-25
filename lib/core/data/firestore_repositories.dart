@@ -1,7 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 
+import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/expense.dart';
+import '../../models/financial_transaction.dart';
+import '../../models/goods_receipt.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/order.dart';
@@ -10,12 +14,17 @@ import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
+import '../../models/salary_record.dart';
+import '../../models/shift.dart';
+import '../../models/staff.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
+import '../../models/supplier_payment.dart';
 import '../services/repositories.dart';
 import 'firestore_mappers.dart';
 import 'firestore_schema.dart';
 import 'firestore_transport.dart';
+import 'report_counters.dart';
 import 'inventory_engine.dart' show WriteOperation, WriteOperationKind;
 
 /// Firestore-backed repositories (Week 2 Day 3, D73).
@@ -75,6 +84,7 @@ const _fetchPageSize = 200;
 const _invoicesCounterId = 'invoices';
 const _ordersCounterId = 'orders';
 const _purchaseOrdersCounterId = 'purchaseOrders';
+const _goodsReceiptsCounterId = 'goodsReceipts';
 
 /// Shared helpers for the Firestore repositories.
 mixin _FirestoreRepositoryHelper {
@@ -1467,5 +1477,915 @@ class FirestoreRiderRepository
     final found = await findInBranches(FirestoreSchema.riders, id);
     if (found == null) return null;
     return riderFromFirestore(found.doc.id, found.doc.data);
+  }
+}
+
+// -- Staff & HR (Week 3 Day 1, D100/D101) ---------------------------------
+//
+// The six Day 5 repos behind the same interfaces the screens
+// already use. Same conventions as the Day 3 repos (D73):
+//
+// - **Doc id = idempotency key** for creates: a caller-supplied
+//   non-empty id is the doc id — a retry with the same id returns
+//   the existing document instead of writing a second one (D65
+//   pattern). An empty id gets a Firestore auto-id, like the mocks
+//   assigning `staff-N` / `exp-N` / …
+// - **Attendance upsert is idempotent by construction:** the same
+//   id overwrites the same doc (check-in creates, check-out
+//   rewrites), so a retried check-out can never duplicate a day.
+// - **Branch scoping:** branch-scoped reads need a branch id; a
+//   null branch enumerates the org's branches (same as Day 3).
+//   Attendance date / employee filters and the payment supplier
+//   filter are applied client-side after the branch fetch.
+// - **Validation mirrors the mocks + the providers' pure
+//   validators** (`hr_logic.dart`, `finance_logic.dart`): the
+//   screens validate first, the repository re-checks the rules it
+//   owns (phone uniqueness, positive amounts, allocation sums) so
+//   a direct caller cannot write a bad document.
+// - **No hard deletes, no salary:** staff salary / joining date
+//   are never written (D99 — the model has neither); updates
+//   preserve the original `createdAt` like the Day 3 updates.
+
+/// Digits-only phone comparison (formatting ignored), same as the
+/// mocks for customers / suppliers / staff.
+String _phoneDigits(String phone) => phone.replaceAll(RegExp(r'[^0-9]'), '');
+
+class FirestoreStaffRepository
+    with _FirestoreRepositoryHelper
+    implements StaffRepository {
+  FirestoreStaffRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  /// True when another staff member (any branch, id != [excludeId])
+  /// already has this phone number (digits compared).
+  Future<bool> _phoneTaken(String phone, {String? excludeId}) async {
+    final digits = _phoneDigits(phone);
+    if (digits.isEmpty) return false;
+    for (final member in await getStaff()) {
+      if (member.id != excludeId && _phoneDigits(member.phone) == digits) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @override
+  Future<List<Staff>> getStaff({String? branchId}) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final staff = <Staff>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.employees),
+      );
+      staff.addAll([
+        for (final doc in docs) staffFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return staff;
+  }
+
+  @override
+  Future<Staff?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.employees, id);
+    if (found == null) return null;
+    return staffFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<Staff> createStaff(Staff staff) async {
+    if (staff.name.trim().isEmpty) {
+      throw ArgumentError('Staff name is required.');
+    }
+    if (staff.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a staff member in Firestore.',
+      );
+    }
+    final docId = staff.id.isNotEmpty
+        ? staff.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              staff.branchId,
+              FirestoreSchema.employees,
+            ),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        staff.branchId,
+        FirestoreSchema.employees,
+        docId,
+      ),
+    );
+    if (existing != null) {
+      return staffFromFirestore(docId, existing);
+    }
+    if (await _phoneTaken(staff.phone)) {
+      throw ArgumentError(
+        'A staff member with phone ${staff.phone} already exists.',
+      );
+    }
+    final created = staff.copyWith(id: docId, createdAt: DateTime.now());
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        staff.branchId,
+        FirestoreSchema.employees,
+        docId,
+      ),
+      staffToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+
+  @override
+  Future<void> updateStaff(Staff staff) async {
+    final found = await findInBranches(FirestoreSchema.employees, staff.id);
+    if (found == null) return;
+    if (staff.name.trim().isEmpty) {
+      throw ArgumentError('Staff name is required.');
+    }
+    if (await _phoneTaken(staff.phone, excludeId: staff.id)) {
+      throw ArgumentError(
+        'A staff member with phone ${staff.phone} already exists.',
+      );
+    }
+    final doc = staffToFirestore(staff, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (see updateOrder).
+    doc['createdAt'] = found.doc.data['createdAt'];
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        found.branchId,
+        FirestoreSchema.employees,
+        staff.id,
+      ),
+      doc,
+    );
+  }
+}
+
+class FirestoreAttendanceRepository
+    with _FirestoreRepositoryHelper
+    implements AttendanceRepository {
+  FirestoreAttendanceRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<Attendance>> getAttendances({
+    String? branchId,
+    DateTime? date,
+    String? employeeId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final records = <Attendance>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.attendances),
+      );
+      records.addAll([
+        for (final doc in docs) attendanceFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    // Date matches the calendar day; employee filters client-side
+    // (same as the mock).
+    return records.where((record) {
+      if (employeeId != null && record.employeeId != employeeId) {
+        return false;
+      }
+      if (date != null) {
+        if (record.date.year != date.year ||
+            record.date.month != date.month ||
+            record.date.day != date.day) {
+          return false;
+        }
+      }
+      return true;
+    }).toList();
+  }
+
+  @override
+  Future<Attendance> upsertAttendance(Attendance attendance) async {
+    if (attendance.employeeId.isEmpty) {
+      throw ArgumentError('An attendance record needs an employeeId.');
+    }
+    if (attendance.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to save attendance in Firestore.',
+      );
+    }
+    final path = FirestoreSchema.branchCollection(
+      attendance.branchId,
+      FirestoreSchema.attendances,
+    );
+    if (attendance.id.isEmpty) {
+      final id = await transport.addDocument(
+        path,
+        attendanceToFirestore(
+          attendance,
+          orgId: organizationId,
+        ),
+      );
+      return attendance.copyWith(id: id, createdAt: DateTime.now());
+    }
+    // Same id = same doc: a retried check-out overwrites, never
+    // duplicates (D100). Preserve the original `createdAt`.
+    final docPath = FirestoreSchema.branchDocPath(
+      attendance.branchId,
+      FirestoreSchema.attendances,
+      attendance.id,
+    );
+    final existing = await transport.getDocument(docPath);
+    final doc = attendanceToFirestore(attendance, orgId: organizationId);
+    if (existing != null) doc['createdAt'] = existing['createdAt'];
+    await transport.setDocument(docPath, doc);
+    return attendance.copyWith(
+      createdAt: existing == null
+          ? DateTime.now()
+          : attendance.createdAt ?? _parseCreatedAt(existing),
+    );
+  }
+
+  static DateTime? _parseCreatedAt(Map<String, dynamic> doc) {
+    final value = doc['createdAt'];
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    return null;
+  }
+}
+
+class FirestoreShiftRepository
+    with _FirestoreRepositoryHelper
+    implements ShiftRepository {
+  FirestoreShiftRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<Shift>> getShifts({String? branchId}) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final shifts = <Shift>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.shifts),
+      );
+      shifts.addAll([
+        for (final doc in docs) shiftFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return shifts;
+  }
+
+  @override
+  Future<Shift?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.shifts, id);
+    if (found == null) return null;
+    return shiftFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<Shift> createShift(Shift shift) async {
+    if (shift.name.trim().isEmpty) {
+      throw ArgumentError('Shift name is required.');
+    }
+    if (shift.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a shift in Firestore.',
+      );
+    }
+    final docId = shift.id.isNotEmpty
+        ? shift.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              shift.branchId,
+              FirestoreSchema.shifts,
+            ),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        shift.branchId,
+        FirestoreSchema.shifts,
+        docId,
+      ),
+    );
+    if (existing != null) {
+      return shiftFromFirestore(docId, existing);
+    }
+    final created = shift.copyWith(id: docId, createdAt: DateTime.now());
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        shift.branchId,
+        FirestoreSchema.shifts,
+        docId,
+      ),
+      shiftToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+
+  @override
+  Future<void> updateShift(Shift shift) async {
+    final found = await findInBranches(FirestoreSchema.shifts, shift.id);
+    if (found == null) return;
+    if (shift.name.trim().isEmpty) {
+      throw ArgumentError('Shift name is required.');
+    }
+    final doc = shiftToFirestore(shift, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (see updateOrder).
+    doc['createdAt'] = found.doc.data['createdAt'];
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        found.branchId,
+        FirestoreSchema.shifts,
+        shift.id,
+      ),
+      doc,
+    );
+  }
+}
+
+class FirestoreExpenseRepository
+    with _FirestoreRepositoryHelper
+    implements ExpenseRepository {
+  FirestoreExpenseRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<Expense>> getExpenses({String? branchId}) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final expenses = <Expense>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.expenses),
+      );
+      expenses.addAll([
+        for (final doc in docs) expenseFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return expenses;
+  }
+
+  @override
+  Future<Expense> createExpense(Expense expense) async {
+    if (expense.amountMinor <= 0) {
+      throw ArgumentError('Expense amount must be more than zero.');
+    }
+    if (!expenseCategories.contains(expense.category)) {
+      throw ArgumentError(
+        'Unknown expense category "${expense.category}".',
+      );
+    }
+    if (expense.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create an expense in Firestore.',
+      );
+    }
+    final docId = expense.id.isNotEmpty
+        ? expense.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              expense.branchId,
+              FirestoreSchema.expenses,
+            ),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        expense.branchId,
+        FirestoreSchema.expenses,
+        docId,
+      ),
+    );
+    if (existing != null) {
+      return expenseFromFirestore(docId, existing);
+    }
+    final created = expense.copyWith(id: docId, createdAt: DateTime.now());
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        expense.branchId,
+        FirestoreSchema.expenses,
+        docId,
+      ),
+      expenseToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+class FirestoreFinancialTransactionRepository
+    with _FirestoreRepositoryHelper
+    implements FinancialTransactionRepository {
+  FirestoreFinancialTransactionRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<FinancialTransaction>> getTransactions({
+    String? branchId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final txns = <FinancialTransaction>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(
+          id,
+          FirestoreSchema.financialTransactions,
+        ),
+      );
+      txns.addAll([
+        for (final doc in docs)
+          financialTransactionFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return txns;
+  }
+
+  @override
+  Future<FinancialTransaction> addTransaction(
+    FinancialTransaction txn,
+  ) async {
+    // Amounts are signed (money in / out) — but a zero-amount
+    // transaction records nothing, so it is refused.
+    if (txn.amountMinor == 0) {
+      throw ArgumentError('A financial transaction amount cannot be zero.');
+    }
+    if (txn.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to add a financial transaction in '
+        'Firestore.',
+      );
+    }
+    final docId = txn.id.isNotEmpty
+        ? txn.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              txn.branchId,
+              FirestoreSchema.financialTransactions,
+            ),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the
+    // original — an append-only collection must never double-append.
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        txn.branchId,
+        FirestoreSchema.financialTransactions,
+        docId,
+      ),
+    );
+    if (existing != null) {
+      return financialTransactionFromFirestore(docId, existing);
+    }
+    final created = txn.copyWith(id: docId, createdAt: DateTime.now());
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        txn.branchId,
+        FirestoreSchema.financialTransactions,
+        docId,
+      ),
+      financialTransactionToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+class FirestoreSupplierPaymentRepository
+    with _FirestoreRepositoryHelper
+    implements SupplierPaymentRepository {
+  FirestoreSupplierPaymentRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<SupplierPayment>> getPayments({
+    String? branchId,
+    String? supplierId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final payments = <SupplierPayment>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.supplierPayments),
+      );
+      payments.addAll([
+        for (final doc in docs)
+          supplierPaymentFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return payments
+        .where(
+          (payment) =>
+              supplierId == null || payment.supplierId == supplierId,
+        )
+        .toList();
+  }
+
+  @override
+  Future<SupplierPayment> createPayment(SupplierPayment payment) async {
+    if (payment.supplierId.isEmpty) {
+      throw ArgumentError('A supplier payment needs a supplierId.');
+    }
+    if (payment.amountMinor <= 0) {
+      throw ArgumentError('Payment amount must be more than zero.');
+    }
+    // The FIFO allocations must sum to the payment (D92 /
+    // `validateSupplierPayment`): a shortfall means the outstanding
+    // figure moved under the caller — refuse, never record
+    // half-allocated. An empty allocation list is accepted (the
+    // caller may allocate later); a non-empty one must add up.
+    final allocated = payment.allocations.fold(
+      0,
+      (total, allocation) => total + allocation.amountMinor,
+    );
+    if (payment.allocations.isNotEmpty &&
+        allocated != payment.amountMinor) {
+      throw ArgumentError(
+        'Payment allocations ($allocated paisa) do not sum to the '
+        'payment amount (${payment.amountMinor} paisa).',
+      );
+    }
+    if (payment.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a supplier payment in '
+        'Firestore.',
+      );
+    }
+    final docId = payment.id.isNotEmpty
+        ? payment.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              payment.branchId,
+              FirestoreSchema.supplierPayments,
+            ),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        payment.branchId,
+        FirestoreSchema.supplierPayments,
+        docId,
+      ),
+    );
+    if (existing != null) {
+      return supplierPaymentFromFirestore(docId, existing);
+    }
+    final created = payment.copyWith(id: docId, createdAt: DateTime.now());
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        payment.branchId,
+        FirestoreSchema.supplierPayments,
+        docId,
+      ),
+      supplierPaymentToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+// -- Goods receipts + salaries (Week 3 Day 2, D102/D103) ------------------
+//
+// Same conventions as the Day 3 / Day 1 repos (D73/D100): doc id =
+// idempotency key on create (a retry returns the existing document),
+// sequential numbers from counter docs starting at 1001, branch
+// enumeration for null-branch reads, updates preserve `createdAt`
+// and no-op on a missing id, no hard deletes.
+
+class FirestoreGoodsReceiptRepository
+    with _FirestoreRepositoryHelper
+    implements GoodsReceiptRepository {
+  FirestoreGoodsReceiptRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  Future<GoodsReceipt> _withItems(String branchId, FirestoreDocument doc) async {
+    final itemDocs = await fetchAll(
+      FirestoreSchema.goodsReceiptItemsPath(branchId, doc.id),
+    );
+    return goodsReceiptFromFirestore(
+      doc.id,
+      doc.data,
+      itemDocs: [for (final item in itemDocs) item.data],
+    );
+  }
+
+  @override
+  Future<List<GoodsReceipt>> getGoodsReceipts({
+    String? branchId,
+    String? poId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final receipts = <GoodsReceipt>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.goodsReceiptsPath(id),
+      );
+      for (final doc in docs) {
+        final receipt = await _withItems(id, doc);
+        if (poId == null || receipt.poId == poId) {
+          receipts.add(receipt);
+        }
+      }
+    }
+    return receipts;
+  }
+
+  @override
+  Future<GoodsReceipt?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.goodsReceipts, id);
+    if (found == null) return null;
+    return _withItems(found.branchId, found.doc);
+  }
+
+  @override
+  Future<GoodsReceipt> createGoodsReceipt(GoodsReceipt receipt) async {
+    if (receipt.poId.isEmpty) {
+      throw ArgumentError('A goods receipt needs a purchase order.');
+    }
+    if (receipt.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a goods receipt in Firestore.',
+      );
+    }
+    final docId = receipt.id.isNotEmpty
+        ? receipt.id
+        : transport.newDocumentId(
+            FirestoreSchema.goodsReceiptsPath(receipt.branchId),
+          );
+    // Caller id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.goodsReceiptDocPath(receipt.branchId, docId),
+    );
+    if (existing != null) {
+      return _withItems(
+        receipt.branchId,
+        FirestoreDocument(id: docId, data: existing),
+      );
+    }
+    final sequence = await nextCounterValue(
+      receipt.branchId,
+      _goodsReceiptsCounterId,
+    );
+    final code = await branchCode(receipt.branchId);
+    final created = receipt.copyWith(
+      id: docId,
+      receiptNumber: 'GR-$code-$sequence',
+      receivedAt: receipt.receivedAt ?? DateTime.now(),
+      createdAt: DateTime.now(),
+    );
+    final operations = <WriteOperation>[
+      WriteOperation(
+        path: FirestoreSchema.goodsReceiptDocPath(receipt.branchId, docId),
+        kind: WriteOperationKind.set,
+        data: goodsReceiptToFirestore(created, orgId: organizationId),
+      ),
+      for (var i = 0; i < created.items.length; i++)
+        WriteOperation(
+          path:
+              '${FirestoreSchema.goodsReceiptItemsPath(receipt.branchId, docId)}/item-$i',
+          kind: WriteOperationKind.set,
+          data: goodsReceiptItemToFirestore(
+            created.items[i],
+            orgId: organizationId,
+            branchId: receipt.branchId,
+          ),
+        ),
+    ];
+    await transport.runBatchedWrites(operations);
+    return created;
+  }
+}
+
+class FirestoreSalaryRepository
+    with _FirestoreRepositoryHelper
+    implements SalaryRepository {
+  FirestoreSalaryRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<SalaryRecord>> getSalaryRecords({
+    String? branchId,
+    String? month,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final records = <SalaryRecord>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.salariesPath(id),
+      );
+      for (final doc in docs) {
+        final record = salaryRecordFromFirestore(doc.id, doc.data);
+        if (month == null || record.month == month) {
+          records.add(record);
+        }
+      }
+    }
+    return records;
+  }
+
+  @override
+  Future<SalaryRecord?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.salaries, id);
+    if (found == null) return null;
+    return salaryRecordFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<SalaryRecord> saveSalaryRecord(SalaryRecord record) async {
+    // Repository re-checks (D100 pattern — mirrors the pure
+    // `validateSalaryRecord` in salary_logic.dart): negative
+    // amounts, a bad month, or a negative net never reach the store.
+    if (record.employeeId.isEmpty || record.branchId.isEmpty) {
+      throw ArgumentError(
+        'A salary record needs an employee and a branch.',
+      );
+    }
+    if (!RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(record.month)) {
+      throw ArgumentError('Month must look like YYYY-MM (e.g. 2026-11).');
+    }
+    if (record.baseSalaryMinor < 0 ||
+        record.allowancesMinor < 0 ||
+        record.deductionsMinor < 0) {
+      throw ArgumentError('Salary amounts cannot be negative.');
+    }
+    if (record.netMinor < 0) {
+      throw ArgumentError(
+        'Net salary cannot be negative — deductions exceed pay.',
+      );
+    }
+    // Doc id is derived from (employee, month) when the caller did
+    // not supply one: a re-save overwrites the same record, never
+    // a duplicate — idempotent by construction (D102).
+    final docId = record.id.isNotEmpty
+        ? record.id
+        : 'sal-${record.employeeId}-${record.month}';
+    final existing = await transport.getDocument(
+      FirestoreSchema.salaryDocPath(record.branchId, docId),
+    );
+    final saved = record.copyWith(
+      id: docId,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    final doc = salaryRecordToFirestore(saved, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (see updateOrder).
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(
+      FirestoreSchema.salaryDocPath(record.branchId, docId),
+      doc,
+    );
+    return saved;
+  }
+}
+
+/// Daily report counters (Week 3 Day 3, D105/D106).
+///
+/// Reads ONLY — the rollup Function owns the writes (Job 3). There
+/// is deliberately no create/update method here: a client that could
+/// write its own counters could fake the reports, so the repository
+/// surface is read-only and the rules draft must deny client writes
+/// to `counters/daily-*` (see `firebase/firestore.rules`).
+class FirestoreReportCounterRepository
+    with _FirestoreRepositoryHelper
+    implements ReportCounterRepository {
+  FirestoreReportCounterRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<DailyCounter?> getDailyCounter({
+    required String branchId,
+    required DateTime date,
+  }) async {
+    final data = await transport.getDocument(
+      FirestoreSchema.dailyCounterDocPath(branchId, date),
+    );
+    if (data == null) return null;
+    return dailyCounterFromFirestore(
+      FirestoreSchema.dailyCounterDocId(date),
+      data,
+    );
+  }
+
+  @override
+  Future<List<DailyCounter>> getDailyCounters({
+    required String branchId,
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    // Deterministic doc ids (`daily-{yyyy-MM-dd}`) mean a range read
+    // is one exact document read per day — at most 31 reads for a
+    // 30-day window, no collection scan, no composite index. Days
+    // with no rollup doc are omitted (never zero-filled): a short
+    // list is incomplete coverage and the reports provider falls
+    // back to the live computation (D106).
+    final counters = <DailyCounter>[];
+    final startDay = DateTime(start.year, start.month, start.day);
+    final endDay = DateTime(end.year, end.month, end.day);
+    var day = startDay;
+    while (!day.isAfter(endDay)) {
+      final counter = await getDailyCounter(branchId: branchId, date: day);
+      if (counter != null) counters.add(counter);
+      day = day.add(const Duration(days: 1));
+    }
+    return counters;
+  }
+
+  @override
+  Future<CounterPage> listDailyCountersPaged({
+    required String branchId,
+    int pageSize = reportPageSize,
+    String? startAfterId,
+  }) async {
+    // The transport's paged fetch (document-id order, oldest first).
+    // The counters collection also holds the sequential-number docs
+    // (`invoices`, `orders`, …), so pages are filtered to `daily-*`
+    // ids and fetching continues until the page is full or the
+    // collection is exhausted — a page of daily counters is never
+    // short just because a sequential counter sorted in between.
+    final counters = <DailyCounter>[];
+    var cursor = startAfterId;
+    var hasMore = false;
+    for (var attempt = 0;
+        attempt < 10 && counters.length < pageSize;
+        attempt++) {
+      final page = await transport.queryCollection(
+        FirestoreSchema.countersPath(branchId),
+        limit: pageSize,
+        startAfterId: cursor,
+      );
+      if (page.isEmpty) break;
+      for (final doc in page) {
+        if (doc.id.startsWith('daily-')) {
+          counters.add(dailyCounterFromFirestore(doc.id, doc.data));
+          if (counters.length == pageSize) break;
+        }
+      }
+      hasMore = page.length == pageSize;
+      cursor = page.last.id;
+      if (page.length < pageSize) break;
+    }
+    return CounterPage(
+      counters: counters,
+      nextCursor: hasMore && counters.isNotEmpty ? cursor : null,
+      hasMore: hasMore,
+    );
   }
 }

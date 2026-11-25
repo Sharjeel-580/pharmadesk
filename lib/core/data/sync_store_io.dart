@@ -13,12 +13,16 @@ SyncStore createSyncStore() => SqfliteSyncStore();
 /// itself enforces dedupe at the storage layer, so a retried enqueue
 /// can never create a second row for the same document.
 ///
-/// The database opens lazily on first use. If opening fails (for
-/// example on Windows, where sqflite needs `sqflite_common_ffi`
-/// wiring — see D5), the store falls back to an in-memory map and
-/// [durable] reports `false`, so the queue keeps working instead of
-/// crashing the app. The fallback is visible, not silent: callers can
-/// read [durable] and the backup export lists the queue state.
+/// The database opens lazily on first use. If opening fails, the store
+/// falls back to an in-memory map and [durable] reports `false`, so the
+/// queue keeps working instead of crashing the app. The fallback is
+/// visible, not silent: callers can read [durable] and the backup
+/// export lists the queue state.
+///
+/// On Windows the desktop entry point wires `sqflite_common_ffi`
+/// first (`lib/app/desktop_bootstrap.dart`, D110), so the database
+/// opens for real there and this fallback is only a safety net for a
+/// genuinely broken SQLite setup — not the normal Windows path.
 class SqfliteSyncStore implements SyncStore {
   SqfliteSyncStore({this._databaseName = 'pharmadesk_sync.db'});
 
@@ -48,8 +52,8 @@ class SqfliteSyncStore implements SyncStore {
       );
       return _db;
     } catch (_) {
-      // Platform without a working sqflite (e.g. Windows before
-      // sqflite_common_ffi is wired): fall back to memory.
+      // Platform without a working sqflite (e.g. a Windows run that
+      // skipped the desktop bootstrap, D110): fall back to memory.
       _openFailed = true;
       return null;
     }

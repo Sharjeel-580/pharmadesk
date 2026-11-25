@@ -109,6 +109,12 @@ const _routeCapabilities = <String, String>{
   '/suppliers': 'supplierPay',
   '/purchases': 'poManage',
   '/reports': 'reports',
+  // Week 3 Day 2 (D102): the salary screen is gated on `hrSalary`
+  // — Owner / HO Admin / Accountant may view, Auditor read-only,
+  // everyone else (incl. Branch Manager) is stopped here. The
+  // staff directory itself stays open: viewing staff is not a
+  // matrix capability, only their salary figures are.
+  '/staff/salary': 'hrSalary',
 };
 
 /// The permission service for the app (pure — no state).

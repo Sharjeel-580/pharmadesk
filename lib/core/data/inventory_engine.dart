@@ -751,6 +751,71 @@ class InventoryEngine {
     return movement;
   }
 
+  /// Books received stock into the engine (Week 3 Day 2, D103).
+  ///
+  /// The repository creates the batch rows first
+  /// (`receiveStock`); this method books them into the engine's
+  /// snapshot: the batch joins `_batches`, the per-medicine counter
+  /// rises, one `receive` ledger movement (positive quantity) and
+  /// one audit entry are written per batch. [batches] are the rows
+  /// the repository just created, so their ids exist.
+  ///
+  /// [referenceType] is the movement's reference kind: `goodsReceipt`
+  /// for PO receiving (the default — [receiptId] is the receipt doc
+  /// id), `stockReceive` for a standalone manual receive (Week 3
+  /// Day 4, D111 — there is no receipt document, so the idempotency
+  /// key stands in for the receipt id).
+  Future<List<StockMovement>> receive({
+    required List<InventoryItem> batches,
+    required String receiptId,
+    required String userId,
+    required String actorName,
+    String? reason,
+    String referenceType = 'goodsReceipt',
+  }) async {
+    final movements = <StockMovement>[];
+    for (final batch in batches) {
+      _batches[batch.id] = batch;
+      final counter = counterFor(batch.medicineId);
+      _counters[batch.medicineId] = counter.copyWith(
+        quantityOnHand: counter.quantityOnHand + batch.quantity,
+      );
+      final movement = ledger.append(
+        StockMovement.create(
+          organizationId: organizationId,
+          branchId: batch.branchId,
+          medicineId: batch.medicineId,
+          batchId: batch.id,
+          type: StockMovementType.receive,
+          quantity: batch.quantity,
+          unitCostMinor: batch.costMinor,
+          referenceType: referenceType,
+          referenceId: receiptId,
+          userId: userId,
+          reason: reason ?? 'Goods received',
+          createdAt: now,
+        ),
+      );
+      movements.add(movement);
+      await audit.write(
+        AuditLogEntry.stockMovement(
+          organizationId: organizationId,
+          branchId: batch.branchId,
+          userId: userId,
+          actorName: actorName,
+          movementType: 'receive',
+          batchId: batch.id,
+          medicineId: batch.medicineId,
+          quantityDelta: batch.quantity,
+          quantityBefore: 0,
+          quantityAfter: batch.quantity,
+          referenceId: receiptId,
+        ),
+      );
+    }
+    return movements;
+  }
+
   /// Open reservations for one sale key (used by the data layer to
   /// apply the same decrements to the repository).
   List<StockReservation> reservationsForSale(String saleKey) =>
