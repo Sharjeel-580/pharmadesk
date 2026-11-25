@@ -43,7 +43,7 @@ class PrescriptionsNotifier extends AsyncNotifier<List<Prescription>> {
     ref.invalidate(orderPrescriptionsProvider);
     ref.invalidate(dashboardKpisProvider);
     ref.invalidate(dashboardAlertsProvider);
-    ref.invalidate(branchPerformanceProvider);
+    ref.invalidate(branchComparisonProvider);
     ref.invalidate(notificationsProvider);
   }
 
@@ -87,6 +87,39 @@ class PrescriptionsNotifier extends AsyncNotifier<List<Prescription>> {
     return (prescription: updated, error: null);
   }
 
+  /// Re-submits a rejected / needs-clearer-photo prescription for
+  /// review (Week 2 Day 5, D91): back to Pending with a new validity
+  /// date, previous review cleared, `resubmissionCount` + 1. The
+  /// caller (detail screen) checks `canResubmitFor` first; this
+  /// method validates the transition and the date itself. Returns
+  /// the updated prescription, or `null` + an error message.
+  Future<({Prescription? prescription, String? error})> resubmit({
+    required String id,
+    required DateTime validUntil,
+  }) async {
+    final current =
+        state.asData?.value ??
+        await ref.read(prescriptionRepositoryProvider).getPrescriptions();
+    final existing = current.where((rx) => rx.id == id).firstOrNull;
+    if (existing == null) {
+      return (prescription: null, error: 'Prescription not found.');
+    }
+    final errors = validateResubmit(
+      current: existing.status,
+      validUntil: validUntil,
+      now: DateTime.now(),
+    );
+    if (errors.isNotEmpty) {
+      return (prescription: null, error: errors.first);
+    }
+    final updated = await ref
+        .read(prescriptionRepositoryProvider)
+        .resubmitPrescription(id: id, validUntil: validUntil);
+    await refresh();
+    _invalidateDependents();
+    return (prescription: updated, error: null);
+  }
+
   /// Creates a new Pending prescription from the manual form
   /// (patient + medicines text + notes). The photo is the bundled
   /// SAMPLE asset — the form explains that a real photo is attached
@@ -97,6 +130,7 @@ class PrescriptionsNotifier extends AsyncNotifier<List<Prescription>> {
     required String medicinesText,
     String notes = '',
     required String branchId,
+    DateTime? validUntil,
   }) async {
     final errors = validateNewPrescription(
       customerId: customerId,
@@ -114,12 +148,18 @@ class PrescriptionsNotifier extends AsyncNotifier<List<Prescription>> {
             // the repo assigns the next sequence for that branch.
             id: prefix,
             customerId: customerId,
-            imageUrl:
-                'assets/images/prescriptions/sample-prescription-1.png',
+            branchId: branchId,
+            imageUrl: 'assets/images/prescriptions/sample-prescription-1.png',
             status: PrescriptionStatus.pending,
             medicinesText: medicinesText.trim(),
             reviewNotes: notes.trim().isEmpty ? null : notes.trim(),
+            validUntil:
+                validUntil ??
+                DateTime.now().add(
+                  const Duration(days: defaultPrescriptionValidityDays),
+                ),
           ),
+          branchId: branchId,
         );
     await refresh();
     _invalidateDependents();

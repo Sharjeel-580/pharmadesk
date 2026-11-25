@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/permission_service.dart';
+import '../../core/services/branch_context.dart';
 import '../../core/widgets/design_system.dart';
 import '../../features/authentication/auth_state.dart';
 import '../../models/prescription.dart';
@@ -53,6 +55,19 @@ class PrescriptionDetailScreen extends ConsumerWidget {
         .firstOrNull;
     final effectiveLinkedOrder = linkedOrder ?? linkedFromOrder;
     final reviewer = ref.watch(authProvider)?.name ?? 'Pharmacist';
+    // Review is a pharmacist-only action (SRS §5.1 `rxReview`):
+    // only a pharmacist in this prescription's branch may approve /
+    // reject. Anyone else sees the buttons disabled with the reason.
+    // A signed-out viewer (deep link, tests) is not blocked here —
+    // the router's auth redirect is the signed-out guard and the
+    // Firestore rules remain the authority (D70).
+    final reviewerUser = ref.watch(authProvider);
+    final reviewBranchId = rx.branchId ?? ref.watch(activeBranchProvider).id;
+    final mayReview = permissionService.canWrite(
+      reviewerUser,
+      'rxReview',
+      reviewBranchId,
+    );
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
@@ -68,13 +83,17 @@ class PrescriptionDetailScreen extends ConsumerWidget {
             onAction: () => context.go('/prescriptions'),
           ),
           const SizedBox(height: 16),
-          Row(
+          // Badges wrap: status + received + validity can exceed a
+          // phone-width row (Day 5 overflow fix — the validity badge
+          // is the third chip in this row).
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               StatusBadge(
                 label: prescriptionStatusLabel(rx.status),
                 kind: prescriptionStatusKind(rx.status),
               ),
-              const SizedBox(width: 8),
               if (rx.createdAt != null)
                 StatusBadge(
                   label:
@@ -82,8 +101,25 @@ class PrescriptionDetailScreen extends ConsumerWidget {
                   kind: StatusKind.neutral,
                   icon: Icons.calendar_today_outlined,
                 ),
+              if (rx.validUntil != null)
+                StatusBadge(
+                  label: isPrescriptionExpired(rx, DateTime.now())
+                      ? 'Expired ${rx.validUntil!.day}/${rx.validUntil!.month}/${rx.validUntil!.year}'
+                      : 'Valid until ${rx.validUntil!.day}/${rx.validUntil!.month}/${rx.validUntil!.year}',
+                  kind: isPrescriptionExpired(rx, DateTime.now())
+                      ? StatusKind.danger
+                      : StatusKind.success,
+                  icon: Icons.event_outlined,
+                ),
             ],
           ),
+          if (rx.resubmissionCount > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Re-submitted ${rx.resubmissionCount} time(s) for review.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
           const SizedBox(height: 16),
           PharmaCard(
             child: Column(
@@ -94,17 +130,14 @@ class PrescriptionDetailScreen extends ConsumerWidget {
                   child: Image.asset(
                     rx.imageUrl,
                     fit: BoxFit.contain,
-                    errorBuilder: (context, error, stackTrace) =>
-                        Container(
-                          height: 200,
-                          alignment: Alignment.center,
-                          color: theme.colorScheme.primary.withValues(
-                            alpha: 0.08,
-                          ),
-                          child: const Text(
-                            'Sample prescription image could not load.',
-                          ),
-                        ),
+                    errorBuilder: (context, error, stackTrace) => Container(
+                      height: 200,
+                      alignment: Alignment.center,
+                      color: theme.colorScheme.primary.withValues(alpha: 0.08),
+                      child: const Text(
+                        'Sample prescription image could not load.',
+                      ),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -153,13 +186,14 @@ class PrescriptionDetailScreen extends ConsumerWidget {
                         child: Text(
                           rx.status == PrescriptionStatus.pending
                               ? 'Linked order ${effectiveLinkedOrder.id} cannot be dispatched until this prescription is approved.'
-                              : 'Linked order ${effectiveLinkedOrder.id} is no longer held by this prescription.',
+                              : !canUnblockOrder(rx, DateTime.now())
+                                  ? 'Linked order ${effectiveLinkedOrder.id} cannot be dispatched — this prescription was approved but its validity has expired. Ask the patient for a new prescription, or re-submit this one with a new validity date.'
+                                  : 'Linked order ${effectiveLinkedOrder.id} is no longer held by this prescription.',
                         ),
                       ),
                       TextButton(
-                        onPressed: () => context.go(
-                          '/orders/${effectiveLinkedOrder.id}',
-                        ),
+                        onPressed: () =>
+                            context.go('/orders/${effectiveLinkedOrder.id}'),
                         child: const Text('View order'),
                       ),
                     ],
@@ -177,48 +211,115 @@ class PrescriptionDetailScreen extends ConsumerWidget {
                 PharmaButton(
                   label: 'Approve',
                   icon: Icons.check_circle_outline,
-                  onPressed: () => _review(
-                    context,
-                    ref,
-                    rx,
-                    PrescriptionStatus.approved,
-                    reviewer,
-                  ),
+                  onPressed: mayReview
+                      ? () => _review(
+                          context,
+                          ref,
+                          rx,
+                          PrescriptionStatus.approved,
+                          reviewer,
+                        )
+                      : null,
                 ),
                 PharmaButton(
                   label: 'Reject',
                   variant: PharmaButtonVariant.danger,
                   icon: Icons.cancel_outlined,
-                  onPressed: () => _reviewWithNote(
-                    context,
-                    ref,
-                    rx,
-                    PrescriptionStatus.rejected,
-                    reviewer,
-                  ),
+                  onPressed: mayReview
+                      ? () => _reviewWithNote(
+                          context,
+                          ref,
+                          rx,
+                          PrescriptionStatus.rejected,
+                          reviewer,
+                        )
+                      : null,
                 ),
                 PharmaButton(
                   label: 'Needs clearer photo',
                   variant: PharmaButtonVariant.secondary,
                   icon: Icons.photo_camera_outlined,
-                  onPressed: () => _reviewWithNote(
-                    context,
-                    ref,
-                    rx,
-                    PrescriptionStatus.needsClearerPhoto,
-                    reviewer,
-                  ),
+                  onPressed: mayReview
+                      ? () => _reviewWithNote(
+                          context,
+                          ref,
+                          rx,
+                          PrescriptionStatus.needsClearerPhoto,
+                          reviewer,
+                        )
+                      : null,
                 ),
               ],
             ),
             const SizedBox(height: 8),
             Text(
-              'Approving unblocks dispatch for any order linked to this '
-              'prescription (Day 4 dispatch guard).',
+              mayReview
+                  ? 'Approving unblocks dispatch for any order linked to this '
+                        'prescription (Day 4 dispatch guard).'
+                  : 'Only a pharmacist in this branch can review '
+                        'prescriptions (SRS §5.1). You are signed in as '
+                        '${reviewerUser?.roleLabel ?? 'staff'}.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+          if (canResubmit(rx.status)) ...[
+            const SizedBox(height: 16),
+            PharmaButton(
+              label: 'Re-submit for review',
+              icon: Icons.restart_alt_outlined,
+              onPressed: canResubmitFor(reviewerUser, reviewBranchId)
+                  ? () => _resubmit(context, ref, rx)
+                  : null,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              canResubmitFor(reviewerUser, reviewBranchId)
+                  ? 'Sends the prescription back to Pending with a new '
+                        'validity date — the pharmacist reviews it again. '
+                        'The previous review is cleared and the '
+                        're-submission is counted.'
+                  : 'Only branch staff who handle prescriptions (counter / '
+                        'pharmacist / manager / owner) can re-submit '
+                        '(SRS §5.1). You are signed in as '
+                        '${reviewerUser?.roleLabel ?? 'staff'}.',
               style: theme.textTheme.bodySmall,
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Future<void> _resubmit(
+    BuildContext context,
+    WidgetRef ref,
+    Prescription rx,
+  ) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final suggested = rx.validUntil != null &&
+            !rx.validUntil!.isBefore(today)
+        ? rx.validUntil!
+        : today.add(const Duration(days: defaultPrescriptionValidityDays));
+    final validUntil = await showDatePicker(
+      context: context,
+      initialDate: suggested,
+      firstDate: today,
+      lastDate: today.add(const Duration(days: 365)),
+      helpText: 'New validity date',
+    );
+    if (validUntil == null || !context.mounted) return;
+    final result = await ref
+        .read(prescriptionsProvider.notifier)
+        .resubmit(id: rx.id, validUntil: validUntil);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.error ??
+              'Prescription ${rx.id} re-submitted — back to Pending '
+                  'for pharmacist review.',
+        ),
       ),
     );
   }
@@ -232,11 +333,7 @@ class PrescriptionDetailScreen extends ConsumerWidget {
   ) async {
     final result = await ref
         .read(prescriptionsProvider.notifier)
-        .review(
-          id: rx.id,
-          target: target,
-          reviewedBy: reviewer,
-        );
+        .review(id: rx.id, target: target, reviewedBy: reviewer);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -262,12 +359,7 @@ class PrescriptionDetailScreen extends ConsumerWidget {
     if (note == null || !context.mounted) return;
     final result = await ref
         .read(prescriptionsProvider.notifier)
-        .review(
-          id: rx.id,
-          target: target,
-          reviewedBy: reviewer,
-          note: note,
-        );
+        .review(id: rx.id, target: target, reviewedBy: reviewer, note: note);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -338,9 +430,7 @@ class _ReviewNoteDialogState extends State<_ReviewNoteDialog> {
           size: PharmaButtonSize.small,
           onPressed: () {
             if (_note.text.trim().isEmpty) {
-              setState(
-                () => _error = 'Add a note explaining this decision.',
-              );
+              setState(() => _error = 'Add a note explaining this decision.');
               return;
             }
             Navigator.of(context).pop(_note.text.trim());

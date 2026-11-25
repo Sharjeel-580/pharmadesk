@@ -229,8 +229,15 @@ class _NewPrescriptionDialogState
   String? _customerId;
   final _medicines = TextEditingController();
   final _notes = TextEditingController();
+  DateTime? _validUntil;
   String? _error;
   bool _saving = false;
+
+  DateTime get _defaultValidUntil {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return today.add(const Duration(days: defaultPrescriptionValidityDays));
+  }
 
   @override
   void dispose() {
@@ -260,6 +267,7 @@ class _NewPrescriptionDialogState
           medicinesText: _medicines.text,
           notes: _notes.text,
           branchId: branchId,
+          validUntil: _validUntil ?? _defaultValidUntil,
         );
     if (!mounted) return;
     setState(() => _saving = false);
@@ -318,6 +326,41 @@ class _NewPrescriptionDialogState
               controller: _notes,
               label: 'Notes (optional)',
               maxLines: 2,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Valid until: ${(_validUntil ?? _defaultValidUntil).day}/${(_validUntil ?? _defaultValidUntil).month}/${(_validUntil ?? _defaultValidUntil).year}',
+                  ),
+                ),
+                PharmaButton(
+                  label: 'Change date',
+                  variant: PharmaButtonVariant.secondary,
+                  size: PharmaButtonSize.small,
+                  onPressed: () async {
+                    final now = DateTime.now();
+                    final today = DateTime(now.year, now.month, now.day);
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: _validUntil ?? _defaultValidUntil,
+                      firstDate: today,
+                      lastDate: today.add(const Duration(days: 365)),
+                      helpText: 'Prescription valid until',
+                    );
+                    if (picked != null) {
+                      setState(() => _validUntil = picked);
+                    }
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'An approved prescription past this date cannot unblock '
+              'an order — the patient needs a new prescription.',
+              style: TextStyle(fontSize: 12),
             ),
             const SizedBox(height: 12),
             const Text(
