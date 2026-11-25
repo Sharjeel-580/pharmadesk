@@ -1,7 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/expense.dart';
+import '../../models/financial_transaction.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/order.dart';
@@ -9,8 +12,13 @@ import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
+import '../../models/sale_return.dart';
+import '../../models/shift.dart';
+import '../../models/staff.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
+import '../../models/supplier_payment.dart';
+import '../data/repository_factory.dart';
 import 'demo_seed_data.dart';
 
 /// Repository interfaces — the contract between presentation/state and
@@ -94,7 +102,12 @@ abstract class CustomerRepository {
   /// Saves a new customer (Day 6). The repository assigns the id.
   /// Throws [ArgumentError] when another customer already has the
   /// same phone number (digits compared, formatting ignored).
-  Future<Customer> createCustomer(Customer customer);
+  ///
+  /// [branchId] is the branch the customer belongs to. The mock
+  /// ignores it (customers are org-wide in the demo); the Firestore
+  /// implementation requires it (customers live in branch
+  /// subcollections) — callers pass the active branch.
+  Future<Customer> createCustomer(Customer customer, {String? branchId});
 
   /// Khata (credit ledger) entries for one customer, oldest first.
   Future<List<LedgerEntry>> getLedgerEntries(String customerId);
@@ -120,6 +133,30 @@ abstract class SaleRepository {
   /// sequential per-branch invoice number (`INV-DHA-1001`, …) and
   /// returns the saved sale.
   Future<Sale> createSale(Sale sale);
+
+  /// Replaces a whole sale (Week 2 Day 4: returns move the sale
+  /// status to `partiallyReturned` / `returned`, FR-POS-08). The id
+  /// must already exist; the invoice number and idempotency key are
+  /// never changed here.
+  Future<void> updateSale(Sale sale);
+}
+
+/// Returns / refunds against completed POS sales (Week 2 Day 4,
+/// SRS §3.4 `branches/{branchId}/saleReturns`, FR-POS-08).
+///
+/// The mock keeps returns in memory for the session. Week 2 stores
+/// them under `branches/{branchId}/saleReturns/{returnId}` with the
+/// `items` subcollection; the return record itself is append-only —
+/// returns are never edited or deleted.
+abstract class SaleReturnRepository {
+  Future<List<SaleReturn>> getReturns({String? branchId});
+
+  /// All returns recorded against one sale, oldest first.
+  Future<List<SaleReturn>> getReturnsForSale(String saleId);
+
+  /// Saves a new return. The repository assigns the id and stamps
+  /// `createdAt`, and returns the saved return.
+  Future<SaleReturn> createReturn(SaleReturn saleReturn);
 }
 
 abstract class SupplierRepository {
@@ -160,9 +197,28 @@ abstract class PrescriptionRepository {
     String? reviewNotes,
   });
 
+  /// Re-submits a rejected / needs-clearer-photo prescription for
+  /// review (Week 2 Day 5, D91): sets the status back to Pending,
+  /// clears the previous review (reviewer, time, note), sets the
+  /// new [validUntil], and increments `resubmissionCount`. Returns
+  /// the updated record, or `null` when the id does not exist.
+  /// The caller validates (see `validateResubmit`) before calling.
+  Future<Prescription?> resubmitPrescription({
+    required String id,
+    required DateTime validUntil,
+  });
+
   /// Saves a manually created prescription (Day 7, new-prescription
   /// form). The repository assigns the id; the record starts Pending.
-  Future<Prescription> createPrescription(Prescription prescription);
+  ///
+  /// [branchId] is the branch the prescription belongs to (the
+  /// caller passes the active branch). The mock falls back to the id
+  /// prefix when it is absent; the Firestore implementation requires
+  /// it (or a branch id on the record itself).
+  Future<Prescription> createPrescription(
+    Prescription prescription, {
+    String? branchId,
+  });
 }
 
 /// Purchase orders (Day 7, SRS FR-PUR-01/02).
@@ -191,6 +247,94 @@ abstract class PurchaseOrderRepository {
 abstract class RiderRepository {
   Future<List<Rider>> getRiders();
   Future<Rider?> getById(String id);
+}
+
+/// Staff directory (Week 2 Day 5, SRS §3.7 `employees` / §5.1
+/// `users`).
+///
+/// The mock keeps staff in memory for the session, seeded from
+/// [demoStaff]. The Firestore implementation stores them under
+/// `branches/{branchId}/employees/{employeeId}` (schema paths
+/// already exist) — it lands with the Firebase-wiring chunk, the
+/// same Day 7 → Day 3 pattern as suppliers and purchase orders
+/// (D89). Screens depend only on this interface.
+abstract class StaffRepository {
+  Future<List<Staff>> getStaff({String? branchId});
+  Future<Staff?> getById(String id);
+
+  /// Saves a new staff member. The repository assigns the id.
+  /// Throws [ArgumentError] when another staff member already has
+  /// the same phone number (digits compared, formatting ignored).
+  Future<Staff> createStaff(Staff staff);
+
+  /// Saves an edited staff member (details, branch, role, status).
+  /// The id must already exist. Throws [ArgumentError] on a phone
+  /// number that belongs to a different staff member.
+  Future<void> updateStaff(Staff staff);
+}
+
+/// Attendance records (Week 2 Day 5, SRS §3.7 `attendances`).
+abstract class AttendanceRepository {
+  /// Attendance records, optionally scoped by branch, day and/or
+  /// employee. [date] matches the calendar day.
+  Future<List<Attendance>> getAttendances({
+    String? branchId,
+    DateTime? date,
+    String? employeeId,
+  });
+
+  /// Saves a new record or replaces an existing one by id (check-in
+  /// creates, check-out updates). The repository assigns the id
+  /// when it is empty and returns the saved record.
+  Future<Attendance> upsertAttendance(Attendance attendance);
+}
+
+/// Shifts (Week 2 Day 5, SRS §3.7 `shifts`).
+abstract class ShiftRepository {
+  Future<List<Shift>> getShifts({String? branchId});
+  Future<Shift?> getById(String id);
+
+  /// Saves a new shift. The repository assigns the id.
+  Future<Shift> createShift(Shift shift);
+
+  /// Saves an edited shift (name, times, assigned employees). The
+  /// id must already exist.
+  Future<void> updateShift(Shift shift);
+}
+
+/// Operating expenses (Week 2 Day 5, SRS §3.7 `expenses`).
+abstract class ExpenseRepository {
+  Future<List<Expense>> getExpenses({String? branchId});
+
+  /// Saves a new expense. The repository assigns the id and returns
+  /// the saved record. The caller also writes the matching
+  /// `financialTransactions` entry (see the finance provider).
+  Future<Expense> createExpense(Expense expense);
+}
+
+/// Financial transactions (Week 2 Day 5, SRS §3.7
+/// `financialTransactions`). Append-only — entries are never edited
+/// or deleted.
+abstract class FinancialTransactionRepository {
+  Future<List<FinancialTransaction>> getTransactions({String? branchId});
+
+  /// Appends one transaction. The repository assigns the id and
+  /// returns the saved record.
+  Future<FinancialTransaction> addTransaction(FinancialTransaction txn);
+}
+
+/// Supplier payments (Week 2 Day 5, SRS §3.6 `supplierPayments`).
+abstract class SupplierPaymentRepository {
+  Future<List<SupplierPayment>> getPayments({
+    String? branchId,
+    String? supplierId,
+  });
+
+  /// Saves a new payment with its payable allocations. The
+  /// repository assigns the id and returns the saved record. The
+  /// caller also writes the matching supplier-ledger entry and
+  /// `financialTransactions` entry (see the finance provider).
+  Future<SupplierPayment> createPayment(SupplierPayment payment);
 }
 
 /// --- Mock implementations (sample data only) ---
@@ -248,17 +392,12 @@ class MockOrderRepository implements OrderRepository {
     // copyWith keeps every field the Day 4 model carries (source,
     // fulfilment, discount, rider, notes, prescription) — a status
     // change must never drop them.
-    _orders[index] = old.copyWith(
-      status: status,
-      updatedAt: DateTime.now(),
-    );
+    _orders[index] = old.copyWith(status: status, updatedAt: DateTime.now());
   }
 
   @override
   Future<Order> createOrder(Order order) async {
-    final branchCode = order.branchId == 'branch-dha-main'
-        ? 'dha'
-        : 'glb';
+    final branchCode = order.branchId == 'branch-dha-main' ? 'dha' : 'glb';
     final sequence = 1000 + _orders.length + 1;
     final saved = order.copyWith(
       id: 'ord-$branchCode-$sequence',
@@ -291,9 +430,7 @@ class MockInventoryRepository implements InventoryRepository {
 
   @override
   Future<List<InventoryItem>> getLowStock({String? branchId}) async =>
-      List.unmodifiable(
-        _scoped(branchId).where((item) => item.isLowStock),
-      );
+      List.unmodifiable(_scoped(branchId).where((item) => item.isLowStock));
 
   @override
   Future<List<InventoryItem>> getExpiringWithin({
@@ -370,10 +507,7 @@ class MockInventoryRepository implements InventoryRepository {
         'Cannot remove $deltaQty units — only ${old.quantity} on hand.',
       );
     }
-    final updated = old.copyWith(
-      quantity: nextQty,
-      updatedAt: DateTime.now(),
-    );
+    final updated = old.copyWith(quantity: nextQty, updatedAt: DateTime.now());
     _items[index] = updated;
     return updated;
   }
@@ -406,8 +540,7 @@ class MockCustomerRepository implements CustomerRepository {
   final List<LedgerEntry> _ledger = generateDemoLedgerEntries();
 
   @override
-  Future<List<Customer>> getCustomers() async =>
-      List.unmodifiable(_customers);
+  Future<List<Customer>> getCustomers() async => List.unmodifiable(_customers);
 
   @override
   Future<Customer?> getById(String id) async {
@@ -418,7 +551,7 @@ class MockCustomerRepository implements CustomerRepository {
   }
 
   @override
-  Future<Customer> createCustomer(Customer customer) async {
+  Future<Customer> createCustomer(Customer customer, {String? branchId}) async {
     final digits = _phoneDigits(customer.phone);
     if (digits.isEmpty) {
       throw ArgumentError('A phone number is required.');
@@ -476,9 +609,7 @@ class MockSaleRepository implements SaleRepository {
   @override
   Future<List<Sale>> getSales({String? branchId}) async {
     if (branchId == null) return List.unmodifiable(_sales);
-    return List.unmodifiable(
-      _sales.where((sale) => sale.branchId == branchId),
-    );
+    return List.unmodifiable(_sales.where((sale) => sale.branchId == branchId));
   }
 
   @override
@@ -502,6 +633,42 @@ class MockSaleRepository implements SaleRepository {
     _sales.add(saved);
     return saved;
   }
+
+  @override
+  Future<void> updateSale(Sale sale) async {
+    final index = _sales.indexWhere((s) => s.id == sale.id);
+    if (index == -1) return;
+    _sales[index] = sale;
+  }
+}
+
+/// Sale returns (Week 2 Day 4): mutable in-memory returns for the
+/// session — the demo starts with none, every return here was
+/// recorded through the returns flow in this session.
+class MockSaleReturnRepository implements SaleReturnRepository {
+  final List<SaleReturn> _returns = [];
+
+  @override
+  Future<List<SaleReturn>> getReturns({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_returns);
+    return List.unmodifiable(
+      _returns.where((r) => r.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<List<SaleReturn>> getReturnsForSale(String saleId) async =>
+      List.unmodifiable(_returns.where((r) => r.saleId == saleId));
+
+  @override
+  Future<SaleReturn> createReturn(SaleReturn saleReturn) async {
+    final saved = saleReturn.copyWith(
+      id: 'ret-${_returns.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _returns.add(saved);
+    return saved;
+  }
 }
 
 class MockSupplierRepository implements SupplierRepository {
@@ -509,12 +676,10 @@ class MockSupplierRepository implements SupplierRepository {
   /// supplier or a ledger entry rewrites entries in place, exactly
   /// like a Firestore write would.
   final List<Supplier> _suppliers = List.of(demoSuppliers);
-  final List<SupplierLedgerEntry> _ledger =
-      generateDemoSupplierLedgerEntries();
+  final List<SupplierLedgerEntry> _ledger = generateDemoSupplierLedgerEntries();
 
   @override
-  Future<List<Supplier>> getSuppliers() async =>
-      List.unmodifiable(_suppliers);
+  Future<List<Supplier>> getSuppliers() async => List.unmodifiable(_suppliers);
 
   @override
   Future<Supplier?> getById(String id) async {
@@ -535,9 +700,7 @@ class MockSupplierRepository implements SupplierRepository {
         'A supplier with phone ${supplier.phone} already exists.',
       );
     }
-    final created = supplier.copyWith(
-      id: 'sup-${_suppliers.length + 1}',
-    );
+    final created = supplier.copyWith(id: 'sup-${_suppliers.length + 1}');
     _suppliers.add(created);
     return created;
   }
@@ -550,16 +713,13 @@ class MockSupplierRepository implements SupplierRepository {
   }
 
   @override
-  Future<List<SupplierLedgerEntry>> getLedgerEntries(
-    String supplierId,
-  ) async => List.unmodifiable(
-    _ledger.where((entry) => entry.supplierId == supplierId),
-  );
+  Future<List<SupplierLedgerEntry>> getLedgerEntries(String supplierId) async =>
+      List.unmodifiable(
+        _ledger.where((entry) => entry.supplierId == supplierId),
+      );
 
   @override
-  Future<SupplierLedgerEntry> addLedgerEntry(
-    SupplierLedgerEntry entry,
-  ) async {
+  Future<SupplierLedgerEntry> addLedgerEntry(SupplierLedgerEntry entry) async {
     if (entry.amountMinor == 0) {
       throw ArgumentError('A ledger entry amount cannot be zero.');
     }
@@ -592,18 +752,260 @@ class MockRiderRepository implements RiderRepository {
   }
 }
 
+/// Staff directory (Week 2 Day 5): mutable in-memory staff for the
+/// session, seeded from [demoStaff].
+class MockStaffRepository implements StaffRepository {
+  final List<Staff> _staff = List.of(demoStaff);
+
+  @override
+  Future<List<Staff>> getStaff({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_staff);
+    return List.unmodifiable(
+      _staff.where((member) => member.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<Staff?> getById(String id) async {
+    for (final member in _staff) {
+      if (member.id == id) return member;
+    }
+    return null;
+  }
+
+  @override
+  Future<Staff> createStaff(Staff staff) async {
+    final digits = _phoneDigits(staff.phone);
+    if (digits.isNotEmpty &&
+        _staff.any((s) => _phoneDigits(s.phone) == digits)) {
+      throw ArgumentError(
+        'A staff member with phone ${staff.phone} already exists.',
+      );
+    }
+    final created = staff.copyWith(
+      id: 'staff-${_staff.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _staff.add(created);
+    return created;
+  }
+
+  @override
+  Future<void> updateStaff(Staff staff) async {
+    final index = _staff.indexWhere((s) => s.id == staff.id);
+    if (index == -1) return;
+    final digits = _phoneDigits(staff.phone);
+    if (digits.isNotEmpty &&
+        _staff.any(
+          (s) => s.id != staff.id && _phoneDigits(s.phone) == digits,
+        )) {
+      throw ArgumentError(
+        'A staff member with phone ${staff.phone} already exists.',
+      );
+    }
+    _staff[index] = staff;
+  }
+
+  static String _phoneDigits(String phone) =>
+      phone.replaceAll(RegExp(r'[^0-9]'), '');
+}
+
+/// Attendance (Week 2 Day 5): mutable in-memory records for the
+/// session. The demo starts with no attendance — today fills in as
+/// staff check in.
+class MockAttendanceRepository implements AttendanceRepository {
+  final List<Attendance> _records = [];
+
+  @override
+  Future<List<Attendance>> getAttendances({
+    String? branchId,
+    DateTime? date,
+    String? employeeId,
+  }) async {
+    return List.unmodifiable(
+      _records.where((record) {
+        if (branchId != null && record.branchId != branchId) return false;
+        if (employeeId != null && record.employeeId != employeeId) {
+          return false;
+        }
+        if (date != null) {
+          if (record.date.year != date.year ||
+              record.date.month != date.month ||
+              record.date.day != date.day) {
+            return false;
+          }
+        }
+        return true;
+      }),
+    );
+  }
+
+  @override
+  Future<Attendance> upsertAttendance(Attendance attendance) async {
+    if (attendance.id.isEmpty) {
+      final created = attendance.copyWith(
+        id: 'att-${_records.length + 1}',
+        createdAt: DateTime.now(),
+      );
+      _records.add(created);
+      return created;
+    }
+    final index = _records.indexWhere((r) => r.id == attendance.id);
+    if (index == -1) {
+      _records.add(attendance);
+      return attendance;
+    }
+    _records[index] = attendance;
+    return attendance;
+  }
+}
+
+/// Shifts (Week 2 Day 5): mutable in-memory shifts for the session,
+/// seeded from [generateDemoShifts].
+class MockShiftRepository implements ShiftRepository {
+  final List<Shift> _shifts = generateDemoShifts();
+
+  @override
+  Future<List<Shift>> getShifts({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_shifts);
+    return List.unmodifiable(
+      _shifts.where((shift) => shift.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<Shift?> getById(String id) async {
+    for (final shift in _shifts) {
+      if (shift.id == id) return shift;
+    }
+    return null;
+  }
+
+  @override
+  Future<Shift> createShift(Shift shift) async {
+    final created = shift.copyWith(
+      id: 'shift-${_shifts.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _shifts.add(created);
+    return created;
+  }
+
+  @override
+  Future<void> updateShift(Shift shift) async {
+    final index = _shifts.indexWhere((s) => s.id == shift.id);
+    if (index == -1) return;
+    _shifts[index] = shift;
+  }
+}
+
+/// Expenses (Week 2 Day 5): mutable in-memory expenses for the
+/// session, seeded from [generateDemoExpenses].
+class MockExpenseRepository implements ExpenseRepository {
+  final List<Expense> _expenses = generateDemoExpenses();
+
+  @override
+  Future<List<Expense>> getExpenses({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_expenses);
+    return List.unmodifiable(
+      _expenses.where((expense) => expense.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<Expense> createExpense(Expense expense) async {
+    final created = expense.copyWith(
+      id: 'exp-${_expenses.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _expenses.add(created);
+    return created;
+  }
+}
+
+/// Financial transactions (Week 2 Day 5): mutable in-memory
+/// append-only transactions for the session, seeded with the mirror
+/// of the seeded expenses.
+class MockFinancialTransactionRepository
+    implements FinancialTransactionRepository {
+  final List<FinancialTransaction> _txns =
+      generateDemoFinancialTransactions();
+
+  @override
+  Future<List<FinancialTransaction>> getTransactions({
+    String? branchId,
+  }) async {
+    if (branchId == null) return List.unmodifiable(_txns);
+    return List.unmodifiable(
+      _txns.where((txn) => txn.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<FinancialTransaction> addTransaction(
+    FinancialTransaction txn,
+  ) async {
+    final created = txn.copyWith(
+      id: 'ftx-${_txns.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _txns.add(created);
+    return created;
+  }
+}
+
+/// Supplier payments (Week 2 Day 5): mutable in-memory payments for
+/// the session. The demo starts with none — the seeded supplier
+/// ledger carries one historical payment (MedServe, Rs 11,750) as a
+/// ledger entry, not as a payment record, because payment records
+/// only exist from the Day 5 allocation flow onward.
+class MockSupplierPaymentRepository implements SupplierPaymentRepository {
+  final List<SupplierPayment> _payments = [];
+
+  @override
+  Future<List<SupplierPayment>> getPayments({
+    String? branchId,
+    String? supplierId,
+  }) async {
+    var scoped = _payments;
+    if (branchId != null) {
+      scoped = scoped
+          .where((payment) => payment.branchId == branchId)
+          .toList();
+    }
+    if (supplierId != null) {
+      scoped = scoped
+          .where((payment) => payment.supplierId == supplierId)
+          .toList();
+    }
+    return List.unmodifiable(scoped);
+  }
+
+  @override
+  Future<SupplierPayment> createPayment(SupplierPayment payment) async {
+    final created = payment.copyWith(
+      id: 'spay-${_payments.length + 1}',
+      createdAt: DateTime.now(),
+    );
+    _payments.add(created);
+    return created;
+  }
+}
+
 class MockPrescriptionRepository implements PrescriptionRepository {
   final List<Prescription> _prescriptions = generateDemoPrescriptions();
 
   List<Prescription> _scoped(String? branchId) {
-    // Prescriptions carry no branchId on the Day 0 model; the seed
-    // encodes the branch in the id prefix (`rx-dha-…` / `rx-glb-…`).
-    // Week 2 adds a real branchId field when the model is migrated.
+    // Prescriptions carry a branchId on the Day 3 model (D69); the
+    // seed encodes the branch in the id prefix (`rx-dha-…` /
+    // `rx-glb-…`) for records created before that field existed.
     if (branchId == null) return _prescriptions;
-    final prefix = branchId == 'branch-dha-main' ? 'rx-dha-' : 'rx-glb-';
-    return _prescriptions
-        .where((rx) => rx.id.startsWith(prefix))
-        .toList();
+    return _prescriptions.where((rx) {
+      final rxBranch = rx.branchId;
+      if (rxBranch != null) return rxBranch == branchId;
+      final prefix = branchId == 'branch-dha-main' ? 'rx-dha-' : 'rx-glb-';
+      return rx.id.startsWith(prefix);
+    }).toList();
   }
 
   @override
@@ -613,9 +1015,8 @@ class MockPrescriptionRepository implements PrescriptionRepository {
   @override
   Future<List<Prescription>> getPending({String? branchId}) async =>
       List.unmodifiable(
-        _scoped(
-          branchId,
-        ).where((rx) => rx.status == PrescriptionStatus.pending),
+        _scoped(branchId)
+            .where((rx) => rx.status == PrescriptionStatus.pending),
       );
 
   @override
@@ -649,17 +1050,45 @@ class MockPrescriptionRepository implements PrescriptionRepository {
   }
 
   @override
-  Future<Prescription> createPrescription(Prescription prescription) async {
+  Future<Prescription?> resubmitPrescription({
+    required String id,
+    required DateTime validUntil,
+  }) async {
+    final index = _prescriptions.indexWhere((rx) => rx.id == id);
+    if (index == -1) return null;
+    final old = _prescriptions[index];
+    final updated = old.copyWith(
+      status: PrescriptionStatus.pending,
+      clearReviewedBy: true,
+      clearReviewedAt: true,
+      clearReviewNotes: true,
+      validUntil: validUntil,
+      resubmissionCount: old.resubmissionCount + 1,
+    );
+    _prescriptions[index] = updated;
+    return updated;
+  }
+
+  @override
+  Future<Prescription> createPrescription(
+    Prescription prescription, {
+    String? branchId,
+  }) async {
     // New records join the active branch by id prefix (see _scoped):
     // the caller passes an id of '' and the branch in the id it
     // builds; here we assign the next sequence for that branch.
-    final isDha = prescription.id.startsWith('rx-dha-');
+    // A branch id passed explicitly (or on the record) wins over the
+    // prefix and is stored on the record (Week 2 Day 3, D69).
+    final explicitBranch = branchId ?? prescription.branchId;
+    final isDha =
+        explicitBranch == 'branch-dha-main' ||
+        (explicitBranch == null && prescription.id.startsWith('rx-dha-'));
     final prefix = isDha ? 'rx-dha-' : 'rx-glb-';
-    final count = _prescriptions
-        .where((rx) => rx.id.startsWith(prefix))
-        .length;
+    final count = _prescriptions.where((rx) => rx.id.startsWith(prefix)).length;
     final created = prescription.copyWith(
       id: '$prefix${count + 1}',
+      branchId:
+          explicitBranch ?? (isDha ? 'branch-dha-main' : 'branch-demo-gulberg'),
       status: PrescriptionStatus.pending,
       createdAt: DateTime.now(),
     );
@@ -697,10 +1126,17 @@ class MockPurchaseOrderRepository implements PurchaseOrderRepository {
 
   @override
   Future<PurchaseOrder> createPurchaseOrder(PurchaseOrder order) async {
+    // Client-generated id (auto purchase approval, D65): a retry with
+    // the same key returns the already-created PO, never a duplicate.
+    if (order.id.isNotEmpty) {
+      for (final existing in _orders) {
+        if (existing.id == order.id) return existing;
+      }
+    }
     final branchCode = order.branchId == 'branch-dha-main' ? 'DHA' : 'GLB';
     final sequence = 1000 + _orders.length + 1;
     final saved = order.copyWith(
-      id: 'po-$branchCode-$sequence',
+      id: order.id.isEmpty ? 'po-$branchCode-$sequence' : order.id,
       poNumber: 'PO-$branchCode-$sequence',
       status: PurchaseOrderStatus.draft,
       createdAt: DateTime.now(),
@@ -720,38 +1156,83 @@ class MockPurchaseOrderRepository implements PurchaseOrderRepository {
 
 /// Default providers — mock implementations until the Firebase data layer
 /// lands in Week 2. Screens inject these providers, never the mocks.
+///
+/// Week 2 Day 3 (D75): every provider reads the repository bundle
+/// ([repositoryBundleProvider]), so overriding that one provider
+/// switches the whole app from mock to Firestore. The default bundle
+/// is the mock bundle — the app works exactly as before with zero
+/// config.
 final medicineRepositoryProvider = Provider<MedicineRepository>(
-  (ref) => MockMedicineRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).medicines,
 );
 
 final orderRepositoryProvider = Provider<OrderRepository>(
-  (ref) => MockOrderRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).orders,
 );
 
 final inventoryRepositoryProvider = Provider<InventoryRepository>(
-  (ref) => MockInventoryRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).inventory,
 );
 
 final customerRepositoryProvider = Provider<CustomerRepository>(
-  (ref) => MockCustomerRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).customers,
 );
 
 final saleRepositoryProvider = Provider<SaleRepository>(
-  (ref) => MockSaleRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).sales,
+);
+
+final saleReturnRepositoryProvider = Provider<SaleReturnRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).saleReturns,
 );
 
 final supplierRepositoryProvider = Provider<SupplierRepository>(
-  (ref) => MockSupplierRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).suppliers,
 );
 
 final prescriptionRepositoryProvider = Provider<PrescriptionRepository>(
-  (ref) => MockPrescriptionRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).prescriptions,
 );
 
 final purchaseOrderRepositoryProvider = Provider<PurchaseOrderRepository>(
-  (ref) => MockPurchaseOrderRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).purchaseOrders,
 );
 
 final riderRepositoryProvider = Provider<RiderRepository>(
-  (ref) => MockRiderRepository(),
+  (ref) => ref.watch(repositoryBundleProvider).riders,
+);
+
+/// Week 2 Day 5 repositories (D89): these are mock-backed providers
+/// for now — they are NOT part of the Day 3 [RepositoryBundle] yet,
+/// because their Firestore implementations land with the
+/// Firebase-wiring chunk (same Day 7 → Day 3 pattern as suppliers
+/// and purchase orders: interface + mock first, Firestore behind
+/// the same interface next). The Firestore schema paths for all six
+/// collections already exist (`firestore_schema.dart` §3.6/§3.7),
+/// so the mappers and repositories have their contract ready.
+/// Each provider owns one mock instance per scope; screens inject
+/// these providers, never the mocks.
+final staffRepositoryProvider = Provider<StaffRepository>(
+  (ref) => MockStaffRepository(),
+);
+
+final attendanceRepositoryProvider = Provider<AttendanceRepository>(
+  (ref) => MockAttendanceRepository(),
+);
+
+final shiftRepositoryProvider = Provider<ShiftRepository>(
+  (ref) => MockShiftRepository(),
+);
+
+final expenseRepositoryProvider = Provider<ExpenseRepository>(
+  (ref) => MockExpenseRepository(),
+);
+
+final financialTransactionRepositoryProvider =
+    Provider<FinancialTransactionRepository>(
+      (ref) => MockFinancialTransactionRepository(),
+    );
+
+final supplierPaymentRepositoryProvider = Provider<SupplierPaymentRepository>(
+  (ref) => MockSupplierPaymentRepository(),
 );

@@ -2,12 +2,16 @@ import 'dart:math';
 
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/expense.dart';
+import '../../models/financial_transaction.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../../models/order.dart';
 import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
+import '../../models/shift.dart';
+import '../../models/staff.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
 import '../utils/money.dart';
@@ -924,6 +928,276 @@ const demoRiders = <Rider>[
   ),
 ];
 
+/// Sample staff directory (Week 2 Day 5, fictional). One row per
+/// SRS role family across the two demo branches: the DHA branch
+/// manager, pharmacists, cashiers, an inventory manager, and a
+/// Gulberg set. `roleKey` is the SRS §5.1 role the permission
+/// service enforces; `jobTitle` is the human title on the record.
+/// Salaries are fictional demo figures (paisa per month).
+const demoStaff = <Staff>[
+  Staff(
+    id: 'staff-1',
+    name: 'Ayesha Khan',
+    email: 'ayesha@fazaldin-demo.pk',
+    role: StaffRole.owner,
+    roleKey: 'owner',
+    jobTitle: 'Owner',
+    phone: '0300-1112233',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-2',
+    name: 'Hassan Raza',
+    email: 'hassan@fazaldin-demo.pk',
+    role: StaffRole.pharmacist,
+    roleKey: 'branch_manager',
+    jobTitle: 'Branch Manager — DHA',
+    phone: '0301-2223344',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-3',
+    name: 'Fatima Noor',
+    email: 'fatima@fazaldin-demo.pk',
+    role: StaffRole.pharmacist,
+    roleKey: 'pharmacist',
+    jobTitle: 'Senior Pharmacist',
+    phone: '0302-3334455',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-4',
+    name: 'Bilal Aslam',
+    email: 'bilal@fazaldin-demo.pk',
+    role: StaffRole.counter,
+    roleKey: 'cashier',
+    jobTitle: 'Cashier',
+    phone: '0303-4445566',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-5',
+    name: 'Sana Tariq',
+    email: 'sana@fazaldin-demo.pk',
+    role: StaffRole.counter,
+    roleKey: 'cashier',
+    jobTitle: 'Counter Staff',
+    phone: '0304-5556677',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-6',
+    name: 'Omar Siddiqui',
+    email: 'omar@fazaldin-demo.pk',
+    role: StaffRole.counter,
+    roleKey: 'inventory_manager',
+    jobTitle: 'Inventory Manager',
+    phone: '0305-6667788',
+    branchId: 'branch-dha-main',
+  ),
+  Staff(
+    id: 'staff-7',
+    name: 'Mariam Yousuf',
+    email: 'mariam@fazaldin-demo.pk',
+    role: StaffRole.pharmacist,
+    roleKey: 'branch_manager',
+    jobTitle: 'Branch Manager — Gulberg',
+    phone: '0306-7778899',
+    branchId: 'branch-demo-gulberg',
+  ),
+  Staff(
+    id: 'staff-8',
+    name: 'Danish Ali',
+    email: 'danish@fazaldin-demo.pk',
+    role: StaffRole.pharmacist,
+    roleKey: 'pharmacist',
+    jobTitle: 'Pharmacist',
+    phone: '0307-8889900',
+    branchId: 'branch-demo-gulberg',
+  ),
+  Staff(
+    id: 'staff-9',
+    name: 'Hina Shahid',
+    email: 'hina@fazaldin-demo.pk',
+    role: StaffRole.counter,
+    roleKey: 'cashier',
+    jobTitle: 'Cashier',
+    phone: '0308-9990011',
+    branchId: 'branch-demo-gulberg',
+  ),
+  Staff(
+    id: 'staff-10',
+    name: 'Kamran Sheikh',
+    email: 'kamran@fazaldin-demo.pk',
+    role: StaffRole.counter,
+    roleKey: 'accountant',
+    jobTitle: 'Accountant (head office)',
+    phone: '0309-0001122',
+    branchId: 'branch-dha-main',
+  ),
+];
+
+/// Sample shifts (Week 2 Day 5, fictional): a morning and an
+/// evening shift per branch, with the branch's staff assigned.
+List<Shift> generateDemoShifts() {
+  return [
+    Shift(
+      id: 'shift-dha-morning',
+      branchId: 'branch-dha-main',
+      name: 'Morning — DHA',
+      startTime: '09:00',
+      endTime: '17:00',
+      employeeIds: ['staff-2', 'staff-3', 'staff-4', 'staff-6'],
+    ),
+    Shift(
+      id: 'shift-dha-evening',
+      branchId: 'branch-dha-main',
+      name: 'Evening — DHA',
+      startTime: '17:00',
+      endTime: '23:00',
+      employeeIds: ['staff-5'],
+    ),
+    Shift(
+      id: 'shift-glb-morning',
+      branchId: 'branch-demo-gulberg',
+      name: 'Morning — Gulberg',
+      startTime: '09:00',
+      endTime: '17:00',
+      employeeIds: ['staff-7', 'staff-8', 'staff-9'],
+    ),
+  ];
+}
+
+/// Sample operating expenses (Week 2 Day 5, fictional, int paisa).
+/// Spread over the last 30 days so the P&L report has demo data;
+/// DHA carries the rent + salaries, Gulberg the smaller running
+/// costs.
+List<Expense> generateDemoExpenses({DateTime? now}) {
+  final reference = now ?? DateTime.now();
+  final today = DateTime(reference.year, reference.month, reference.day);
+  Expense expense(
+    String id,
+    String branchId,
+    String category,
+    int amountMinor,
+    String description,
+    int daysAgo,
+  ) {
+    return Expense(
+      id: id,
+      branchId: branchId,
+      category: category,
+      amountMinor: amountMinor,
+      description: description,
+      expenseDate: today.subtract(Duration(days: daysAgo)),
+      createdBy: 'staff-1',
+      createdAt: today.subtract(Duration(days: daysAgo)),
+    );
+  }
+
+  return [
+    expense(
+      'exp-1',
+      'branch-dha-main',
+      'Rent',
+      8500000,
+      'Monthly shop rent — DHA branch',
+      28,
+    ),
+    expense(
+      'exp-2',
+      'branch-dha-main',
+      'Salaries',
+      12000000,
+      'Staff salaries — October cycle',
+      26,
+    ),
+    expense(
+      'exp-3',
+      'branch-dha-main',
+      'Utilities',
+      1850000,
+      'Electricity + water bill',
+      12,
+    ),
+    expense(
+      'exp-4',
+      'branch-dha-main',
+      'Transport',
+      320000,
+      'Delivery fuel — rider bikes',
+      6,
+    ),
+    expense(
+      'exp-5',
+      'branch-dha-main',
+      'Supplies',
+      450000,
+      'Packing bags + receipt rolls',
+      3,
+    ),
+    expense(
+      'exp-6',
+      'branch-demo-gulberg',
+      'Rent',
+      6000000,
+      'Monthly shop rent — Gulberg branch',
+      27,
+    ),
+    expense(
+      'exp-7',
+      'branch-demo-gulberg',
+      'Salaries',
+      7500000,
+      'Staff salaries — October cycle',
+      25,
+    ),
+    expense(
+      'exp-8',
+      'branch-demo-gulberg',
+      'Utilities',
+      1200000,
+      'Electricity bill',
+      9,
+    ),
+    expense(
+      'exp-9',
+      'branch-demo-gulberg',
+      'Maintenance',
+      280000,
+      'Fridge servicing — cold chain',
+      2,
+    ),
+  ];
+}
+
+/// Financial-transaction mirror of the seeded expenses (Week 2 Day 5).
+///
+/// Every seeded expense has one matching `expense` transaction with
+/// the same (negative) amount, branch, category and date — the same
+/// pairing the expense-recording flow writes live. The P&L reads
+/// the `expenses` collection; these transactions are the audit
+/// trail (and the other-income lines, once income is recorded).
+List<FinancialTransaction> generateDemoFinancialTransactions({
+  DateTime? now,
+}) {
+  return generateDemoExpenses(now: now)
+      .map(
+        (expense) => FinancialTransaction(
+          id: 'ftx-${expense.id}',
+          branchId: expense.branchId,
+          type: FinancialTransactionType.expense,
+          amountMinor: -expense.amountMinor,
+          category: expense.category,
+          referenceType: 'expense',
+          referenceId: expense.id,
+          createdBy: expense.createdBy,
+          createdAt: expense.createdAt,
+        ),
+      )
+      .toList();
+}
+
 /// Branch ids used by the seed data (must match `demoBranches`).
 const demoSeedBranchIds = ['branch-dha-main', 'branch-demo-gulberg'];
 
@@ -1152,24 +1426,40 @@ List<Prescription> generateDemoPrescriptions({DateTime? now}) {
       sequence++;
       final customer =
           demoCustomers[random.nextInt(demoCustomers.length)];
+      // Draw order is deliberate: status first, then the issue
+      // date (days, hours) — the deterministic stream (D22) must
+      // not shift, or every later seeded value changes with it.
+      final status = i == 0
+          ? PrescriptionStatus.pending
+          : statuses[random.nextInt(statuses.length)];
+      final issuedAt = today.subtract(
+        Duration(
+          days: random.nextInt(5),
+          hours: random.nextInt(10),
+        ),
+      );
+      // Week 2 Day 5 (D90): prescriptions are valid 30 days from
+      // issue. The second prescription of each branch (i == 1) is
+      // seeded already expired, so the expired-validity badge and
+      // the dispatch guard's expiry block are demonstrable without
+      // hunting — it is never the forced-Pending linked record
+      // (i == 0), so the Day 7 hold → approve → dispatch path is
+      // unaffected.
+      final validUntil = i == 1
+          ? today.subtract(const Duration(days: 1))
+          : issuedAt.add(const Duration(days: 30));
       prescriptions.add(
         Prescription(
           id: 'rx-$branchCode-$sequence',
           customerId: customer.id,
           imageUrl:
               'assets/images/prescriptions/sample-prescription-${sequence % 2 + 1}.png',
-          status: i == 0
-              ? PrescriptionStatus.pending
-              : statuses[random.nextInt(statuses.length)],
+          status: status,
           medicinesText: i % 2 == 0
               ? 'Augmentin 625mg — 1 tablet twice daily (5 days); Panadol Extra 500mg — as needed'
               : 'Concor 5mg — 1 tablet daily; Glucophage 500mg — 1 tablet twice daily',
-          createdAt: today.subtract(
-            Duration(
-              days: random.nextInt(5),
-              hours: random.nextInt(10),
-            ),
-          ),
+          createdAt: issuedAt,
+          validUntil: validUntil,
         ),
       );
     }
