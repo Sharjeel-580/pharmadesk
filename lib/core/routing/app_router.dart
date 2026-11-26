@@ -6,15 +6,27 @@ import '../../features/authentication/forgot_password_screen.dart';
 import '../../features/authentication/login_screen.dart';
 import '../../features/authentication/profile_screen.dart';
 import '../../features/authentication/splash_screen.dart';
+import '../../features/audit/audit_log_screen.dart';
+import '../../features/backup/backup_screen.dart';
 import '../../features/billing/pos_screen.dart';
 import '../../features/billing/receipt_screen.dart';
 import '../../features/billing/return_form_screen.dart';
 import '../../features/billing/returns_list_screen.dart';
 import '../../features/billing/sales_history_screen.dart';
+import '../../features/branches/branch_detail_screen.dart';
+import '../../features/branches/branch_list_screen.dart';
 import '../../features/customers/customer_detail_screen.dart';
 import '../../features/customers/customer_list_screen.dart';
 import '../../features/dashboard/dashboard_screen.dart';
+import '../../features/finance/aging_screen.dart';
+import '../../features/finance/cashbook_screen.dart';
+import '../../features/finance/finance_hub_screen.dart';
+import '../../features/finance/statements_screen.dart';
 import '../../features/inventory/inventory_screen.dart';
+import '../../features/inventory/adjustment_queue_screen.dart';
+import '../../features/inventory/stock_transfer_detail_screen.dart';
+import '../../features/inventory/stock_transfer_form_screen.dart';
+import '../../features/inventory/stock_transfer_list_screen.dart';
 import '../../features/medicines/medicine_detail_screen.dart';
 import '../../features/medicines/medicine_list_screen.dart';
 import '../../features/notifications/notifications_screen.dart';
@@ -28,6 +40,8 @@ import '../../features/purchases/purchase_detail_screen.dart';
 import '../../features/purchases/purchase_form_screen.dart';
 import '../../features/purchases/purchase_list_screen.dart';
 import '../../features/reports/reports_screen.dart';
+import '../../features/riders/rider_detail_screen.dart';
+import '../../features/riders/rider_list_screen.dart';
 import '../../features/settings/feature_gate.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/staff/attendance_screen.dart';
@@ -134,6 +148,14 @@ const appModules = <AppModule>[
     icon: Icons.bar_chart_outlined,
     description: 'Sales, profit, stock valuation and expiry reports.',
     day: 'Week 1 — Day 7',
+  ),
+  AppModule(
+    title: 'Finance',
+    route: '/finance',
+    icon: Icons.account_balance_outlined,
+    description:
+        'Cashbook, payables/receivables aging, P&L and branch statements.',
+    day: 'Week 4 — Day 3',
   ),
   AppModule(
     title: 'Staff & HR',
@@ -305,6 +327,65 @@ GoRouter createAppRouter({
               child: const InventoryScreen(),
             ),
           ),
+          // Stock transfers (Week 4 Day 2, D118 — SRS D-16): a
+          // sub-screen of the Inventory module (same feature
+          // toggle), capability-gated on `stockTransfer` at the
+          // route (see `routeCapability`).
+          GoRoute(
+            path: '/inventory/transfers',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const StockTransferListScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/inventory/transfers/new',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const StockTransferFormScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/inventory/transfers/:id',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: StockTransferDetailScreen(
+                transferId: state.pathParameters['id'] ?? '',
+              ),
+            ),
+          ),
+          // Adjustment approval queue (Week 4 Day 5, D141 — SRS
+          // D-14): a sub-screen of the Inventory module, gated on
+          // `stockAdjustReq` at the route (see `routeCapability`).
+          GoRoute(
+            path: '/inventory/adjustments',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const AdjustmentQueueScreen(),
+            ),
+          ),
+          // Riders & delivery (Week 4 Day 2, D119/D121 — SRS D-21):
+          // a sub-screen of the Orders module for navigation (same
+          // feature toggle via the shell entries); no separate
+          // §5.1 capability governs rider viewing, so the route is
+          // not capability-gated — assignment itself is guarded by
+          // the order's editability + the rider's availability.
+          GoRoute(
+            path: '/riders',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const RiderListScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/riders/:id',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: RiderDetailScreen(
+                riderId: state.pathParameters['id'] ?? '',
+              ),
+            ),
+          ),
           GoRoute(
             path: '/billing',
             builder: (context, state) => FeatureGate(
@@ -432,6 +513,39 @@ GoRouter createAppRouter({
               child: const ReportsScreen(),
             ),
           ),
+          // Finance hub (Week 4 Day 3, D124 — SRS D-24 / D-25 /
+          // D-26): the hub itself is gated on the feature flag only
+          // (each card checks its §5.1 capability in the active
+          // branch); the three screens are capability-gated at the
+          // route (see `routeCapability`).
+          GoRoute(
+            path: '/finance',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const FinanceHubScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/finance/cashbook',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const CashbookScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/finance/aging',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const AgingScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/finance/statements',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const StatementsScreen(),
+            ),
+          ),
           GoRoute(
             path: '/staff',
             builder: (context, state) => FeatureGate(
@@ -472,6 +586,41 @@ GoRouter createAppRouter({
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
               child: const SettingsScreen(),
+            ),
+          ),
+          // System hub (Week 4 Day 4, D135 — SRS D-28 / D-33 /
+          // D-35): sub-screens of Settings for navigation (sidebar
+          // + More sheet), capability-gated at the route on their
+          // own §5.1 rows (see `routeCapability` + the FeatureGate
+          // non-module branch).
+          GoRoute(
+            path: '/branches',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const BranchListScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/branches/:id',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: BranchDetailScreen(
+                branchId: state.pathParameters['id'] ?? '',
+              ),
+            ),
+          ),
+          GoRoute(
+            path: '/audit-log',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const AuditLogScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/backup',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const BackupScreen(),
             ),
           ),
           GoRoute(
