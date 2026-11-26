@@ -100,3 +100,35 @@ List<Medicine> sortMedicines(
   }
   return sorted;
 }
+
+/// Barcode uniqueness (Week 6 Day 4, D166 — the Day 25 follow-up:
+/// uniqueness belongs in the repository, not the form, D151).
+///
+/// Returns the OTHER medicine already using [barcode], or `null`
+/// when the barcode is free. An empty / absent barcode is never a
+/// conflict (not every medicine has one); the medicine with id
+/// [excludeId] keeping its own barcode is never a conflict either.
+/// Comparison is on the trimmed barcode, so surrounding whitespace
+/// cannot smuggle a duplicate past the check.
+Medicine? findBarcodeConflict(
+  Iterable<Medicine> medicines, {
+  required String? barcode,
+  required String excludeId,
+}) {
+  final needle = barcode?.trim() ?? '';
+  if (needle.isEmpty) return null;
+  for (final medicine in medicines) {
+    if (medicine.id == excludeId) continue;
+    if ((medicine.barcode?.trim() ?? '') == needle) return medicine;
+  }
+  return null;
+}
+
+/// The rejection message for a barcode already in use — the same
+/// wording in the mock and Firestore repositories, so the edit form
+/// (which surfaces the repo's `ArgumentError` verbatim, D153) shows
+/// one message everywhere.
+String barcodeConflictMessage(String barcode, String otherMedicineName) =>
+    'Barcode "$barcode" is already used by "$otherMedicineName". '
+    'Give this medicine a different barcode or leave it empty.';
+
