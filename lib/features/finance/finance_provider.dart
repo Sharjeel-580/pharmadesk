@@ -439,10 +439,19 @@ class DailyClosingsNotifier extends AsyncNotifier<List<DailyClosing>> {
       transactions: transactions,
       branchId: branchId,
     );
+    // Week 8 Day 5 (D180): the opening follows the CORRECTED
+    // balance of the previous closing — a correction re-states the
+    // day, so a close computed after it must not open from the
+    // original figure. Read fresh from the repo (not the notifier
+    // state) so a correction recorded just before this close counts.
+    final corrections = await ref
+        .read(closingCorrectionRepositoryProvider)
+        .getCorrections(branchId: branchId);
     final opening = previousClosingBalance(
       closings: existing,
       branchId: branchId,
       date: day,
+      corrections: corrections,
     );
     final totals = computeDailyClosing(
       entries: entries,
@@ -651,10 +660,17 @@ class CashReconciliationsNotifier
     final closings = await ref
         .read(dailyClosingRepositoryProvider)
         .getClosings(branchId: branchId);
+    // Week 8 Day 5 (D180): same corrected-chain rule as closeDay —
+    // the drawer opens from the balance the previous closing stands
+    // at, not its original recorded balance.
+    final corrections = await ref
+        .read(closingCorrectionRepositoryProvider)
+        .getCorrections(branchId: branchId);
     final opening = previousClosingBalance(
       closings: closings,
       branchId: branchId,
       date: day,
+      corrections: corrections,
     );
     final expected = expectedDrawerMinor(
       sales: sales,

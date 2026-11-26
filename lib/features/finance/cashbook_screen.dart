@@ -243,6 +243,9 @@ class _CashbookScreenState extends ConsumerState<CashbookScreen> {
               closings: closings,
               branchId: branch.id,
               date: day,
+              // Week 8 Day 5 (D180): the close dialog opens from
+              // the corrected balance, like closeDay itself.
+              corrections: corrections,
             ),
           );
     // Week 5 Day 4 (D157): the expected drawer for the selected day
@@ -258,6 +261,9 @@ class _CashbookScreenState extends ConsumerState<CashbookScreen> {
               closings: closings,
               branchId: branch.id,
               date: day,
+              // Week 8 Day 5 (D180): the drawer opens from the
+              // corrected balance, like reconcileDay itself.
+              corrections: corrections,
             ),
             date: day,
           );

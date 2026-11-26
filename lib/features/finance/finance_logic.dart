@@ -426,10 +426,23 @@ DailyClosingTotals computeDailyClosing({
 /// exists. A closing for the same day is not its own opening — the
 /// caller rejects a duplicate close first (see
 /// `validateDailyClosing`).
+///
+/// Week 8 Day 5 (D180): when [corrections] are given, the latest
+/// closing contributes the balance it STANDS at — its corrected
+/// balance via [adjustedClosingTotals] — not the original recorded
+/// balance. A correction re-states the day in full (D156), so a
+/// close or reconciliation computed AFTER the correction must open
+/// from the corrected figure; opening from the original would leave
+/// the next day's opening, close totals and expected drawer
+/// disagreeing with the corrected closing the screen itself shows.
+/// A closing made BEFORE the correction keeps its snapshot (closings
+/// are never rewritten); only later closes/reconciliations follow
+/// the corrected chain.
 int previousClosingBalance({
   required List<DailyClosing> closings,
   required String branchId,
   required DateTime date,
+  List<ClosingCorrection> corrections = const [],
 }) {
   final day = DateTime(date.year, date.month, date.day);
   DailyClosing? latest;
@@ -448,7 +461,11 @@ int previousClosingBalance({
       latest = closing;
     }
   }
-  return latest?.closingBalanceMinor ?? 0;
+  if (latest == null) return 0;
+  return adjustedClosingTotals(
+    original: latest,
+    corrections: corrections,
+  ).closingBalanceMinor;
 }
 
 /// Validates closing a day: the day may not be in the future, and a
