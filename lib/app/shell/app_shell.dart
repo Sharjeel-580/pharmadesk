@@ -177,8 +177,12 @@ class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
   }
 }
 
-/// Branch switcher: popup menu over the two demo branches. Selecting one
-/// updates [activeBranchProvider], so every screen reading the provider
+/// Branch switcher: popup menu over the branch directory (D163 —
+/// the directory seeds from the demo branches and holds every branch
+/// added through Branch Management, so a directory-added branch is
+/// selectable here and becomes active through
+/// [ActiveBranchNotifier.switchTo]). Selecting one updates
+/// [activeBranchProvider], so every screen reading the provider
 /// (e.g. the module placeholder's branch chip) changes immediately.
 ///
 /// Compact (D117): the store icon is dropped and the name cap follows
@@ -199,6 +203,10 @@ class _BranchSwitcher extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final active = ref.watch(activeBranchProvider);
+    // The directory, not the demo const: a branch added through
+    // Branch Management appears in this menu (D163). It seeds from
+    // the demo branches, so the two demo branches are still listed.
+    final branches = ref.watch(branchDirectoryProvider);
     final theme = Theme.of(context);
     return PopupMenuButton<String>(
       key: const ValueKey('branch-switcher-button'),
@@ -207,7 +215,7 @@ class _BranchSwitcher extends ConsumerWidget {
       onSelected: (branchId) =>
           ref.read(activeBranchProvider.notifier).switchTo(branchId),
       itemBuilder: (context) => [
-        for (final branch in demoBranches)
+        for (final branch in branches)
           PopupMenuItem<String>(
             value: branch.id,
             child: Row(
