@@ -607,16 +607,26 @@ class _RecentOrderRow extends StatelessWidget {
                 ],
               ),
             ),
-            Text(
-              formatPkr(rupeesToMinorUnits(order.totalAmount)),
-              style: theme.textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(width: 12),
-            StatusBadge(
-              label: orderStatusLabel(order.status),
-              kind: orderStatusKind(order.status),
+            // Week 4 Day 5 (D142): price + badge sat side by side
+            // and overflowed by 11px at 390px — the badge ("Out for
+            // Delivery") is long. Price above, badge below: the
+            // column is only as wide as the badge, and the id
+            // column keeps the rest.
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  formatPkr(rupeesToMinorUnits(order.totalAmount)),
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                StatusBadge(
+                  label: orderStatusLabel(order.status),
+                  kind: orderStatusKind(order.status),
+                ),
+              ],
             ),
           ],
         ),
