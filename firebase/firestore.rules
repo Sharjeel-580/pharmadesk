@@ -337,6 +337,30 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Quarantine outcome approval queue (Week 7 Day 1, D171 — SRS
+    // D-11 / FR-INV-07, §5.2.4): one doc per request, created
+    // pending and updated in place when decided. Writers are the
+    // requester roles (stockReceive: Owner / HO Admin / Branch Mgr
+    // / Inventory Mgr) and the approver roles (stockAdjustApprove:
+    // Owner / HO Admin / Branch Mgr) — the union, like the batch
+    // rule; the not-the-requester check (§5.2.4) is enforced in
+    // the app, the rules enforce branch isolation + shape. Never
+    // deleted.
+    match /branches/{branchId}/quarantineOutcomes/{requestId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields()
+        && request.resource.data.outcome in ['returnToSupplier',
+          'dispose']
+        && request.resource.data.quantityAtRequest is int
+        && request.resource.data.status in ['pending', 'approved',
+          'rejected'];
+      allow delete: if false;
+    }
+
     match /branches/{branchId}/customers/{customerId} {
       allow read: if inBranch(branchId, resource.data.organizationId);
       allow create, update: if inBranchForWrite(branchId,
