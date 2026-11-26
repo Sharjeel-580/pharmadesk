@@ -9,9 +9,12 @@ import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../core/widgets/pagination_controls.dart';
+import '../../models/branch_inventory_location.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../authentication/auth_state.dart';
+import '../inventory/branch_shelf_dialog.dart';
 import '../inventory/inventory_logic.dart';
 import '../inventory/inventory_provider.dart';
 import '../inventory/stock_operation_dialogs.dart';
@@ -34,7 +37,7 @@ class MedicineDetailScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final branch = ref.watch(activeBranchProvider);
     final user = ref.watch(authProvider);
-    final canEditLocation = permissionService.canWrite(
+    final canEditMedicine = permissionService.canWrite(
       user,
       'medicineCrud',
       branch.id,
@@ -52,6 +55,21 @@ class MedicineDetailScreen extends ConsumerWidget {
         ),
       );
     }
+    // Per-branch rack/shelf override (Week 5 Day 3, D152): the
+    // override wins for this branch, otherwise the master location
+    // is the default shelf.
+    final locations =
+        ref.watch(branchLocationsProvider(branch.id)).asData?.value ??
+        const <BranchInventoryLocation>[];
+    final branchOverride = branchLocationFor(
+      locations,
+      branchId: branch.id,
+      medicineId: medicine.id,
+    );
+    final location = effectiveLocation(
+      masterLocation: medicine.location,
+      override: branchOverride,
+    );
     final allInventory = ref.watch(inventoryProvider).asData?.value ?? [];
     final branchBatches = allInventory
         .where(
@@ -95,44 +113,73 @@ class MedicineDetailScreen extends ConsumerWidget {
                     label: 'MRP',
                     value: formatPkr(rupeesToMinorUnits(medicine.mrp!)),
                   ),
-                _InfoRow(
-                  label: 'Barcode',
-                  value: medicine.barcode ?? '—',
-                ),
+                _InfoRow(label: 'Barcode', value: medicine.barcode ?? '—'),
                 _InfoRow(
                   label: 'Location',
-                  value: medicine.location ?? 'Not set',
+                  value: location == null
+                      ? 'Not set'
+                      : branchOverride == null
+                      ? location
+                      : '$location (this branch)',
                 ),
-                if (canEditLocation) ...[
+                if (canEditMedicine) ...[
                   const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: PharmaButton(
-                      key: const ValueKey('medicine-edit-location'),
-                      label: 'Edit location',
-                      icon: Icons.edit_location_outlined,
-                      variant: PharmaButtonVariant.secondary,
-                      size: PharmaButtonSize.small,
-                      onPressed: () async {
-                        final saved =
-                            await showEditMedicineLocationDialog(
-                              context,
-                              ref,
-                              medicine: medicine,
-                            );
-                        if (saved != null && context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                saved.location == null
-                                    ? 'Location cleared.'
-                                    : 'Location set to ${saved.location}.',
-                              ),
-                            ),
+                  // Week 5 Day 3 (D142 pattern): two small buttons
+                  // side by side overflow at 390px — they wrap.
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      PharmaButton(
+                        key: const ValueKey('medicine-edit'),
+                        label: 'Edit medicine',
+                        icon: Icons.edit_outlined,
+                        variant: PharmaButtonVariant.secondary,
+                        size: PharmaButtonSize.small,
+                        onPressed: () async {
+                          final saved = await showEditMedicineDialog(
+                            context,
+                            ref,
+                            medicine: medicine,
                           );
-                        }
-                      },
-                    ),
+                          if (saved != null && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Medicine updated.'),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                      PharmaButton(
+                        key: const ValueKey('medicine-branch-shelf'),
+                        label: 'Branch shelf',
+                        icon: Icons.storage_outlined,
+                        variant: PharmaButtonVariant.secondary,
+                        size: PharmaButtonSize.small,
+                        onPressed: () async {
+                          final saved = await showEditBranchShelfDialog(
+                            context,
+                            ref,
+                            branchId: branch.id,
+                            branchName: branch.name,
+                            medicine: medicine,
+                            currentOverride: branchOverride,
+                          );
+                          if (saved != null && context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  saved.isEmpty
+                                      ? 'Branch shelf cleared — using the default location.'
+                                      : 'Branch shelf set to ${saved.displayLabel}.',
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ],
                   ),
                 ],
                 const SizedBox(height: 8),
@@ -176,8 +223,7 @@ class MedicineDetailScreen extends ConsumerWidget {
               children: [
                 SectionHeader(
                   title: 'Batches — ${branch.name}',
-                  subtitle:
-                      'FEFO order: earliest expiry first (expired batches are never sellable)',
+                  subtitle: 'FEFO order: earliest expiry first (expired batches are never sellable)',
                   actionLabel: 'Receive stock',
                   actionIcon: Icons.add_box_outlined,
                   onAction: () async {
@@ -206,10 +252,7 @@ class MedicineDetailScreen extends ConsumerWidget {
                   )
                 else
                   for (final batch in batches)
-                    _BatchRow(
-                      batch: batch,
-                      medicineName: medicine.name,
-                    ),
+                    _BatchRow(batch: batch, medicineName: medicine.name),
               ],
             ),
           ),
@@ -263,37 +306,32 @@ class _StockHistoryCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final layer = ref.watch(productionDataLayerProvider);
-    final movements = layer.engine.ledger
-        .entriesFor(medicineId: medicineId)
-        .where((movement) => movement.branchId == branchId)
-        .toList()
-      ..sort(
-        (a, b) => (b.createdAt ?? DateTime(0)).compareTo(
-          a.createdAt ?? DateTime(0),
-        ),
-      );
-    final batchNoById = {
-      for (final batch in batches) batch.id: batch.batchNo,
-    };
+    final movements =
+        layer.engine.ledger
+            .entriesFor(medicineId: medicineId)
+            .where((movement) => movement.branchId == branchId)
+            .toList()
+          ..sort(
+            (a, b) => (b.createdAt ?? DateTime(0)).compareTo(
+              a.createdAt ?? DateTime(0),
+            ),
+          );
+    final batchNoById = {for (final batch in batches) batch.id: batch.batchNo};
     return PharmaCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const SectionHeader(
             title: 'Stock history',
-            subtitle:
-                'Session ledger — movements recorded since the app started, newest first',
+            subtitle: 'Session ledger — movements recorded since the app started, newest first',
           ),
           const SizedBox(height: 8),
           PagedList<StockMovement>(
             items: movements,
             pageSize: 10,
-            emptyMessage:
-                'No stock movements yet this session — sales, receives, adjustments and counts appear here.',
-            itemBuilder: (context, movement) => _MovementRow(
-              movement: movement,
-              batchNoById: batchNoById,
-            ),
+            emptyMessage: 'No stock movements yet this session — sales, receives, adjustments and counts appear here.',
+            itemBuilder: (context, movement) =>
+                _MovementRow(movement: movement, batchNoById: batchNoById),
           ),
         ],
       ),
@@ -316,8 +354,7 @@ class _MovementRow extends StatelessWidget {
         movement.reason!,
       if (movement.batchId != null)
         'Batch ${batchNoById[movement.batchId] ?? movement.batchId}',
-      if (movement.createdAt != null)
-        formatShortDate(movement.createdAt!),
+      if (movement.createdAt != null) formatShortDate(movement.createdAt!),
     ].join(' • ');
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
@@ -331,8 +368,7 @@ class _MovementRow extends StatelessWidget {
               fontWeight: FontWeight.w600,
             ),
           ),
-          if (detail.isNotEmpty)
-            Text(detail, style: theme.textTheme.bodySmall),
+          if (detail.isNotEmpty) Text(detail, style: theme.textTheme.bodySmall),
         ],
       ),
     );
@@ -354,17 +390,13 @@ class _InfoRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 110,
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            child: Text(label, style: Theme.of(context).textTheme.bodySmall),
           ),
           Expanded(
             child: Text(
               value,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
         ],
@@ -456,6 +488,33 @@ class _BatchRow extends ConsumerWidget {
     }
   }
 
+  /// Files a return / disposal request for a quarantined batch
+  /// (Week 5 Day 4, D154 — FR-INV-07). Nothing moves until an
+  /// approver decides it on the Quarantine Outcomes screen.
+  Future<void> _requestOutcome(
+    BuildContext context,
+    WidgetRef ref, {
+    required QuarantineOutcome outcome,
+  }) async {
+    final request = await showQuarantineOutcomeDialog(
+      context,
+      ref,
+      batch: batch,
+      medicineName: medicineName,
+      outcome: outcome,
+    );
+    if (request != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${quarantineOutcomeLabel(outcome)} requested for batch '
+            '${request.batchNo} — pending approval on the Quarantine Outcomes screen.',
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
@@ -497,6 +556,10 @@ class _BatchRow extends ConsumerWidget {
               StatusBadge(
                 label: batch.isQuarantined
                     ? 'Quarantined'
+                    : batch.isDisposed
+                    ? 'Disposed'
+                    : batch.isReturned
+                    ? 'Returned'
                     : sellable
                     ? expiryBucketLabel(bucket)
                     : bucket == ExpiryBucket.expired
@@ -504,6 +567,10 @@ class _BatchRow extends ConsumerWidget {
                     : 'Out of stock',
                 kind: batch.isQuarantined
                     ? StatusKind.warning
+                    : batch.isDisposed
+                    ? StatusKind.danger
+                    : batch.isReturned
+                    ? StatusKind.info
                     : sellable
                     ? expiryBucketKind(bucket)
                     : StatusKind.danger,
@@ -552,6 +619,35 @@ class _BatchRow extends ConsumerWidget {
                     onPressed: () =>
                         _toggleQuarantine(context, ref, quarantine: false),
                   ),
+              // Week 5 Day 4 (D154): a quarantined batch can be
+              // returned to the supplier or disposed of — both
+              // file an approval request, nothing moves here.
+              if (batch.isQuarantined) ...[
+                PharmaButton(
+                  key: ValueKey('return-${batch.id}'),
+                  label: 'Return to supplier',
+                  icon: Icons.assignment_return_outlined,
+                  variant: PharmaButtonVariant.secondary,
+                  size: PharmaButtonSize.small,
+                  onPressed: () => _requestOutcome(
+                    context,
+                    ref,
+                    outcome: QuarantineOutcome.returnToSupplier,
+                  ),
+                ),
+                PharmaButton(
+                  key: ValueKey('dispose-${batch.id}'),
+                  label: 'Dispose',
+                  icon: Icons.delete_outline,
+                  variant: PharmaButtonVariant.secondary,
+                  size: PharmaButtonSize.small,
+                  onPressed: () => _requestOutcome(
+                    context,
+                    ref,
+                    outcome: QuarantineOutcome.dispose,
+                  ),
+                ),
+              ],
               PharmaButton(
                 key: ValueKey('adjust-${batch.id}'),
                 label: 'Adjust',
