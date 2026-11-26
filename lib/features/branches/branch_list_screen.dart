@@ -42,11 +42,11 @@ class BranchListScreen extends ConsumerWidget {
                 ? () => showDialog<void>(
                       context: context,
                       builder: (dialogContext) => BranchFormDialog(
-                        onSaved: (branch) {
+                        onSaved: (branch) async {
                           // The dialog pops itself before calling
                           // onSaved, so the snackbar uses the screen
                           // context, not the (unmounted) dialog one.
-                          final errors = ref
+                          final errors = await ref
                               .read(branchDirectoryProvider.notifier)
                               .addBranch(branch);
                           if (errors.isNotEmpty && context.mounted) {

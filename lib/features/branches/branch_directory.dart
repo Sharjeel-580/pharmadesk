@@ -2,24 +2,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/data/auth_repository.dart';
 import '../../core/data/permission_service.dart';
+import '../../core/data/production_data_layer.dart';
 import '../../core/services/branch_context.dart';
 import '../../models/branch.dart';
 
 /// Branch management logic (Week 4 Day 4, D130/D131 — SRS D-28,
-/// FR-HO-01/02/08).
+/// FR-HO-01/02/08; persisted Week 5 Day 2, D148).
 ///
-/// There is no `BranchRepository` in the codebase — the demo branches
-/// live as the `demoBranches` const in `branch_context.dart` and
-/// nothing else reads or writes branches. Rather than inventing a
-/// repository + Firestore collection for one screen, the directory is
-/// an in-memory notifier seeded from those demo branches (the same
-/// session-only posture as the feature config and brand settings):
-/// add / edit / activate / deactivate work for the session, and the
-/// production persistence is the `branches` collection (SRS §3.1)
-/// when the Firestore branch repository lands — a follow-up, not
-/// smuggled in here. Switching the active branch still goes through
-/// `activeBranchProvider` (the shell's branch switcher), so the
-/// directory never owns two sources of "current branch".
+/// The demo branches live as the `demoBranches` const in
+/// `branch_context.dart` and seed the branch repository (mock now,
+/// Firestore when the bundle switches). The directory reads and
+/// writes through the production data layer ([loadBranches] /
+/// [saveBranch], D146 pattern): add / edit / activate / deactivate
+/// persist before the state updates, so a branch survives a
+/// notifier rebuild and an app restart. Switching the active branch
+/// still goes through `activeBranchProvider` (the shell's branch
+/// switcher), so the directory never owns two sources of "current
+/// branch".
 
 /// True when [user] may view branch management in [branchId]
 /// (SRS §5.1 `branches`: Super Admin / Owner / HO Admin, Auditor
@@ -57,8 +56,35 @@ List<String> validateBranchForm({
 /// The branch directory: the demo branches plus any added this
 /// session, in display order.
 class BranchDirectoryNotifier extends Notifier<List<Branch>> {
+  /// The in-flight initial load, started by [build]: mutating
+  /// methods await it before validating or minting, so they always
+  /// see the persisted directory first (D146 pattern).
+  Future<void>? _loadFuture;
+
   @override
-  List<Branch> build() => List<Branch>.of(demoBranches);
+  List<Branch> build() {
+    _loadFuture = refresh();
+    return List<Branch>.of(demoBranches);
+  }
+
+  Future<void> _ensureLoaded() => _loadFuture ?? Future.value();
+
+  /// Re-reads the persisted branches from the layer and merges them
+  /// into the state. Persisted branches win; an in-memory branch
+  /// the store has not seen yet (a persist that failed mid-write)
+  /// is kept, and the next write repairs the store.
+  Future<void> refresh() async {
+    final persisted = await ref
+        .read(productionDataLayerProvider)
+        .loadBranches();
+    final mergedById = <String, Branch>{
+      for (final branch in persisted) branch.id: branch,
+    };
+    for (final current in state) {
+      mergedById.putIfAbsent(current.id, () => current);
+    }
+    state = mergedById.values.toList();
+  }
 
   Branch? byId(String branchId) {
     for (final branch in state) {
@@ -69,8 +95,10 @@ class BranchDirectoryNotifier extends Notifier<List<Branch>> {
 
   /// Adds a branch. Returns the problems found; empty = added.
   /// Ids are `branch-<slug>` from the name; a clash with an existing
-  /// id is refused rather than overwriting.
-  List<String> addBranch(Branch branch) {
+  /// id is refused rather than overwriting. The branch is persisted
+  /// through the layer BEFORE the state updates.
+  Future<List<String>> addBranch(Branch branch) async {
+    await _ensureLoaded();
     final errors = validateBranchForm(
       name: branch.name,
       franchiseFeeRateBps: branch.franchiseFeeRateBps,
@@ -80,13 +108,19 @@ class BranchDirectoryNotifier extends Notifier<List<Branch>> {
       errors.add('A branch with this id already exists.');
     }
     if (errors.isNotEmpty) return errors;
-    state = [...state, branch];
+    final saved = await ref
+        .read(productionDataLayerProvider)
+        .saveBranch(branch);
+    state = [...state, saved];
     return const [];
   }
 
   /// Replaces the branch with [branchId] by [updated]. Returns the
   /// problems found; empty = updated. The id itself never changes.
-  List<String> updateBranch(String branchId, Branch updated) {
+  /// The change is persisted through the layer BEFORE the state
+  /// updates.
+  Future<List<String>> updateBranch(String branchId, Branch updated) async {
+    await _ensureLoaded();
     final errors = validateBranchForm(
       name: updated.name,
       franchiseFeeRateBps: updated.franchiseFeeRateBps,
@@ -94,20 +128,24 @@ class BranchDirectoryNotifier extends Notifier<List<Branch>> {
     );
     if (byId(branchId) == null) errors.add('Branch not found.');
     if (errors.isNotEmpty) return errors;
+    final saved = await ref
+        .read(productionDataLayerProvider)
+        .saveBranch(updated.copyWith(id: branchId));
     state = [
       for (final branch in state)
-        if (branch.id == branchId) updated else branch,
+        if (branch.id == branchId) saved else branch,
     ];
     return const [];
   }
 
   /// Activates / deactivates a branch (SRS FR-HO-08: a deactivated
-  /// branch cannot transact but its history is preserved — in this
-  /// demo the flag is the record; enforcement on transactions is a
-  /// follow-up with the Firestore branch repository). The last
-  /// active branch cannot be deactivated: the app always needs one
-  /// branch to work in. Returns the problems found.
-  List<String> setActive(String branchId, bool active) {
+  /// branch cannot transact but its history is preserved — the flag
+  /// is the record, and the production data layer enforces it on
+  /// every transaction write path, D149). The last active branch
+  /// cannot be deactivated: the app always needs one branch to work
+  /// in. Returns the problems found.
+  Future<List<String>> setActive(String branchId, bool active) async {
+    await _ensureLoaded();
     final branch = byId(branchId);
     if (branch == null) return const ['Branch not found.'];
     if (!active &&

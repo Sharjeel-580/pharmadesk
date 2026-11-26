@@ -149,8 +149,8 @@ class BranchDetailScreen extends ConsumerWidget {
                       context: context,
                       builder: (_) => BranchFormDialog(
                         existing: branch,
-                        onSaved: (updated) {
-                          final errors = ref
+                        onSaved: (updated) async {
+                          final errors = await ref
                               .read(branchDirectoryProvider.notifier)
                               .updateBranch(branch.id, updated);
                           if (errors.isNotEmpty && context.mounted) {
@@ -202,7 +202,7 @@ class BranchDetailScreen extends ConsumerWidget {
                         ),
                       );
                       if (confirmed != true || !context.mounted) return;
-                      final errors = ref
+                      final errors = await ref
                           .read(branchDirectoryProvider.notifier)
                           .setActive(branch.id, !branch.active);
                       if (errors.isNotEmpty && context.mounted) {
