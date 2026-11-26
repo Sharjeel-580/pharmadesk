@@ -9,9 +9,14 @@ import '../../core/theme/theme_mode_provider.dart';
 import '../../core/theme/white_label.dart';
 import '../../core/widgets/demo_mode_badge.dart';
 import '../../features/authentication/auth_state.dart';
+import '../../features/audit/audit_logic.dart';
+import '../../features/branches/branch_directory.dart';
 import '../../features/notifications/notifications_provider.dart';
 import '../../features/settings/feature_config.dart';
+import '../../features/inventory/stock_adjustment_logic.dart';
+import '../../features/inventory/transfer_logic.dart';
 import '../../features/staff/salary_logic.dart';
+import '../../models/branch.dart';
 
 /// Responsive application shell — Day 2.
 ///
@@ -24,7 +29,7 @@ import '../../features/staff/salary_logic.dart';
 ///   active [BrandConfig] (white-label name + colours).
 ///
 /// Every navigation destination opens its module route — no dead items.
-/// All 14 modules are real screens (Days 3–7); disabled modules
+/// All 16 modules are real screens; disabled modules
 /// (FR-SYS-05) are hidden from navigation by the Day 7 feature config.
 class AppShell extends ConsumerWidget {
   const AppShell({
@@ -72,8 +77,22 @@ class AppShell extends ConsumerWidget {
 
 /// Top bar shared by desktop and mobile: brand mark, branch switcher,
 /// theme menu, notifications and profile shortcuts.
+///
+/// Responsive (D117, fixes the D116 phone-width overflow): below
+/// [compactBreakpoint] the app-name text is hidden (the brand-mark
+/// initial tile stays), the branch switcher drops its store icon and
+/// its name cap shrinks to the space that is left, and the three icon
+/// buttons compact to 40px. The DEMO MODE badge is NEVER hidden or
+/// shrunk (SRS §8.2) — it keeps its full size at every width, and the
+/// switcher + buttons give way around it instead. The full bar needs
+/// ~615px (measured), so the breakpoint sits at 640px; at or above it
+/// the bar is byte-for-byte the old layout, and the desktop layout
+/// (≥900px, sidebar + top bar) is unchanged.
 class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
   const _TopBar();
+
+  /// Width below which the top bar switches to its compact form.
+  static const double compactBreakpoint = 640;
 
   @override
   Size get preferredSize => const Size.fromHeight(64);
@@ -82,6 +101,8 @@ class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final brand = ref.watch(brandConfigProvider);
     final theme = Theme.of(context);
+    final width = MediaQuery.sizeOf(context).width;
+    final compact = width < compactBreakpoint;
     return Material(
       color: theme.appBarTheme.backgroundColor,
       elevation: 1,
@@ -90,7 +111,7 @@ class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
         child: SizedBox(
           height: 64,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 12),
             child: Row(
               children: [
                 // Brand mark (white-label: initial + app name).
@@ -113,26 +134,38 @@ class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                Flexible(
-                  child: Text(
-                    brand.appName,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
+                SizedBox(width: compact ? 8 : 10),
+                // App name: hidden below the compact breakpoint — at
+                // phone widths it is the first thing that has to go
+                // (D117); the brand-mark tile above still identifies
+                // the app.
+                if (!compact) ...[
+                  Flexible(
+                    child: Text(
+                      brand.appName,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-                const SizedBox(width: 16),
+                  const SizedBox(width: 16),
+                ],
                 // Branch switcher (wired to the mock demo branches).
-                const _BranchSwitcher(),
-                const Spacer(),
+                // Compact: Flexible so its name cap follows the space
+                // left after the badge + buttons (D117); the Spacer
+                // would split that space with it, so it is dropped.
+                if (compact)
+                  const Flexible(child: _BranchSwitcher(compact: true))
+                else
+                  const _BranchSwitcher(),
+                if (!compact) const Spacer(),
                 // DEMO MODE indicator (SRS §8.2) — on every shell screen.
                 const DemoModeBadge(),
-                const SizedBox(width: 8),
-                const _ThemeMenuButton(),
-                const _NotificationsButton(),
-                const _ProfileMenuButton(),
+                SizedBox(width: compact ? 4 : 8),
+                _ThemeMenuButton(compact: compact),
+                _NotificationsButton(compact: compact),
+                _ProfileMenuButton(compact: compact),
               ],
             ),
           ),
@@ -145,8 +178,21 @@ class _TopBar extends ConsumerWidget implements PreferredSizeWidget {
 /// Branch switcher: popup menu over the two demo branches. Selecting one
 /// updates [activeBranchProvider], so every screen reading the provider
 /// (e.g. the module placeholder's branch chip) changes immediately.
+///
+/// Compact (D117): the store icon is dropped and the name cap follows
+/// the width the top bar leaves it (via LayoutBuilder — a fixed cap
+/// cannot fit both a 390px and a 360px phone). The cap never exceeds
+/// 80px; it has NO floor — the chrome around the name (horizontal
+/// padding 16 + pill border 2 + dropdown arrow 18 = 36px) is
+/// subtracted from the space left, so a floor would reintroduce the
+/// overflow it exists to prevent (the Day 1 probe measured the pill
+/// overflowing by 14px with a 32px floor). A truncated branch name is
+/// always shown while the space allows; the popup menu itself still
+/// shows both full names.
 class _BranchSwitcher extends ConsumerWidget {
-  const _BranchSwitcher();
+  const _BranchSwitcher({this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -189,42 +235,65 @@ class _BranchSwitcher extends ConsumerWidget {
             ),
           ),
       ],
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primary.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: theme.colorScheme.primary.withValues(alpha: 0.25),
-          ),
+      child: compact
+          ? LayoutBuilder(
+              builder: (context, constraints) {
+                // Chrome around the name: horizontal padding (16) +
+                // pill border (2) + dropdown arrow (18). The cap
+                // follows the space the top bar leaves the switcher,
+                // so the bar fits at any phone width instead of
+                // overflowing (D116). No floor: see the class doc.
+                final cap = (constraints.maxWidth - 36).clamp(0.0, 80.0);
+                return _switcherPill(theme, active, cap, showIcon: false);
+              },
+            )
+          : _switcherPill(theme, active, 180, showIcon: true),
+    );
+  }
+
+  Widget _switcherPill(
+    ThemeData theme,
+    Branch active,
+    double maxNameWidth, {
+    required bool showIcon,
+  }) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: theme.colorScheme.primary.withValues(alpha: 0.25),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (showIcon) ...[
             Icon(
               Icons.store_outlined,
               size: 18,
               color: theme.colorScheme.primary,
             ),
             const SizedBox(width: 6),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 180),
-              child: Text(
-                active.name,
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: theme.colorScheme.primary,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Icon(
-              Icons.arrow_drop_down,
-              size: 18,
-              color: theme.colorScheme.primary,
-            ),
           ],
-        ),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxNameWidth),
+            child: Text(
+              active.name,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: theme.colorScheme.primary,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Icon(
+            Icons.arrow_drop_down,
+            size: 18,
+            color: theme.colorScheme.primary,
+          ),
+        ],
       ),
     );
   }
@@ -233,8 +302,13 @@ class _BranchSwitcher extends ConsumerWidget {
 /// Notifications bell with the unread-count badge (Day 7). The count
 /// comes from the derived notifications list; tapping opens the
 /// notifications center.
+///
+/// Compact (D117): 40px instead of 48px, so the three icon buttons
+/// still fit next to the full-size DEMO MODE badge at phone widths.
 class _NotificationsButton extends ConsumerWidget {
-  const _NotificationsButton();
+  const _NotificationsButton({this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -242,12 +316,28 @@ class _NotificationsButton extends ConsumerWidget {
     return IconButton(
       key: const ValueKey('notifications-button'),
       tooltip: 'Notifications',
+      padding: compact ? const EdgeInsets.all(4) : const EdgeInsets.all(8),
+      constraints: compact
+          ? const BoxConstraints.tightFor(width: 40, height: 40)
+          : const BoxConstraints(minWidth: 48, minHeight: 48),
       icon: Badge(
         label: Text('$unread'),
         isLabelVisible: unread > 0,
         child: const Icon(Icons.notifications_outlined),
       ),
       onPressed: () => context.go('/notifications'),
+      // NOTE: IconButton enforces a 48px tap target while its tap
+      // target size is padded (the theme default) — `constraints`
+      // alone cannot shrink it below 48. The shrinkWrap style below
+      // lifts that floor so the 40px constraints take effect (D117);
+      // without it the bell stays 48px and the branch switcher loses
+      // the 8px (measured in the Day 1 probe).
+      style: compact
+          ? const ButtonStyle(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              minimumSize: WidgetStatePropertyAll(Size(40, 40)),
+            )
+          : null,
     );
   }
 }
@@ -255,8 +345,12 @@ class _NotificationsButton extends ConsumerWidget {
 /// Profile menu: shows the signed-in user, opens the profile screen,
 /// and signs out (Day 3 auth). When nobody is signed in it offers
 /// sign-in instead.
+///
+/// Compact (D117): 40px instead of 48px, like the other icon buttons.
 class _ProfileMenuButton extends ConsumerWidget {
-  const _ProfileMenuButton();
+  const _ProfileMenuButton({this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -264,6 +358,17 @@ class _ProfileMenuButton extends ConsumerWidget {
     return PopupMenuButton<String>(
       key: const ValueKey('profile-button'),
       tooltip: 'Profile',
+      padding: compact ? const EdgeInsets.all(4) : const EdgeInsets.all(8),
+      // NOTE: PopupMenuButton.constraints sizes the popup MENU, not the
+      // button — the button itself shrinks via style (shrinkWrap tap
+      // target + 40px minimum). Passing tight constraints here would
+      // squeeze the menu to 40px wide and break its ListTiles (D117).
+      style: compact
+          ? const ButtonStyle(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              minimumSize: WidgetStatePropertyAll(Size(40, 40)),
+            )
+          : null,
       icon: const Icon(Icons.account_circle_outlined),
       onSelected: (value) {
         if (value == 'profile') {
@@ -323,8 +428,12 @@ class _ProfileMenuButton extends ConsumerWidget {
 
 /// Theme menu: Light / Dark / System. Writes to [themeModeProvider],
 /// which the app root reads (persisted in-memory for the session).
+///
+/// Compact (D117): 40px instead of 48px, like the other icon buttons.
 class _ThemeMenuButton extends ConsumerWidget {
-  const _ThemeMenuButton();
+  const _ThemeMenuButton({this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -337,6 +446,15 @@ class _ThemeMenuButton extends ConsumerWidget {
     return PopupMenuButton<ThemeMode>(
       key: const ValueKey('theme-menu-button'),
       tooltip: 'Change theme',
+      padding: compact ? const EdgeInsets.all(4) : const EdgeInsets.all(8),
+      // NOTE: PopupMenuButton.constraints sizes the popup MENU, not the
+      // button — see the profile button above (D117).
+      style: compact
+          ? const ButtonStyle(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              minimumSize: WidgetStatePropertyAll(Size(40, 40)),
+            )
+          : null,
       icon: Icon(icon),
       initialValue: mode,
       onSelected: (selected) =>
@@ -411,7 +529,7 @@ const _navGroups = <(String, List<String>)>[
     'Manage',
     ['Customers', 'Suppliers', 'Purchases', 'Prescriptions', 'Staff & HR'],
   ),
-  ('Insights', ['Reports', 'Notifications']),
+  ('Insights', ['Reports', 'Finance', 'Notifications']),
   ('System', ['Settings', 'Profile', 'Authentication']),
 ];
 
@@ -528,6 +646,47 @@ class _Sidebar extends ConsumerWidget {
                         selected:
                             moduleByTitle[title]!.route == currentLocation,
                       ),
+                      // Stock Transfers sits under Inventory (Week 4
+                      // Day 2, D118): a sub-screen of the Inventory
+                      // module, same feature toggle — but only for
+                      // users who may use transfers in the active
+                      // branch (`stockTransfer`): a Pharmacist sees
+                      // the inventory, not the transfer screens.
+                      if (title == 'Inventory' &&
+                          canViewTransfers(user, branchId))
+                        _SidebarSubItem(
+                          label: 'Stock Transfers',
+                          route: '/inventory/transfers',
+                          selected: currentLocation.startsWith(
+                            '/inventory/transfers',
+                          ),
+                        ),
+                      // Adjustment Approvals sits under Inventory
+                      // (Week 4 Day 5, D141): a sub-screen of the
+                      // Inventory module, same feature toggle — but
+                      // only for users who may request adjustments
+                      // in the active branch (`stockAdjustReq`): a
+                      // Pharmacist sees the inventory, not the
+                      // approval queue.
+                      if (title == 'Inventory' &&
+                          canViewAdjustmentQueue(user, branchId))
+                        _SidebarSubItem(
+                          label: 'Adjustment Approvals',
+                          route: '/inventory/adjustments',
+                          selected: currentLocation.startsWith(
+                            '/inventory/adjustments',
+                          ),
+                        ),
+                      // Riders & Delivery sits under Orders (Week 4
+                      // Day 2, D121): a sub-screen of the Orders
+                      // module, same feature toggle — no separate
+                      // §5.1 capability governs rider viewing.
+                      if (title == 'Orders')
+                        _SidebarSubItem(
+                          label: 'Riders & Delivery',
+                          route: '/riders',
+                          selected: currentLocation.startsWith('/riders'),
+                        ),
                       // Auto Purchase List sits under Purchases (Day 2
                       // Week 2): a sub-screen of the Purchases module,
                       // not a 15th module — it follows the Purchases
@@ -573,6 +732,37 @@ class _Sidebar extends ConsumerWidget {
                             label: 'Salary',
                             route: '/staff/salary',
                             selected: currentLocation == '/staff/salary',
+                          ),
+                      ],
+                      // System hub sits under Settings (Week 4 Day 4,
+                      // D135 — SRS D-28 / D-33 / D-35): sub-screens
+                      // of the Settings module, same feature toggle
+                      // (Settings is always on) — each gated on its
+                      // own §5.1 capability in the active branch.
+                      if (title == 'Settings') ...[
+                        if (canViewBranches(user, branchId))
+                          _SidebarSubItem(
+                            label: 'Branch Management',
+                            route: '/branches',
+                            selected: currentLocation.startsWith(
+                              '/branches',
+                            ),
+                          ),
+                        if (canViewAuditLog(user, branchId))
+                          _SidebarSubItem(
+                            label: 'Audit Log',
+                            route: '/audit-log',
+                            selected: currentLocation == '/audit-log',
+                          ),
+                        if (permissionService.canInBranch(
+                          user,
+                          'sysSettings',
+                          branchId,
+                        ))
+                          _SidebarSubItem(
+                            label: 'Backup & Restore',
+                            route: '/backup',
+                            selected: currentLocation == '/backup',
                           ),
                       ],
                     ],
@@ -747,6 +937,11 @@ class _BottomNav extends ConsumerWidget {
             context,
             visibleModules,
             canViewSalary(user, branchId),
+            canViewTransfers(user, branchId),
+            canViewAdjustmentQueue(user, branchId),
+            canViewBranches(user, branchId),
+            canViewAuditLog(user, branchId),
+            permissionService.canInBranch(user, 'sysSettings', branchId),
           );
         }
       },
@@ -780,6 +975,11 @@ class _BottomNav extends ConsumerWidget {
     BuildContext context,
     List<AppModule> modules,
     bool canViewSalaryRecords,
+    bool canViewTransferRecords,
+    bool canViewAdjustmentRecords,
+    bool canViewBranchRecords,
+    bool canViewAuditRecords,
+    bool canViewBackupRecords,
   ) {
     showModalBottomSheet<void>(
       context: context,
@@ -813,6 +1013,53 @@ class _BottomNav extends ConsumerWidget {
                   context.go(module.route);
                 },
               ),
+              // Stock Transfers sits under Inventory (Week 4 Day 2,
+              // D118) — only for users who may use transfers in the
+              // active branch (`stockTransfer`).
+              if (module.title == 'Inventory' && canViewTransferRecords)
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Stock Transfers'),
+                  subtitle: const Text(
+                    'Move stock between branches',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/inventory/transfers');
+                  },
+                ),
+              // Adjustment Approvals sits under Inventory (Week 4
+              // Day 5, D141) — only for users who may request
+              // adjustments in the active branch (`stockAdjustReq`).
+              if (module.title == 'Inventory' && canViewAdjustmentRecords)
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Adjustment Approvals'),
+                  subtitle: const Text(
+                    'Review and approve stock adjustments',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/inventory/adjustments');
+                  },
+                ),
+              // Riders & Delivery sits under Orders (Week 4 Day 2,
+              // D121).
+              if (module.title == 'Orders')
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Riders & Delivery'),
+                  subtitle: const Text(
+                    'Riders, availability, assignment',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/riders');
+                  },
+                ),
               // Auto Purchase List sits under Purchases (Day 2 Week 2).
               if (module.title == 'Purchases')
                 ListTile(
@@ -871,6 +1118,46 @@ class _BottomNav extends ConsumerWidget {
                     onTap: () {
                       Navigator.of(sheetContext).pop();
                       context.go('/staff/salary');
+                    },
+                  ),
+              ],
+              // System hub sits under Settings (Week 4 Day 4, D135
+              // — SRS D-28 / D-33 / D-35), each gated on its own
+              // §5.1 capability in the active branch.
+              if (module.title == 'Settings') ...[
+                if (canViewBranchRecords)
+                  ListTile(
+                    leading: const SizedBox(width: 24),
+                    title: const Text('Branch Management'),
+                    subtitle: const Text(
+                      'Branches, franchise settings, royalty',
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      context.go('/branches');
+                    },
+                  ),
+                if (canViewAuditRecords)
+                  ListTile(
+                    leading: const SizedBox(width: 24),
+                    title: const Text('Audit Log'),
+                    subtitle: const Text('Filterable log of actions'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      context.go('/audit-log');
+                    },
+                  ),
+                if (canViewBackupRecords)
+                  ListTile(
+                    leading: const SizedBox(width: 24),
+                    title: const Text('Backup & Restore'),
+                    subtitle: const Text('Backup status, restore'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      context.go('/backup');
                     },
                   ),
               ],
