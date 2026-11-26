@@ -74,6 +74,12 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   String? _customerId;
   SalePaymentMethod _paymentMethod = SalePaymentMethod.cash;
   late int _taxRatePercent;
+
+  /// True once the cashier picks a rate from the tax dropdown this
+  /// sale (Week 6 Day 4, D167): that explicit per-sale choice wins
+  /// over later Settings changes — only the untouched default
+  /// follows the live setting.
+  bool _taxRateUserSet = false;
   List<String> _errors = [];
   String? _scanMessage;
   bool _completing = false;
@@ -89,7 +95,11 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     // Week 4 Day 4 (D136): the tax rate comes from Organization
     // Settings (SRS D-34) — the default there is 0%, the rate the
     // POS charged before this wiring, so existing behaviour is
-    // unchanged until an owner changes the setting.
+    // unchanged until an owner changes the setting. Week 6 Day 4
+    // (D167): the rate is live-watched from here on (see the
+    // `ref.listen` in `build`) — a Settings change while the sale
+    // is open re-rates the sale, unless the cashier already picked
+    // a rate from the dropdown this sale.
     _taxRatePercent = ref.read(orgSettingsProvider).taxRatePercent;
   }
 
@@ -446,6 +456,17 @@ class _PosScreenState extends ConsumerState<PosScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Week 6 Day 4 (D167): the tax rate is live-watched like the
+    // payment methods below — a Settings change while this sale is
+    // open re-rates the sale at once (the Tax row and the total
+    // rebuild from `_taxRatePercent`). The listener only follows
+    // the setting while the cashier has not picked a rate from the
+    // dropdown this sale (`_taxRateUserSet`).
+    ref.listen(orgSettingsProvider, (previous, next) {
+      if (!_taxRateUserSet && next.taxRatePercent != _taxRatePercent) {
+        setState(() => _taxRatePercent = next.taxRatePercent);
+      }
+    });
     final branch = ref.watch(activeBranchProvider);
     final user = ref.watch(authProvider);
     final medicines = ref.watch(medicinesProvider).asData?.value ?? [];
@@ -842,15 +863,28 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                             key: const ValueKey('pos-tax-dropdown'),
                             value: _taxRatePercent,
                             isExpanded: true,
-                            items: const [
-                              DropdownMenuItem(value: 0, child: Text('No tax')),
-                              DropdownMenuItem(value: 5, child: Text('5%')),
-                              DropdownMenuItem(value: 10, child: Text('10%')),
-                              DropdownMenuItem(value: 16, child: Text('16%')),
-                              DropdownMenuItem(value: 18, child: Text('18%')),
+                            // Week 6 Day 4 (D167): the offered rates
+                            // always include the current rate — a
+                            // Settings rate outside the usual set
+                            // (e.g. 7%) must still render instead of
+                            // crashing the dropdown (a value with no
+                            // matching item is a framework error).
+                            items: [
+                              for (final rate
+                                  in ({0, 5, 10, 16, 18, _taxRatePercent}
+                                      .toList()
+                                    ..sort()))
+                                DropdownMenuItem(
+                                  value: rate,
+                                  child: Text(
+                                    rate == 0 ? 'No tax' : '$rate%',
+                                  ),
+                                ),
                             ],
-                            onChanged: (value) =>
-                                setState(() => _taxRatePercent = value ?? 0),
+                            onChanged: (value) => setState(() {
+                              _taxRatePercent = value ?? 0;
+                              _taxRateUserSet = true;
+                            }),
                           ),
                         ],
                       ),
