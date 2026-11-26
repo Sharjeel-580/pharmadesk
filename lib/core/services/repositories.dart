@@ -29,6 +29,7 @@ import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 import '../data/repository_factory.dart';
 import '../data/report_counters.dart';
+import '../../features/medicines/medicine_logic.dart';
 import 'branch_context.dart';
 import 'demo_seed_data.dart';
 
@@ -51,7 +52,12 @@ abstract class MedicineRepository {
 
   /// Replaces a whole medicine (Week 4 Day 5, D138 — the location
   /// edit). The id must already exist; throws [ArgumentError] when
-  /// it does not. Returns the saved medicine.
+  /// it does not. Week 6 Day 4 (D166): also throws [ArgumentError]
+  /// when the medicine's barcode is already used by a DIFFERENT
+  /// medicine — barcode uniqueness is enforced here, in the repo,
+  /// not the form (Day 25 follow-up). Keeping the medicine's own
+  /// barcode, or an empty / absent barcode, never throws.
+  /// Returns the saved medicine.
   Future<Medicine> updateMedicine(Medicine medicine);
 
   /// Creates or replaces a medicine by id (Week 5 Day 2, D150 —
@@ -729,6 +735,24 @@ class MockMedicineRepository implements MedicineRepository {
     if (index == -1) {
       throw ArgumentError('No medicine with id "${medicine.id}".');
     }
+    // Week 6 Day 4 (D166): a barcode already used by a DIFFERENT
+    // medicine is rejected here — the repo is the one write path
+    // for master edits (the form is the only caller and surfaces
+    // this ArgumentError verbatim, D153). An empty barcode and the
+    // medicine's own barcode pass.
+    final conflict = findBarcodeConflict(
+      demoMedicines,
+      barcode: medicine.barcode,
+      excludeId: medicine.id,
+    );
+    if (conflict != null) {
+      throw ArgumentError(
+        barcodeConflictMessage(
+          medicine.barcode!.trim(),
+          conflict.name,
+        ),
+      );
+    }
     final saved = medicine.copyWith(updatedAt: DateTime.now());
     demoMedicines[index] = saved;
     return saved;
@@ -786,8 +810,15 @@ class MockOrderRepository implements OrderRepository {
   Future<Order> createOrder(Order order) async {
     final branchCode = order.branchId == 'branch-dha-main' ? 'dha' : 'glb';
     final sequence = 1000 + _orders.length + 1;
+    final id = 'ord-$branchCode-$sequence';
+    // Week 6 Day 4 (D165): the mock assigns the same number + key
+    // shape as the Firestore repo (`ORD-DHA-1001`, key = doc id)
+    // and RETURNS them — a caller must never have to re-derive
+    // what the repo assigned.
     final saved = order.copyWith(
-      id: 'ord-$branchCode-$sequence',
+      id: id,
+      orderNumber: 'ORD-${branchCode.toUpperCase()}-$sequence',
+      idempotencyKey: id,
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
     );
@@ -808,12 +839,27 @@ class MockOrderRepository implements OrderRepository {
     final id = order.id.isEmpty
         ? 'ord-$branchCode-${1000 + _orders.length + 1}'
         : order.id;
-    final saved = order.copyWith(id: id, updatedAt: DateTime.now());
-    final index = _orders.indexWhere((o) => o.id == id);
-    if (index == -1) {
+    final existingIndex = _orders.indexWhere((o) => o.id == id);
+    final existing = existingIndex == -1 ? null : _orders[existingIndex];
+    // Week 6 Day 4 (D165): an existing order keeps its number +
+    // key; a genuinely new one gets the number derived from its
+    // (possibly minted) id and the id as its key — the same stable
+    // values the model itself derives (effectiveOrderNumber /
+    // effectiveIdempotencyKey), so a restore never re-numbers.
+    final saved = order.copyWith(
+      id: id,
+      orderNumber: existing != null
+          ? existing.effectiveOrderNumber
+          : defaultOrderNumberForId(id),
+      idempotencyKey: existing != null
+          ? existing.effectiveIdempotencyKey
+          : id,
+      updatedAt: DateTime.now(),
+    );
+    if (existingIndex == -1) {
       _orders.add(saved);
     } else {
-      _orders[index] = saved;
+      _orders[existingIndex] = saved;
     }
     return saved;
   }
@@ -1240,7 +1286,13 @@ class MockSupplierRepository implements SupplierRepository {
         'A supplier with phone ${supplier.phone} already exists.',
       );
     }
-    final created = supplier.copyWith(id: 'sup-${_suppliers.length + 1}');
+    // Week 6 Day 4 (D165): a new supplier is stamped with now when
+    // it carries no createdAt — the creation time is known here,
+    // unlike for seeded / legacy rows (null = unknown).
+    final created = supplier.copyWith(
+      id: 'sup-${_suppliers.length + 1}',
+      createdAt: supplier.createdAt ?? DateTime.now(),
+    );
     _suppliers.add(created);
     return created;
   }
@@ -1249,7 +1301,13 @@ class MockSupplierRepository implements SupplierRepository {
   Future<void> updateSupplier(Supplier supplier) async {
     final index = _suppliers.indexWhere((s) => s.id == supplier.id);
     if (index == -1) return;
-    _suppliers[index] = supplier;
+    // Week 6 Day 4 (D165): an update never rewrites createdAt — a
+    // supplier passed without one keeps the stored value (mirrors
+    // the Firestore impl, which drops createdAt from the merge).
+    final existing = _suppliers[index];
+    _suppliers[index] = supplier.copyWith(
+      createdAt: supplier.createdAt ?? existing.createdAt,
+    );
   }
 
   @override
@@ -1277,17 +1335,23 @@ class MockSupplierRepository implements SupplierRepository {
 
   @override
   Future<Supplier> upsertSupplier(Supplier supplier) async {
-    // The model carries no `createdAt` — the saved row is the given
-    // row with a minted id when the id was empty.
+    // Week 6 Day 4 (D165): a restore replays the row as given. An
+    // existing row keeps its stored createdAt when the incoming row
+    // carries none (an update never rewrites it); a new row keeps
+    // the incoming value, or null (= unknown) when it has none.
     final id = supplier.id.isEmpty
         ? 'sup-${_suppliers.length + 1}'
         : supplier.id;
-    final saved = supplier.copyWith(id: id);
-    final index = _suppliers.indexWhere((s) => s.id == id);
-    if (index == -1) {
+    final existingIndex = _suppliers.indexWhere((s) => s.id == id);
+    final existing = existingIndex == -1 ? null : _suppliers[existingIndex];
+    final saved = supplier.copyWith(
+      id: id,
+      createdAt: supplier.createdAt ?? existing?.createdAt,
+    );
+    if (existingIndex == -1) {
       _suppliers.add(saved);
     } else {
-      _suppliers[index] = saved;
+      _suppliers[existingIndex] = saved;
     }
     return saved;
   }
@@ -1495,8 +1559,11 @@ class MockBranchRepository implements BranchRepository {
     if (index == -1) {
       throw ArgumentError('No branch with id "${branch.id}".');
     }
-    _branches[index] = branch;
-    return branch;
+    // Same normalization as the Firestore mapper (D163): a stored
+    // branch never keeps an empty or invalid code.
+    final stored = branch.copyWith(code: branch.effectiveCode);
+    _branches[index] = stored;
+    return stored;
   }
 
   @override
@@ -1523,8 +1590,9 @@ class MockBranchRepository implements BranchRepository {
     return 'branch-${slug.isEmpty ? 'new' : slug}';
   }
 
-  /// A copy of [branch] carrying [id] (`Branch.copyWith` has no
-  /// `id` parameter, so the copy is built explicitly).
+  /// A copy of [branch] carrying [id] — and the normalized code:
+  /// a branch saved without one keeps the migration-safe default
+  /// derived from its id (D163), never an empty code.
   static Branch _withId(Branch branch, String id) {
     return Branch(
       id: id,
@@ -1534,6 +1602,12 @@ class MockBranchRepository implements BranchRepository {
       deliveryAreas: branch.deliveryAreas,
       active: branch.active,
       createdAt: branch.createdAt ?? DateTime.now(),
+      // Normalized against the NEW id: a branch minted here had an
+      // empty id, so deriving from the old id would give `XX`.
+      code: normalizeBranchCode(
+        branch.code.isEmpty ? null : branch.code,
+        branchId: id,
+      ),
       type: branch.type,
       managerId: branch.managerId,
       franchiseFeeRateBps: branch.franchiseFeeRateBps,
