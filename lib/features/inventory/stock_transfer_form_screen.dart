@@ -89,6 +89,10 @@ class _StockTransferFormScreenState
               Expanded(
                 child: DropdownButtonFormField<String>(
                   key: const ValueKey('transfer-from-branch'),
+                  // Week 8 Day 2 (D177): isExpanded, the D153/D162
+                  // trap — the branch name plus the field chrome
+                  // overflowed at 390px without it.
+                  isExpanded: true,
                   initialValue: _fromBranchId,
                   decoration: const InputDecoration(
                     labelText: 'From (source branch)',
@@ -119,6 +123,9 @@ class _StockTransferFormScreenState
               Expanded(
                 child: DropdownButtonFormField<String>(
                   key: const ValueKey('transfer-to-branch'),
+                  // Week 8 Day 2 (D177): isExpanded, the D153/D162
+                  // trap — see the From field above.
+                  isExpanded: true,
                   initialValue: _toBranchId,
                   decoration: const InputDecoration(
                     labelText: 'To (destination branch)',

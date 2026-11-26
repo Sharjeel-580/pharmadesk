@@ -97,19 +97,23 @@ class _StockTransferDetailScreenState
           const SizedBox(height: 8),
           const SyncStatusChip(),
           const SizedBox(height: 16),
-          Row(
+          // Week 8 Day 2 (D177): a Wrap, not a Row — the status
+          // badge plus the 'Demo — sample record' badge are wider
+          // than the 390px line in the test font; on desktop they
+          // still sit on one line.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               StatusBadge(
                 label: transfer.status.label,
                 kind: transferStatusKind(transfer.status),
               ),
-              if (transfer.isDemo) ...[
-                const SizedBox(width: 8),
+              if (transfer.isDemo)
                 const StatusBadge(
                   label: 'Demo — sample record',
                   kind: StatusKind.neutral,
                 ),
-              ],
             ],
           ),
           if (_error != null) ...[

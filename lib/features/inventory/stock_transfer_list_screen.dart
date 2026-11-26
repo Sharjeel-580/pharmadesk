@@ -67,23 +67,33 @@ class _StockTransferListScreenState
             spacing: 8,
             runSpacing: 8,
             children: [
-              DropdownButton<String?>(
-                key: const ValueKey('transfer-branch-filter'),
-                value: _branchFilter,
-                hint: const Text('All branches'),
-                items: [
-                  const DropdownMenuItem<String?>(
-                    value: null,
-                    child: Text('All branches'),
-                  ),
-                  for (final branch in demoBranches)
-                    DropdownMenuItem<String?>(
-                      value: branch.id,
-                      child: Text(branch.name),
+              // Week 8 Day 2 (D177): capped at 280px with isExpanded
+              // (the D153/D162 trap) — the branch names are wider
+              // than the 390px line in the test font. The cap keeps
+              // the desktop filters side by side, instead of forcing
+              // every dropdown full-width the way bare isExpanded
+              // does on /reports.
+              SizedBox(
+                width: 280,
+                child: DropdownButton<String?>(
+                  key: const ValueKey('transfer-branch-filter'),
+                  isExpanded: true,
+                  value: _branchFilter,
+                  hint: const Text('All branches'),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('All branches'),
                     ),
-                ],
-                onChanged: (selected) =>
-                    setState(() => _branchFilter = selected),
+                    for (final branch in demoBranches)
+                      DropdownMenuItem<String?>(
+                        value: branch.id,
+                        child: Text(branch.name),
+                      ),
+                  ],
+                  onChanged: (selected) =>
+                      setState(() => _branchFilter = selected),
+                ),
               ),
               for (final status in [
                 null,
