@@ -79,13 +79,18 @@ class OrderDetailScreen extends ConsumerWidget {
             onAction: () => context.go('/orders'),
           ),
           const SizedBox(height: 16),
-          Row(
+          // Week 8 Day 2 (D177): a Wrap, not a Row — the three
+          // badges together are wider than the 390px line in the
+          // test font (status + fulfilment + payment), so the third
+          // badge overflowed; on desktop they still sit on one line.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               StatusBadge(
                 label: orderStatusLabel(order.status),
                 kind: orderStatusKind(order.status),
               ),
-              const SizedBox(width: 8),
               StatusBadge(
                 label: fulfillmentLabel(order.fulfillment),
                 kind: StatusKind.neutral,
@@ -93,8 +98,7 @@ class OrderDetailScreen extends ConsumerWidget {
                     ? Icons.delivery_dining_outlined
                     : Icons.store_outlined,
               ),
-              const SizedBox(width: 8),
-              StatusBadge(
+              const StatusBadge(
                 label: 'Cash on delivery',
                 kind: StatusKind.neutral,
                 icon: Icons.payments_outlined,
