@@ -164,6 +164,13 @@ class _ChipShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Week 4 Day 5 (D142): the chip label ("All synced • Never
+    // synced") is wider than a 390px body, and the old min-size Row
+    // overflowed by 12px on /orders. The label now ellipsizes inside
+    // the space the parent actually leaves: the LayoutBuilder caps
+    // the row at the parent's max width (when the parent bounds it)
+    // and the Flexible text truncates instead of overflowing.
+    // In an unbounded parent the row still sizes to its content.
     return Tooltip(
       message: 'Sync status — tap to refresh',
       child: InkWell(
@@ -175,19 +182,34 @@ class _ChipShell extends StatelessWidget {
             border: Border.all(color: color.withValues(alpha: 0.4)),
             borderRadius: BorderRadius.circular(16),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 16, color: color),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w600,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final row = Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 16, color: color),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+              if (!constraints.maxWidth.isFinite) return row;
+              return ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: constraints.maxWidth,
                 ),
-              ),
-            ],
+                child: row,
+              );
+            },
           ),
         ),
       ),
