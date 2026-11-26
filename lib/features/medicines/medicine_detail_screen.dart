@@ -2,14 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/inventory_engine.dart';
+import '../../core/data/permission_service.dart';
+import '../../core/data/production_data_layer.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/pagination_controls.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../authentication/auth_state.dart';
 import '../inventory/inventory_logic.dart';
 import '../inventory/inventory_provider.dart';
 import '../inventory/stock_operation_dialogs.dart';
+import 'medicine_edit_dialog.dart';
 import 'medicine_logic.dart';
 
 /// Medicine detail (Day 5), route `/medicines/:id`.
@@ -27,6 +33,12 @@ class MedicineDetailScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final branch = ref.watch(activeBranchProvider);
+    final user = ref.watch(authProvider);
+    final canEditLocation = permissionService.canWrite(
+      user,
+      'medicineCrud',
+      branch.id,
+    );
     final medicine = ref.watch(medicineByIdProvider(medicineId));
     if (medicine == null) {
       return SingleChildScrollView(
@@ -87,8 +99,48 @@ class MedicineDetailScreen extends ConsumerWidget {
                   label: 'Barcode',
                   value: medicine.barcode ?? '—',
                 ),
+                _InfoRow(
+                  label: 'Location',
+                  value: medicine.location ?? 'Not set',
+                ),
+                if (canEditLocation) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: PharmaButton(
+                      key: const ValueKey('medicine-edit-location'),
+                      label: 'Edit location',
+                      icon: Icons.edit_location_outlined,
+                      variant: PharmaButtonVariant.secondary,
+                      size: PharmaButtonSize.small,
+                      onPressed: () async {
+                        final saved =
+                            await showEditMedicineLocationDialog(
+                              context,
+                              ref,
+                              medicine: medicine,
+                            );
+                        if (saved != null && context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                saved.location == null
+                                    ? 'Location cleared.'
+                                    : 'Location set to ${saved.location}.',
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 8),
-                Row(
+                // Week 4 Day 5 (D142): two badges side by side
+                // overflowed by 162px at 390px — they wrap now.
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
                   children: [
                     if (medicine.requiresPrescription)
                       const StatusBadge(
@@ -100,7 +152,6 @@ class MedicineDetailScreen extends ConsumerWidget {
                         label: 'Over the counter',
                         kind: StatusKind.success,
                       ),
-                    const SizedBox(width: 8),
                     if (!canSellMedicine(batches))
                       const StatusBadge(
                         label: 'Not sellable here',
@@ -162,6 +213,126 @@ class MedicineDetailScreen extends ConsumerWidget {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          _StockHistoryCard(
+            medicineId: medicine.id,
+            branchId: branch.id,
+            batches: batches,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Short label for a ledger movement type (D-10 history rows).
+String stockMovementTypeLabel(StockMovementType type) => switch (type) {
+  StockMovementType.receive => 'Received',
+  StockMovementType.sale => 'Sale',
+  StockMovementType.saleReturn => 'Return',
+  StockMovementType.adjustment => 'Adjustment',
+  StockMovementType.transferIn => 'Transfer in',
+  StockMovementType.transferOut => 'Transfer out',
+  StockMovementType.damage => 'Damage',
+  StockMovementType.expiry => 'Expiry write-off',
+};
+
+/// Per-medicine stock-movement history (Week 4 Day 5, D139 — SRS
+/// D-10 / FR-INV-12): the engine's append-only ledger for this
+/// medicine at this branch, newest first, paged at 10 (D107).
+///
+/// The ledger is the session ledger — it holds the movements this
+/// app session booked (sales, receives, adjustments, counts,
+/// transfers). There is no seeded history: the demo seed data was
+/// never written through the layer, so the section honestly says
+/// "No stock movements yet" until the first in-session movement.
+/// The section rebuilds when the inventory refreshes (a completed
+/// sale invalidates the inventory provider), so new movements
+/// appear without a restart.
+class _StockHistoryCard extends ConsumerWidget {
+  const _StockHistoryCard({
+    required this.medicineId,
+    required this.branchId,
+    required this.batches,
+  });
+
+  final String medicineId;
+  final String branchId;
+  final List<InventoryItem> batches;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final layer = ref.watch(productionDataLayerProvider);
+    final movements = layer.engine.ledger
+        .entriesFor(medicineId: medicineId)
+        .where((movement) => movement.branchId == branchId)
+        .toList()
+      ..sort(
+        (a, b) => (b.createdAt ?? DateTime(0)).compareTo(
+          a.createdAt ?? DateTime(0),
+        ),
+      );
+    final batchNoById = {
+      for (final batch in batches) batch.id: batch.batchNo,
+    };
+    return PharmaCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SectionHeader(
+            title: 'Stock history',
+            subtitle:
+                'Session ledger — movements recorded since the app started, newest first',
+          ),
+          const SizedBox(height: 8),
+          PagedList<StockMovement>(
+            items: movements,
+            pageSize: 10,
+            emptyMessage:
+                'No stock movements yet this session — sales, receives, adjustments and counts appear here.',
+            itemBuilder: (context, movement) => _MovementRow(
+              movement: movement,
+              batchNoById: batchNoById,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MovementRow extends StatelessWidget {
+  const _MovementRow({required this.movement, required this.batchNoById});
+
+  final StockMovement movement;
+  final Map<String, String?> batchNoById;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final quantity = movement.quantity;
+    final detail = [
+      if (movement.reason != null && movement.reason!.isNotEmpty)
+        movement.reason!,
+      if (movement.batchId != null)
+        'Batch ${batchNoById[movement.batchId] ?? movement.batchId}',
+      if (movement.createdAt != null)
+        formatShortDate(movement.createdAt!),
+    ].join(' • ');
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${stockMovementTypeLabel(movement.type)} • '
+            '${quantity > 0 ? '+' : ''}$quantity unit(s)',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (detail.isNotEmpty)
+            Text(detail, style: theme.textTheme.bodySmall),
         ],
       ),
     );
@@ -260,6 +431,31 @@ class _BatchRow extends ConsumerWidget {
   final InventoryItem batch;
   final String medicineName;
 
+  Future<void> _toggleQuarantine(
+    BuildContext context,
+    WidgetRef ref, {
+    required bool quarantine,
+  }) async {
+    final updated = await showQuarantineBatchDialog(
+      context,
+      ref,
+      batch: batch,
+      medicineName: medicineName,
+      quarantine: quarantine,
+    );
+    if (updated != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            quarantine
+                ? 'Batch ${updated.batchNo} quarantined — out of saleable stock.'
+                : 'Batch ${updated.batchNo} restored to saleable stock.',
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
@@ -299,12 +495,16 @@ class _BatchRow extends ConsumerWidget {
                 ),
               ),
               StatusBadge(
-                label: sellable
+                label: batch.isQuarantined
+                    ? 'Quarantined'
+                    : sellable
                     ? expiryBucketLabel(bucket)
                     : bucket == ExpiryBucket.expired
                     ? 'Expired — never sellable'
                     : 'Out of stock',
-                kind: sellable
+                kind: batch.isQuarantined
+                    ? StatusKind.warning
+                    : sellable
                     ? expiryBucketKind(bucket)
                     : StatusKind.danger,
               ),
@@ -320,8 +520,38 @@ class _BatchRow extends ConsumerWidget {
             style: theme.textTheme.bodySmall,
           ),
           const SizedBox(height: 8),
-          Row(
+          // Week 4 Day 5 (D142): a plain Row of three small buttons
+          // overflowed at 390px — the buttons wrap now (D140 adds
+          // the third, Quarantine / Restore).
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
+              if (permissionService.canWrite(
+                ref.watch(authProvider),
+                'stockReceive',
+                batch.branchId,
+              ))
+                if (batch.status == BatchStatus.available)
+                  PharmaButton(
+                    key: ValueKey('quarantine-${batch.id}'),
+                    label: 'Quarantine',
+                    icon: Icons.block_outlined,
+                    variant: PharmaButtonVariant.secondary,
+                    size: PharmaButtonSize.small,
+                    onPressed: () =>
+                        _toggleQuarantine(context, ref, quarantine: true),
+                  )
+                else if (batch.isQuarantined)
+                  PharmaButton(
+                    key: ValueKey('unquarantine-${batch.id}'),
+                    label: 'Restore',
+                    icon: Icons.undo_outlined,
+                    variant: PharmaButtonVariant.secondary,
+                    size: PharmaButtonSize.small,
+                    onPressed: () =>
+                        _toggleQuarantine(context, ref, quarantine: false),
+                  ),
               PharmaButton(
                 key: ValueKey('adjust-${batch.id}'),
                 label: 'Adjust',
@@ -329,24 +559,23 @@ class _BatchRow extends ConsumerWidget {
                 variant: PharmaButtonVariant.secondary,
                 size: PharmaButtonSize.small,
                 onPressed: () async {
-                  final updated = await showAdjustStockDialog(
+                  final request = await showAdjustStockDialog(
                     context,
                     ref,
                     batch: batch,
                     medicineName: medicineName,
                   );
-                  if (updated != null && context.mounted) {
+                  if (request != null && context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
                         content: Text(
-                          'Batch ${updated.batchNo} now has ${updated.quantity} units.',
+                          'Adjustment requested — pending approval on the Adjustment Approvals screen.',
                         ),
                       ),
                     );
                   }
                 },
               ),
-              const SizedBox(width: 8),
               PharmaButton(
                 key: ValueKey('count-${batch.id}'),
                 label: 'Count',
