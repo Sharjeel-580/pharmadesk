@@ -16,6 +16,7 @@ import '../../models/medicine.dart';
 import '../../models/order.dart';
 import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
@@ -86,9 +87,15 @@ abstract class OrderRepository {
   /// Creates or replaces an order by id (Week 5 Day 2, D150 —
   /// restore upsert-by-id): an existing id is replaced in place, a
   /// new id is inserted as given (an empty id gets a minted one).
-  /// The order number is repo-assigned on insert (same sequence as
-  /// [createOrder]); an existing order keeps its number. Returns
-  /// the saved order.
+  /// The order number is repo-assigned on insert only when the
+  /// incoming order carries none (same sequence as [createOrder]);
+  /// a replay that carries a number keeps it — a restore never
+  /// re-numbers (D165/D174). An existing order keeps its number.
+  /// A carried number in `ORD-<branch>-<seq>` shape whose branch
+  /// code matches the order's branch advances that branch's
+  /// counter past the carried sequence (Week 7 Day 5, D175), so
+  /// the counter can never later mint the same number for a
+  /// different order. Returns the saved order.
   Future<Order> upsertOrder(Order order);
 }
 
@@ -465,6 +472,32 @@ abstract class StockAdjustmentRequestRepository {
   /// assigned one (`adj-N` in the mock, a Firestore auto-id in the
   /// Firestore implementation).
   Future<StockAdjustmentRequest> saveRequest(StockAdjustmentRequest request);
+}
+
+/// Quarantine return / disposal approval queue (Week 7 Day 1, D171 —
+/// SRS D-11 / FR-INV-07, §5.2.4).
+///
+/// One document per request under
+/// `branches/{branchId}/quarantineOutcomes/{id}` (doc id = request
+/// id). The mock starts empty: requests only arise from filing in
+/// the session, so there is nothing to seed. The Firestore
+/// implementation stores them under the same path. The layer owns
+/// the write path; screens depend only on this interface via the
+/// layer.
+abstract class QuarantineOutcomeRequestRepository {
+  /// All requests, optionally scoped to one branch.
+  Future<List<QuarantineOutcomeRequest>> getRequests({String? branchId});
+
+  Future<QuarantineOutcomeRequest?> getById(String id);
+
+  /// Creates or replaces one request, keyed by its id (D65 pattern):
+  /// a re-save overwrites the same document, never a duplicate — so
+  /// filing and deciding share one write path. An empty id gets an
+  /// assigned one (`qo-N` in the mock, a Firestore auto-id in the
+  /// Firestore implementation).
+  Future<QuarantineOutcomeRequest> saveRequest(
+    QuarantineOutcomeRequest request,
+  );
 }
 
 /// Branch directory (Week 5 Day 2, D148 — SRS D-28 / FR-HO-01/02/08,
@@ -1220,7 +1253,20 @@ class MockSaleRepository implements SaleRepository {
           : sale.invoiceNumber,
       createdAt: sale.createdAt ?? DateTime.now(),
     );
-    final index = _sales.indexWhere((s) => s.id == id);
+    // Week 7 Day 3 (D173): a restore re-keys a sale by its
+    // idempotencyKey, so the same sale may already live here under
+    // its mock-assigned id (`sale-DHA-…`) while the incoming copy
+    // carries the key as its id. Match by key as well as by id, so
+    // the restore REPLACES that sale in place under its canonical
+    // id instead of duplicating it (a re-import of the layer's own
+    // export stays one sale, and the ImportReport counts it as
+    // overwritten, not created). A sale is one record per key.
+    final index = _sales.indexWhere(
+      (s) =>
+          s.id == id ||
+          (sale.idempotencyKey.isNotEmpty &&
+              s.idempotencyKey == sale.idempotencyKey),
+    );
     if (index == -1) {
       _sales.add(saved);
     } else {
@@ -1509,6 +1555,49 @@ class MockStockAdjustmentRequestRepository
     // An empty id gets an assigned one; a non-empty id is kept —
     // the round-trip through the map rebuilds the same request.
     final saved = StockAdjustmentRequest.fromMap(id, request.toMap());
+    final index = _requests.indexWhere((item) => item.id == id);
+    if (index == -1) {
+      _requests.add(saved);
+    } else {
+      // D65 pattern: a re-save overwrites the same record, never a
+      // duplicate — filing and deciding share this write path.
+      _requests[index] = saved;
+    }
+    return saved;
+  }
+}
+
+/// Quarantine outcome approval queue (Week 7 Day 1, D171): mutable
+/// in-memory requests for the session, starting empty — requests
+/// only arise from filing, so there is nothing to seed.
+class MockQuarantineOutcomeRequestRepository
+    implements QuarantineOutcomeRequestRepository {
+  final List<QuarantineOutcomeRequest> _requests = [];
+
+  @override
+  Future<List<QuarantineOutcomeRequest>> getRequests({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_requests);
+    return List.unmodifiable(
+      _requests.where((request) => request.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<QuarantineOutcomeRequest?> getById(String id) async {
+    for (final request in _requests) {
+      if (request.id == id) return request;
+    }
+    return null;
+  }
+
+  @override
+  Future<QuarantineOutcomeRequest> saveRequest(
+    QuarantineOutcomeRequest request,
+  ) async {
+    final id = request.id.isEmpty ? 'qo-${_requests.length + 1}' : request.id;
+    // An empty id gets an assigned one; a non-empty id is kept —
+    // the round-trip through the map rebuilds the same request.
+    final saved = QuarantineOutcomeRequest.fromMap(id, request.toMap());
     final index = _requests.indexWhere((item) => item.id == id);
     if (index == -1) {
       _requests.add(saved);
@@ -2388,6 +2477,16 @@ final stockTransferRepositoryProvider = Provider<StockTransferRepository>(
 final stockAdjustmentRequestRepositoryProvider =
     Provider<StockAdjustmentRequestRepository>(
       (ref) => ref.watch(repositoryBundleProvider).stockAdjustments,
+    );
+
+/// Week 7 Day 1 quarantine outcome queue (D171): mock-backed by
+/// default — the provider reads from the [RepositoryBundle], so the
+/// mock bundle is the default and a Firestore bundle override
+/// switches it to the Firestore implementation exactly like the
+/// adjustment queue (D146 pattern).
+final quarantineOutcomeRequestRepositoryProvider =
+    Provider<QuarantineOutcomeRequestRepository>(
+      (ref) => ref.watch(repositoryBundleProvider).quarantineOutcomes,
     );
 
 /// Week 5 Day 2 branch directory (D148): mock-backed by default —
