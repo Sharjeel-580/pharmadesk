@@ -475,7 +475,12 @@ class _InfoRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(child: Text(label, style: style)),
-          Text(value, style: style),
+          // Week 8 Day 2 (D177): the value wraps instead of
+          // overflowing — a long address / email is wider than the
+          // 390px line in the test font.
+          Flexible(
+            child: Text(value, style: style, textAlign: TextAlign.right),
+          ),
         ],
       ),
     );
