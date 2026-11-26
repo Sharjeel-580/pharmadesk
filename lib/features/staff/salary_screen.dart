@@ -94,22 +94,29 @@ class _SalaryScreenState extends ConsumerState<SalaryScreen> {
               runSpacing: 8,
               children: [
                 if (canSeeAll)
-                  DropdownButton<String?>(
-                    value: _branchId,
-                    hint: const Text('All branches'),
-                    items: [
-                      const DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text('All branches'),
-                      ),
-                      for (final branch in demoBranches)
-                        DropdownMenuItem<String?>(
-                          value: branch.id,
-                          child: Text(branch.name),
+                  // Week 8 Day 2 (D177): capped at 280px with
+                  // isExpanded (the D153/D162 trap) — same
+                  // branch-name overflow as the transfer list.
+                  SizedBox(
+                    width: 280,
+                    child: DropdownButton<String?>(
+                      isExpanded: true,
+                      value: _branchId,
+                      hint: const Text('All branches'),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text('All branches'),
                         ),
-                    ],
-                    onChanged: (selected) =>
-                        setState(() => _branchId = selected),
+                        for (final branch in demoBranches)
+                          DropdownMenuItem<String?>(
+                            value: branch.id,
+                            child: Text(branch.name),
+                          ),
+                      ],
+                      onChanged: (selected) =>
+                          setState(() => _branchId = selected),
+                    ),
                   ),
                 Row(
                   mainAxisSize: MainAxisSize.min,
@@ -398,18 +405,24 @@ class _SalaryRowCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  // Week 8 Day 2 (D177): a Wrap, not a Row (the
+                  // D170 branches pattern) — at 390px the name
+                  // column is squeezed by the net-amount text and
+                  // the edit action, so name + Demo badge
+                  // overflowed in the test font. The badge flows
+                  // below the name when they do not fit beside it;
+                  // the name wraps instead of ellipsizing.
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Flexible(
-                        child: Text(
-                          row.employee.name,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                      Text(
+                        row.employee.name,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(width: 8),
                       if (record != null && record.isDemo)
                         const StatusBadge(
                           label: 'Demo',
@@ -434,10 +447,23 @@ class _SalaryRowCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Text(
-              record == null ? '—' : formatPkr(record.netMinor),
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
+            // Week 8 Day 2 (D177): the net amount scales down
+            // instead of overflowing — at 390px the avatar + net +
+            // edit button are wider than the card in the test font
+            // (up to 20px). The figure stays complete, never
+            // ellipsized; on a real phone it fits at full size and
+            // renders unchanged.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 150),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: Text(
+                  record == null ? '—' : formatPkr(record.netMinor),
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
               ),
             ),
             if (canEdit) ...[

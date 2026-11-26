@@ -233,18 +233,24 @@ class _AttendanceRowCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  // Week 8 Day 2 (D177): a Wrap, not a Row (the
+                  // D170 branches pattern) — at 390px the name
+                  // column is squeezed by the Check in/out buttons,
+                  // so name + status badge overflowed in the test
+                  // font. The badge flows below the name when they
+                  // do not fit beside it; the name wraps instead of
+                  // ellipsizing.
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Flexible(
-                        child: Text(
-                          row.employee.name,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                      Text(
+                        row.employee.name,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(width: 8),
                       StatusBadge(label: row.displayStatus, kind: kind),
                     ],
                   ),

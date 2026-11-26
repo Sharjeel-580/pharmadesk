@@ -79,22 +79,29 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
             runSpacing: 8,
             children: [
               if (canSeeAll)
-                DropdownButton<String?>(
-                  value: _branchId,
-                  hint: const Text('All branches'),
-                  items: [
-                    const DropdownMenuItem<String?>(
-                      value: null,
-                      child: Text('All branches'),
-                    ),
-                    for (final branch in demoBranches)
-                      DropdownMenuItem<String?>(
-                        value: branch.id,
-                        child: Text(branch.name),
+                // Week 8 Day 2 (D177): capped at 280px with
+                // isExpanded (the D153/D162 trap) — same
+                // branch-name overflow as the transfer list.
+                SizedBox(
+                  width: 280,
+                  child: DropdownButton<String?>(
+                    isExpanded: true,
+                    value: _branchId,
+                    hint: const Text('All branches'),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text('All branches'),
                       ),
-                  ],
-                  onChanged: (selected) =>
-                      setState(() => _branchId = selected),
+                      for (final branch in demoBranches)
+                        DropdownMenuItem<String?>(
+                          value: branch.id,
+                          child: Text(branch.name),
+                        ),
+                    ],
+                    onChanged: (selected) =>
+                        setState(() => _branchId = selected),
+                  ),
                 ),
               SizedBox(
                 width: 280,
@@ -257,18 +264,26 @@ class _StaffCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  // Week 8 Day 2 (D177): a Wrap, not a Row (the
+                  // D170 branches pattern) — at 390px the name
+                  // column is only ~77px wide (the Edit /
+                  // Deactivate column takes the rest), so name +
+                  // badge overflowed by 35px in the test font. The
+                  // badge flows below the name when they do not fit
+                  // beside it; the name wraps instead of
+                  // ellipsizing. On desktop they still sit on one
+                  // line.
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Flexible(
-                        child: Text(
-                          member.name,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                      Text(
+                        member.name,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(width: 8),
                       StatusBadge(
                         label: member.active ? 'Active' : 'Inactive',
                         kind: member.active
