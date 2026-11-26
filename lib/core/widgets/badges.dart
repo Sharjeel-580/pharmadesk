@@ -43,12 +43,22 @@ class StatusBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: color.withValues(alpha: 0.35)),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      // Week 8 Day 2 (D177): a Wrap, not a `Row(mainAxisSize: min)`.
+      // A min-sized Row lays its children out with unbounded width,
+      // so the label never wrapped: the badge measured wider than
+      // the line its parent offered (staff name rows overflowed by
+      // 35px at 390px in the test font — the badge alone was wider
+      // than the 77px the name column leaves). A Wrap respects the
+      // offered width: the label flows below the dot when it does
+      // not fit beside it, and the figure stays complete (the D170
+      // rule — no ellipsis on money). On a wide line the badge
+      // renders exactly as before: dot + label on one line.
+      child: Wrap(
+        spacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           if (icon != null) ...[
             Icon(icon, size: 12, color: color),
-            const SizedBox(width: 4),
           ] else ...[
             Container(
               width: 6,
@@ -58,22 +68,14 @@ class StatusBadge extends StatelessWidget {
                 shape: BoxShape.circle,
               ),
             ),
-            const SizedBox(width: 6),
           ],
-          // Week 6 Day 5 (D170): the label is Flexible so a badge
-          // whose text is wider than its line WRAPS instead of
-          // overflowing — a money figure must stay complete, so no
-          // ellipsis here (the supplier aging badges overflowed by
-          // 63px at 390px in the test font before this).
-          Flexible(
-            child: Text(
-              label,
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: color,
-              ),
+          Text(
+            label,
+            style: TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: color,
             ),
           ),
         ],
