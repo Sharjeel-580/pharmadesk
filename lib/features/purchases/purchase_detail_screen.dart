@@ -64,13 +64,18 @@ class PurchaseDetailScreen extends ConsumerWidget {
             onAction: () => context.go('/purchases'),
           ),
           const SizedBox(height: 16),
-          Row(
+          // Week 8 Day 2 (D177): a Wrap, not a Row — the status
+          // badge plus the supplier-name badge are wider than the
+          // 390px line in the test font; on desktop they still sit
+          // on one line.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               StatusBadge(
                 label: purchaseOrderStatusLabel(order.status),
                 kind: kind,
               ),
-              const SizedBox(width: 8),
               StatusBadge(
                 label: supplier?.name ?? order.supplierId,
                 kind: StatusKind.neutral,
@@ -291,10 +296,16 @@ class _TotalRow extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+          // Week 8 Day 2 (D177): the label wraps instead of
+          // overflowing — a long label plus a money figure is wider
+          // than the 390px line in the test font; the money value
+          // itself stays complete, never ellipsized.
+          Flexible(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+              ),
             ),
           ),
           Text(

@@ -146,6 +146,10 @@ class _PurchaseFormScreenState extends ConsumerState<PurchaseFormScreen> {
                         ? _supplierId
                         : null;
                     return DropdownButtonFormField<String?>(
+                      // Week 8 Day 2 (D177): isExpanded, the
+                      // D153/D162 trap — 'Supplier — contact person'
+                      // is wider than the 390px line without it.
+                      isExpanded: true,
                       initialValue: value,
                       hint: const Text('Select a supplier'),
                       items: [

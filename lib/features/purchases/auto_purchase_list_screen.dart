@@ -292,9 +292,15 @@ class _AutoPurchaseListScreenState
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text(
-                          'Estimated total',
-                          style: TextStyle(fontWeight: FontWeight.w600),
+                        // Week 8 Day 2 (D177): the label wraps instead
+                        // of overflowing — label plus money figure is
+                        // wider than the 390px line in the test font;
+                        // the figure itself stays complete.
+                        const Flexible(
+                          child: Text(
+                            'Estimated total',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
                         ),
                         Text(
                           formatPkr(state.totalMinor),
@@ -591,13 +597,24 @@ class _LineCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                StatusBadge(
-                  label: autoPurchaseReasonLabel(suggestion.reason),
-                  kind: switch (suggestion.reason) {
-                    AutoPurchaseReason.lowStock => StatusKind.danger,
-                    AutoPurchaseReason.nearExpiry => StatusKind.warning,
-                    AutoPurchaseReason.belowReorderLevel => StatusKind.info,
-                  },
+                // Week 8 Day 2 (D177): capped at 180px — the reason
+                // label ('Below reorder level') plus the Remove
+                // button are wider than the 390px card line in the
+                // test font (33px overflow). The badge wraps its
+                // label inside the cap instead of overflowing; on a
+                // real phone the label fits at full size and renders
+                // unchanged.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 180),
+                  child: StatusBadge(
+                    label: autoPurchaseReasonLabel(suggestion.reason),
+                    kind: switch (suggestion.reason) {
+                      AutoPurchaseReason.lowStock => StatusKind.danger,
+                      AutoPurchaseReason.nearExpiry => StatusKind.warning,
+                      AutoPurchaseReason.belowReorderLevel =>
+                        StatusKind.info,
+                    },
+                  ),
                 ),
                 IconButton(
                   key: ValueKey('remove-${suggestion.medicineId}'),
@@ -698,8 +715,12 @@ class _SupplierDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Week 8 Day 2 (D177): isExpanded (the D153/D162 trap) —
+    // the longest supplier name is wider than the 390px card
+    // line without it.
     return DropdownButton<String>(
       value: line.supplierId,
+      isExpanded: true,
       hint: const Text('Pick supplier'),
       isDense: true,
       underline: const SizedBox.shrink(),
