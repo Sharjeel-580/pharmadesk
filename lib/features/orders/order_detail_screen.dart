@@ -6,6 +6,7 @@ import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/order.dart';
 import '../../models/prescription.dart';
+import '../../models/rider.dart';
 import '../dashboard/dashboard_data.dart';
 import 'order_logic.dart';
 import 'orders_provider.dart';
@@ -330,6 +331,23 @@ class OrderDetailScreen extends ConsumerWidget {
                   variant: PharmaButtonVariant.secondary,
                   onPressed: () => context.go('/orders/${order.id}/edit'),
                 ),
+              // Rider assignment (Week 4 Day 2, D121): delivery
+              // orders only, while editable. Opens the same rider
+              // picker the order form uses (active riders in this
+              // branch); the save goes through the ONE assignment
+              // write path (`OrderQueueNotifier.assignRider` → layer
+              // `assignRider`), never a second path.
+              if (canEdit(order.status) &&
+                  order.fulfillment == FulfillmentType.delivery)
+                PharmaButton(
+                  label: rider == null
+                      ? 'Assign Rider'
+                      : 'Change Rider',
+                  icon: Icons.delivery_dining_outlined,
+                  variant: PharmaButtonVariant.secondary,
+                  onPressed: () =>
+                      _assignRider(context, ref, order, riders),
+                ),
             ],
           ),
           if (!canEdit(order.status)) ...[
@@ -391,6 +409,98 @@ class OrderDetailScreen extends ConsumerWidget {
           ok
               ? 'Order ${order.id} cancelled.'
               : 'Order could not be cancelled.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _assignRider(
+    BuildContext context,
+    WidgetRef ref,
+    Order order,
+    List<Rider> riders,
+  ) async {
+    final available = riders
+        .where((rider) => rider.active)
+        .where(
+          (rider) =>
+              rider.branchId == null || rider.branchId == order.branchId,
+        )
+        .toList();
+    final selected = await showDialog<String?>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Assign rider'),
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (available.isEmpty)
+                const Text(
+                  'No active riders in this branch right now.',
+                )
+              else
+                RadioGroup<String>(
+                  groupValue: order.riderId,
+                  onChanged: (value) {
+                    if (value != null) {
+                      Navigator.of(dialogContext).pop(value);
+                    }
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final rider in available)
+                        RadioListTile<String>(
+                          key: ValueKey('assign-rider-${rider.id}'),
+                          title: Text(rider.name),
+                          subtitle: Text(
+                            '${rider.phone}'
+                            '${rider.vehicle != null ? ' • ${rider.vehicle!}' : ''}'
+                            '${rider.currentOrderId != null && rider.currentOrderId != order.id ? ' • Out on another order' : ''}',
+                          ),
+                          value: rider.id,
+                          enabled:
+                              rider.currentOrderId == null ||
+                              rider.currentOrderId == order.id,
+                        ),
+                    ],
+                  ),
+                ),
+              if (order.riderId != null)
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(''),
+                  child: const Text('Remove rider'),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || !context.mounted) return;
+    final riderId = selected.isEmpty ? null : selected;
+    if (riderId == order.riderId) return;
+    final ok = await ref
+        .read(orderQueueProvider.notifier)
+        .assignRider(order, riderId);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? (riderId == null
+                    ? 'Rider removed from order ${order.id}.'
+                    : 'Rider assigned to order ${order.id}.')
+              : 'Rider could not be assigned.',
         ),
       ),
     );

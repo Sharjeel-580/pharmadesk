@@ -104,6 +104,35 @@ class OrderQueueNotifier extends AsyncNotifier<List<Order>> {
     await refresh();
     return true;
   }
+
+  /// Assigns (or unassigns, with [riderId] null) a rider to a
+  /// delivery order through the production data layer (Week 4 Day
+  /// 2, D121) — the ONE assignment write path: the Order Detail
+  /// button, the order form's rider picker (which saves through
+  /// `updateOrder` — unchanged) and the Rider Detail "Assign order"
+  /// action all end at `layer.assignRider`. Returns `false` when
+  /// the guard forbids it (Delivered / Cancelled / pickup order).
+  Future<bool> assignRider(Order order, String? riderId) async {
+    if (!canEdit(order.status)) return false;
+    if (order.fulfillment != FulfillmentType.delivery) return false;
+    try {
+      final user = ref.read(authProvider);
+      await ref
+          .read(productionDataLayerProvider)
+          .assignRider(
+            orderId: order.id,
+            riderId: riderId,
+            actorId: user?.uid ?? demoActorId,
+            actorName: user?.displayName ?? demoActorName,
+          );
+    } on ArgumentError {
+      return false;
+    }
+    await refresh();
+    ref.invalidate(orderRidersProvider);
+    ref.invalidate(syncStatusProvider);
+    return true;
+  }
 }
 
 final orderQueueProvider =
