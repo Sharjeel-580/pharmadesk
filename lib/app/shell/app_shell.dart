@@ -11,8 +11,10 @@ import '../../core/widgets/demo_mode_badge.dart';
 import '../../features/authentication/auth_state.dart';
 import '../../features/audit/audit_logic.dart';
 import '../../features/branches/branch_directory.dart';
+import '../../features/finance/franchise_logic.dart';
 import '../../features/notifications/notifications_provider.dart';
 import '../../features/settings/feature_config.dart';
+import '../../features/inventory/quarantine_outcome_logic.dart';
 import '../../features/inventory/stock_adjustment_logic.dart';
 import '../../features/inventory/transfer_logic.dart';
 import '../../features/staff/salary_logic.dart';
@@ -623,6 +625,7 @@ class _Sidebar extends ConsumerWidget {
           Divider(color: Colors.white.withValues(alpha: 0.15), height: 1),
           Expanded(
             child: ListView(
+              key: const ValueKey('app-sidebar-list'),
               padding: const EdgeInsets.symmetric(vertical: 8),
               children: [
                 for (final (groupLabel, titles) in _navGroups) ...[
@@ -677,6 +680,21 @@ class _Sidebar extends ConsumerWidget {
                             '/inventory/adjustments',
                           ),
                         ),
+                      // Quarantine Outcomes sits under Inventory
+                      // (Week 5 Day 4, D154): a sub-screen of the
+                      // Inventory module, same feature toggle — only
+                      // for users who may request adjustments in the
+                      // active branch (`stockAdjustReq`), like the
+                      // adjustment queue.
+                      if (title == 'Inventory' &&
+                          canViewQuarantineOutcomeQueue(user, branchId))
+                        _SidebarSubItem(
+                          label: 'Quarantine Outcomes',
+                          route: '/inventory/quarantine-outcomes',
+                          selected: currentLocation.startsWith(
+                            '/inventory/quarantine-outcomes',
+                          ),
+                        ),
                       // Riders & Delivery sits under Orders (Week 4
                       // Day 2, D121): a sub-screen of the Orders
                       // module, same feature toggle — no separate
@@ -704,8 +722,21 @@ class _Sidebar extends ConsumerWidget {
                         _SidebarSubItem(
                           label: 'Returns & refunds',
                           route: '/billing/returns',
-                          selected: currentLocation == '/billing/returns' ||
+                          selected:
+                              currentLocation == '/billing/returns' ||
                               currentLocation == '/billing/returns/new',
+                        ),
+                      // Franchise Royalties sits under Finance (Week 5
+                      // Day 5, D159 — FR-HO-07): a sub-screen of the
+                      // Finance module, same feature toggle — head
+                      // office only (`branches` write level).
+                      if (title == 'Finance' &&
+                          canViewFranchiseRoyalties(user, branchId))
+                        _SidebarSubItem(
+                          label: 'Franchise Royalties',
+                          route: '/finance/franchise',
+                          selected:
+                              currentLocation == '/finance/franchise',
                         ),
                       // Attendance & shifts sit under Staff & HR
                       // (Week 2 Day 5): sub-screens of the Staff
@@ -714,8 +745,7 @@ class _Sidebar extends ConsumerWidget {
                         _SidebarSubItem(
                           label: 'Attendance',
                           route: '/staff/attendance',
-                          selected:
-                              currentLocation == '/staff/attendance',
+                          selected: currentLocation == '/staff/attendance',
                         ),
                         _SidebarSubItem(
                           label: 'Shifts',
@@ -744,9 +774,7 @@ class _Sidebar extends ConsumerWidget {
                           _SidebarSubItem(
                             label: 'Branch Management',
                             route: '/branches',
-                            selected: currentLocation.startsWith(
-                              '/branches',
-                            ),
+                            selected: currentLocation.startsWith('/branches'),
                           ),
                         if (canViewAuditLog(user, branchId))
                           _SidebarSubItem(
@@ -942,6 +970,7 @@ class _BottomNav extends ConsumerWidget {
             canViewBranches(user, branchId),
             canViewAuditLog(user, branchId),
             permissionService.canInBranch(user, 'sysSettings', branchId),
+            canViewFranchiseRoyalties(user, branchId),
           );
         }
       },
@@ -980,6 +1009,7 @@ class _BottomNav extends ConsumerWidget {
     bool canViewBranchRecords,
     bool canViewAuditRecords,
     bool canViewBackupRecords,
+    bool canViewFranchiseRecords,
   ) {
     showModalBottomSheet<void>(
       context: context,
@@ -1020,9 +1050,7 @@ class _BottomNav extends ConsumerWidget {
                 ListTile(
                   leading: const SizedBox(width: 24),
                   title: const Text('Stock Transfers'),
-                  subtitle: const Text(
-                    'Move stock between branches',
-                  ),
+                  subtitle: const Text('Move stock between branches'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -1036,13 +1064,26 @@ class _BottomNav extends ConsumerWidget {
                 ListTile(
                   leading: const SizedBox(width: 24),
                   title: const Text('Adjustment Approvals'),
-                  subtitle: const Text(
-                    'Review and approve stock adjustments',
-                  ),
+                  subtitle: const Text('Review and approve stock adjustments'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
                     context.go('/inventory/adjustments');
+                  },
+                ),
+              // Quarantine Outcomes sits under Inventory (Week 5
+              // Day 4, D154) — only for users who may request
+              // adjustments in the active branch (`stockAdjustReq`),
+              // like the adjustment queue.
+              if (module.title == 'Inventory' && canViewAdjustmentRecords)
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Quarantine Outcomes'),
+                  subtitle: const Text('Approve returns and disposals'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/inventory/quarantine-outcomes');
                   },
                 ),
               // Riders & Delivery sits under Orders (Week 4 Day 2,
@@ -1051,9 +1092,7 @@ class _BottomNav extends ConsumerWidget {
                 ListTile(
                   leading: const SizedBox(width: 24),
                   title: const Text('Riders & Delivery'),
-                  subtitle: const Text(
-                    'Riders, availability, assignment',
-                  ),
+                  subtitle: const Text('Riders, availability, assignment'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -1082,6 +1121,21 @@ class _BottomNav extends ConsumerWidget {
                   onTap: () {
                     Navigator.of(sheetContext).pop();
                     context.go('/billing/returns');
+                  },
+                ),
+              // Franchise Royalties sits under Finance (Week 5 Day 5,
+              // D159 — FR-HO-07): head-office only.
+              if (module.title == 'Finance' && canViewFranchiseRecords)
+                ListTile(
+                  leading: const SizedBox(width: 24),
+                  title: const Text('Franchise Royalties'),
+                  subtitle: const Text(
+                    'Royalty and commission due by branch',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    context.go('/finance/franchise');
                   },
                 ),
               // Attendance & shifts sit under Staff & HR (Week 2 Day 5).
