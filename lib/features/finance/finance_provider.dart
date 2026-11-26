@@ -4,10 +4,11 @@ import '../../core/data/permission_service.dart';
 import '../../core/data/production_data_layer.dart';
 import '../../core/services/repositories.dart';
 import '../../core/widgets/sync_status_widget.dart';
+import '../../models/cash_reconciliation.dart';
+import '../../models/closing_correction.dart';
 import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
-import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 import '../authentication/auth_state.dart';
 import '../customers/customers_provider.dart';
@@ -63,7 +64,10 @@ class ExpensesNotifier extends AsyncNotifier<List<Expense>> {
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
-      return (expense: null, error: 'You do not have permission to record expenses in this branch (SRS §5.1: finance entry).');
+      return (
+        expense: null,
+        error: 'You do not have permission to record expenses in this branch (SRS §5.1: finance entry).',
+      );
     }
     final errors = validateExpense(
       category: category,
@@ -91,10 +95,9 @@ class ExpensesNotifier extends AsyncNotifier<List<Expense>> {
   }
 }
 
-final expensesProvider =
-    AsyncNotifierProvider<ExpensesNotifier, List<Expense>>(
-      ExpensesNotifier.new,
-    );
+final expensesProvider = AsyncNotifierProvider<ExpensesNotifier, List<Expense>>(
+  ExpensesNotifier.new,
+);
 
 class FinancialTransactionsNotifier
     extends AsyncNotifier<List<FinancialTransaction>> {
@@ -130,7 +133,10 @@ class FinancialTransactionsNotifier
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
-      return (transaction: null, error: 'You do not have permission to record income in this branch (SRS §5.1: finance entry).');
+      return (
+        transaction: null,
+        error: 'You do not have permission to record income in this branch (SRS §5.1: finance entry).',
+      );
     }
     final errors = validateCashbookEntry(
       isIncome: true,
@@ -180,9 +186,12 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
   /// Records a supplier payment (amount in int paisa, unsigned):
   /// allocates it against the open payables oldest-first, saves
   /// the payment record, the supplier-ledger payment entry and the
-  /// financial-transaction entry. Returns the saved payment, or
-  /// `null` + an error message (no permission, overpayment, or an
-  /// allocation shortfall).
+  /// financial-transaction entry. Writes through the production data
+  /// layer (Week 5 Day 1, D147 — closes the D145 follow-up): the
+  /// layer writes all three records in one call and enqueues one
+  /// sync payload, so the sync-status chip moves for supplier
+  /// payments. Returns the saved payment, or `null` + an error
+  /// message (no permission, overpayment, or an allocation shortfall).
   Future<({SupplierPayment? payment, String? error})> recordPayment({
     required String supplierId,
     required String branchId,
@@ -193,7 +202,10 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'supplierPay', branchId)) {
-      return (payment: null, error: 'Only the Owner, HO Admin or Accountant may pay a supplier (SRS §5.1: supplier payment).');
+      return (
+        payment: null,
+        error: 'Only the Owner, HO Admin or Accountant may pay a supplier (SRS §5.1: supplier payment).',
+      );
     }
     final ledger = await ref
         .read(supplierRepositoryProvider)
@@ -215,59 +227,25 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
     if (errors.isNotEmpty) {
       return (payment: null, error: errors.first);
     }
-    final methodLabel = supplierPaymentMethodLabel(method);
     final created = await ref
-        .read(supplierPaymentRepositoryProvider)
-        .createPayment(
-          SupplierPayment(
-            id: '',
-            branchId: branchId,
-            supplierId: supplierId,
-            amountMinor: amountMinor,
-            method: method,
-            reference: reference.trim(),
-            paidBy: user?.uid,
-            paidAt: DateTime.now(),
-            allocations: allocations,
-          ),
-        );
-    final ledgerReason = reason.trim().isEmpty
-        ? 'Payment made — $methodLabel'
-              '${reference.trim().isEmpty ? '' : ' (${reference.trim()})'}'
-        : reason.trim();
-    await ref.read(supplierRepositoryProvider).addLedgerEntry(
-      SupplierLedgerEntry(
-        id: '',
-        supplierId: supplierId,
-        kind: SupplierLedgerEntryKind.payment,
-        amountMinor: -amountMinor,
-        reason: ledgerReason,
-        referenceId: created.id,
-        balanceAfterMinor: 0, // set by the repository
-        createdAt: DateTime.now(),
-      ),
-    );
-    await ref
-        .read(financialTransactionRepositoryProvider)
-        .addTransaction(
-          FinancialTransaction(
-            id: '',
-            branchId: branchId,
-            type: FinancialTransactionType.supplierPayment,
-            amountMinor: -amountMinor,
-            category: 'Supplier payment',
-            referenceType: 'supplierPayment',
-            referenceId: created.id,
-            createdBy: user?.uid,
-            createdAt: DateTime.now(),
-          ),
+        .read(productionDataLayerProvider)
+        .recordSupplierPayment(
+          supplierId: supplierId,
+          branchId: branchId,
+          amountMinor: amountMinor,
+          method: method,
+          reference: reference,
+          reason: reason,
+          paidBy: user?.uid,
+          allocations: allocations,
         );
     await refresh();
     ref.invalidate(supplierLedgerProvider(supplierId));
     ref.invalidate(supplierOutstandingProvider(supplierId));
     ref.invalidate(financialTransactionsProvider);
     ref.invalidate(advancedReportDataProvider);
-    return (payment: created, error: null);
+    ref.invalidate(syncStatusProvider);
+    return (payment: created.payment, error: null);
   }
 }
 
@@ -364,7 +342,10 @@ class DailyClosingsNotifier extends AsyncNotifier<List<DailyClosing>> {
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
-      return (closing: null, error: 'You do not have permission to close a day in this branch (SRS §5.1: finance entry).');
+      return (
+        closing: null,
+        error: 'You do not have permission to close a day in this branch (SRS §5.1: finance entry).',
+      );
     }
     final day = DateTime(date.year, date.month, date.day);
     final existing = state.asData?.value ?? const <DailyClosing>[];
@@ -424,21 +405,228 @@ final dailyClosingsProvider =
       DailyClosingsNotifier.new,
     );
 
+/// Closing corrections (Week 5 Day 4, D156 — SRS D-24 / FR-FIN-06).
+///
+/// [ClosingCorrectionsNotifier] owns the reversing entries: a wrong
+/// closing is never edited in place — [correctClosing] records a
+/// new correction linked to the original, through the production
+/// data layer (audit + sync, D145 pattern). Writes are gated on
+/// `financeEntry`, like closing a day; a denied caller gets an
+/// error string, not a silent no-op. The corrected figures are what
+/// the cashbook screen shows, via [adjustedClosingTotals] — the
+/// original record stays exactly as closed.
+class ClosingCorrectionsNotifier
+    extends AsyncNotifier<List<ClosingCorrection>> {
+  @override
+  Future<List<ClosingCorrection>> build() async {
+    final repo = ref.read(closingCorrectionRepositoryProvider);
+    return repo.getCorrections();
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(
+      () => ref.read(closingCorrectionRepositoryProvider).getCorrections(),
+    );
+  }
+
+  /// Corrects [original]: records a reversing entry carrying the
+  /// corrected totals for the day, with the reason the original was
+  /// wrong. Returns the saved correction, or `null` + an error
+  /// message (no permission, missing original, negative totals, or
+  /// no reason). The corrected closing balance is derived from the
+  /// corrected totals (`opening + income − expense`) — the caller
+  /// supplies income/expense, never a balance of their own, so a
+  /// correction can never state an inconsistent balance.
+  Future<({ClosingCorrection? correction, String? error})> correctClosing({
+    required DailyClosing original,
+    required int correctedIncomeMinor,
+    required int correctedExpenseMinor,
+    required String reason,
+    String note = '',
+  }) async {
+    final user = ref.read(authProvider);
+    if (!permissionService.canWrite(user, 'financeEntry', original.branchId)) {
+      return (
+        correction: null,
+        error: 'You do not have permission to correct a closing in this branch (SRS §5.1: finance entry).',
+      );
+    }
+    final errors = validateClosingCorrection(
+      original: original,
+      correctedIncomeMinor: correctedIncomeMinor,
+      correctedExpenseMinor: correctedExpenseMinor,
+      reason: reason,
+    );
+    if (errors.isNotEmpty) {
+      return (correction: null, error: errors.first);
+    }
+    final day = DateTime(
+      original.date.year,
+      original.date.month,
+      original.date.day,
+    );
+    final created = await ref
+        .read(productionDataLayerProvider)
+        .recordClosingCorrection(
+          correction: ClosingCorrection(
+            id: '',
+            branchId: original.branchId,
+            originalClosingId: original.id,
+            date: day,
+            correctedIncomeMinor: correctedIncomeMinor,
+            correctedExpenseMinor: correctedExpenseMinor,
+            correctedClosingBalanceMinor:
+                original.openingBalanceMinor +
+                correctedIncomeMinor -
+                correctedExpenseMinor,
+            reason: reason.trim(),
+            correctedBy: user?.uid,
+            correctedAt: DateTime.now(),
+            note: note.trim(),
+          ),
+          actorId: user?.uid ?? demoActorId,
+          actorName: user?.name ?? demoActorName,
+        );
+    await refresh();
+    ref.invalidate(syncStatusProvider);
+    return (correction: created, error: null);
+  }
+}
+
+final closingCorrectionsProvider =
+    AsyncNotifierProvider<ClosingCorrectionsNotifier, List<ClosingCorrection>>(
+      ClosingCorrectionsNotifier.new,
+    );
+
+/// Cash reconciliations (Week 5 Day 4, D157 — SRS D-24 / FR-FIN-02).
+///
+/// [CashReconciliationsNotifier] owns the drawer counts: [reconcileDay]
+/// computes the expected drawer from the day's live figures (sales
+/// cash legs + cashbook entries + opening, via
+/// `expectedDrawerMinor`), compares it with the counted cash, and
+/// records the difference through the production data layer (audit +
+/// sync, D145 pattern). Writes are gated on `financeEntry`, like
+/// closing a day. A recount is a new record, never an edit.
+class CashReconciliationsNotifier
+    extends AsyncNotifier<List<CashReconciliation>> {
+  @override
+  Future<List<CashReconciliation>> build() async {
+    final repo = ref.read(cashReconciliationRepositoryProvider);
+    return repo.getReconciliations();
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(
+      () => ref.read(cashReconciliationRepositoryProvider).getReconciliations(),
+    );
+  }
+
+  /// Reconciles [date] for [branchId]: the expected drawer is
+  /// computed from the live sales + cashbook entries (read fresh
+  /// from the repositories, not from the screen's possibly stale
+  /// list), and the counted cash is compared against it. Returns
+  /// the saved reconciliation (with the expected amount and the
+  /// recorded difference), or `null` + an error message (no
+  /// permission, future day, or a negative count).
+  Future<({CashReconciliation? reconciliation, String? error})> reconcileDay({
+    required String branchId,
+    required DateTime date,
+    required int countedMinor,
+    String note = '',
+  }) async {
+    final user = ref.read(authProvider);
+    if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
+      return (
+        reconciliation: null,
+        error: 'You do not have permission to reconcile cash in this branch (SRS §5.1: finance entry).',
+      );
+    }
+    final day = DateTime(date.year, date.month, date.day);
+    final errors = validateCashReconciliation(
+      countedMinor: countedMinor,
+      date: day,
+    );
+    if (errors.isNotEmpty) {
+      return (reconciliation: null, error: errors.first);
+    }
+    final sales = await ref
+        .read(saleRepositoryProvider)
+        .getSales(branchId: branchId);
+    final expenses = await ref
+        .read(expenseRepositoryProvider)
+        .getExpenses(branchId: branchId);
+    final transactions = await ref
+        .read(financialTransactionRepositoryProvider)
+        .getTransactions(branchId: branchId);
+    final entries = cashbookEntries(
+      expenses: expenses,
+      transactions: transactions,
+      branchId: branchId,
+    );
+    final closings = await ref
+        .read(dailyClosingRepositoryProvider)
+        .getClosings(branchId: branchId);
+    final opening = previousClosingBalance(
+      closings: closings,
+      branchId: branchId,
+      date: day,
+    );
+    final expected = expectedDrawerMinor(
+      sales: sales,
+      entries: entries,
+      openingBalanceMinor: opening,
+      date: day,
+    );
+    final created = await ref
+        .read(productionDataLayerProvider)
+        .recordCashReconciliation(
+          reconciliation: CashReconciliation(
+            id: '',
+            branchId: branchId,
+            date: day,
+            expectedMinor: expected,
+            countedMinor: countedMinor,
+            differenceMinor: cashReconciliationDifference(
+              expectedMinor: expected,
+              countedMinor: countedMinor,
+            ),
+            note: note.trim(),
+            countedBy: user?.uid,
+            countedAt: DateTime.now(),
+          ),
+          actorId: user?.uid ?? demoActorId,
+          actorName: user?.name ?? demoActorName,
+        );
+    await refresh();
+    ref.invalidate(syncStatusProvider);
+    return (reconciliation: created, error: null);
+  }
+}
+
+final cashReconciliationsProvider =
+    AsyncNotifierProvider<
+      CashReconciliationsNotifier,
+      List<CashReconciliation>
+    >(CashReconciliationsNotifier.new);
+
 /// The cashbook list for a branch (`null` = all branches): expenses
 /// + income transactions unified, newest first (D124). The screen
 /// filters this by date; the notifier reads it fresh for closing.
-final cashbookEntriesProvider =
-    Provider.family<List<CashbookEntry>, String?>((ref, branchId) {
-      final expenses =
-          ref.watch(expensesProvider).asData?.value ?? const [];
-      final transactions =
-          ref.watch(financialTransactionsProvider).asData?.value ?? const [];
-      return cashbookEntries(
-        expenses: expenses,
-        transactions: transactions,
-        branchId: branchId,
-      );
-    });
+final cashbookEntriesProvider = Provider.family<List<CashbookEntry>, String?>((
+  ref,
+  branchId,
+) {
+  final expenses = ref.watch(expensesProvider).asData?.value ?? const [];
+  final transactions =
+      ref.watch(financialTransactionsProvider).asData?.value ?? const [];
+  return cashbookEntries(
+    expenses: expenses,
+    transactions: transactions,
+    branchId: branchId,
+  );
+});
 
 /// One branch's P&L statement (Week 4 Day 3, D128 — SRS D-26).
 ///
@@ -462,9 +650,7 @@ final branchStatementProvider =
 /// [AgingSummary] from the D92 ledger computation. Parties with a
 /// zero outstanding are included with a zero summary — the screen
 /// filters them out of the list and counts them as settled.
-final allPayablesAgingProvider = Provider<Map<String, AgingSummary>>((
-  ref,
-) {
+final allPayablesAgingProvider = Provider<Map<String, AgingSummary>>((ref) {
   final suppliers = ref.watch(suppliersProvider).asData?.value ?? const [];
   return {
     for (final supplier in suppliers)
@@ -475,9 +661,7 @@ final allPayablesAgingProvider = Provider<Map<String, AgingSummary>>((
 /// Receivables aging for every customer (D127): customer id →
 /// [AgingSummary] from the same D92 computation over the khata
 /// ledger.
-final allReceivablesAgingProvider = Provider<Map<String, AgingSummary>>((
-  ref,
-) {
+final allReceivablesAgingProvider = Provider<Map<String, AgingSummary>>((ref) {
   final customers = ref.watch(customersProvider).asData?.value ?? const [];
   return {
     for (final customer in customers)

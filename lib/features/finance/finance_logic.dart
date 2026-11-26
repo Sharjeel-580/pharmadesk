@@ -1,6 +1,8 @@
+import '../../models/closing_correction.dart';
 import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
+import '../../models/sale.dart';
 import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 
@@ -53,26 +55,18 @@ typedef OpenPayable = ({String id, DateTime date, int remainingMinor});
 /// `validateSupplierLedgerEntry` / `validateLedgerEntry`); here the
 /// excess is simply ignored, never turned into a negative payable.
 List<OpenPayable> openPayableBalances(List<SignedEntry> entries) {
-  final charges = entries
-      .where((entry) => entry.amountMinor > 0)
-      .toList()
+  final charges = entries.where((entry) => entry.amountMinor > 0).toList()
     ..sort((a, b) => a.date.compareTo(b.date));
   var paid = entries
       .where((entry) => entry.amountMinor < 0)
       .fold(0, (sum, entry) => sum + (-entry.amountMinor));
   final open = <OpenPayable>[];
   for (final charge in charges) {
-    final settled = paid >= charge.amountMinor
-        ? charge.amountMinor
-        : paid;
+    final settled = paid >= charge.amountMinor ? charge.amountMinor : paid;
     paid -= settled;
     final remaining = charge.amountMinor - settled;
     if (remaining > 0) {
-      open.add((
-        id: charge.id,
-        date: charge.date,
-        remainingMinor: remaining,
-      ));
+      open.add((id: charge.id, date: charge.date, remainingMinor: remaining));
     }
   }
   return open;
@@ -107,11 +101,7 @@ AgingSummary computeAging({
   };
   var total = 0;
   for (final open in openPayableBalances(entries)) {
-    final chargeDay = DateTime(
-      open.date.year,
-      open.date.month,
-      open.date.day,
-    );
+    final chargeDay = DateTime(open.date.year, open.date.month, open.date.day);
     final ageDays = today.difference(chargeDay).inDays;
     final bucket = agingBucketForAge(ageDays < 0 ? 0 : ageDays);
     buckets[bucket] = (buckets[bucket] ?? 0) + open.remainingMinor;
@@ -222,9 +212,7 @@ List<String> validateExpense({
 /// is the running balance (the repository computes it at insert);
 /// this function only orders the entries — it never recomputes a
 /// balance, so the statement shows exactly what was recorded.
-List<SupplierLedgerEntry> supplierStatement(
-  List<SupplierLedgerEntry> entries,
-) {
+List<SupplierLedgerEntry> supplierStatement(List<SupplierLedgerEntry> entries) {
   final sorted = entries.toList()
     ..sort((a, b) {
       final aTime = a.createdAt;
@@ -453,11 +441,10 @@ int previousClosingBalance({
       closing.date.day,
     );
     if (!closingDay.isBefore(day)) continue;
-    if (latest == null || closingDay.isAfter(DateTime(
-      latest.date.year,
-      latest.date.month,
-      latest.date.day,
-    ))) {
+    if (latest == null ||
+        closingDay.isAfter(
+          DateTime(latest.date.year, latest.date.month, latest.date.day),
+        )) {
       latest = closing;
     }
   }
@@ -482,11 +469,7 @@ List<String> validateDailyClosing({
   final duplicate = existing.any(
     (closing) =>
         closing.branchId == branchId &&
-        DateTime(
-          closing.date.year,
-          closing.date.month,
-          closing.date.day,
-        ) ==
+        DateTime(closing.date.year, closing.date.month, closing.date.day) ==
             day,
   );
   if (duplicate) {
@@ -510,4 +493,184 @@ bool dailyClosingIsStale({
   );
   return totals.incomeMinor != closing.totalIncomeMinor ||
       totals.expenseMinor != closing.totalExpenseMinor;
+}
+
+// --- Closing corrections (Week 5 Day 4, D156 — SRS D-24 / FR-FIN-06) ---
+
+/// Validates a closing correction before saving: the original
+/// closing must exist, the corrected totals must be non-negative
+/// (a day's money in / out cannot be below zero), and a reason is
+/// required — the correction is an audit record, and a reason-less
+/// correction explains nothing to the next reader.
+List<String> validateClosingCorrection({
+  required DailyClosing? original,
+  required int correctedIncomeMinor,
+  required int correctedExpenseMinor,
+  required String reason,
+}) {
+  final errors = <String>[];
+  if (original == null) {
+    errors.add('The closing being corrected no longer exists.');
+  }
+  if (correctedIncomeMinor < 0) {
+    errors.add('Corrected income cannot be negative.');
+  }
+  if (correctedExpenseMinor < 0) {
+    errors.add('Corrected expense cannot be negative.');
+  }
+  if (reason.trim().isEmpty) {
+    errors.add(
+      'A reason is required — say what was wrong with the original closing.',
+    );
+  }
+  return errors;
+}
+
+/// The figures a closing stands at after corrections (D156).
+class AdjustedClosingTotals {
+  const AdjustedClosingTotals({
+    required this.incomeMinor,
+    required this.expenseMinor,
+    required this.closingBalanceMinor,
+    required this.corrected,
+    this.correctionId,
+  });
+
+  /// Money in that day (corrected when a correction exists).
+  final int incomeMinor;
+
+  /// Money out that day (corrected when a correction exists).
+  final int expenseMinor;
+
+  /// Closing balance (corrected when a correction exists).
+  final int closingBalanceMinor;
+
+  /// True when at least one correction applies to this closing.
+  final bool corrected;
+
+  /// The latest correction's id, or `null` when uncorrected.
+  final String? correctionId;
+}
+
+/// The totals a closing stands at: the ORIGINAL totals when no
+/// correction exists, the LATEST correction's totals when one or
+/// more do (latest by `correctedAt`, ties broken by list order —
+/// a correction re-states the day in full, so there is never a
+/// chain to sum). The original record is never rewritten; this is
+/// the read side of the reversing-entry flow.
+AdjustedClosingTotals adjustedClosingTotals({
+  required DailyClosing original,
+  required List<ClosingCorrection> corrections,
+}) {
+  ClosingCorrection? latest;
+  for (final correction in corrections) {
+    if (correction.originalClosingId != original.id) continue;
+    if (latest == null) {
+      latest = correction;
+      continue;
+    }
+    final latestAt = latest.correctedAt;
+    final thisAt = correction.correctedAt;
+    if (thisAt != null && (latestAt == null || !thisAt.isBefore(latestAt))) {
+      latest = correction;
+    }
+  }
+  if (latest == null) {
+    return AdjustedClosingTotals(
+      incomeMinor: original.totalIncomeMinor,
+      expenseMinor: original.totalExpenseMinor,
+      closingBalanceMinor: original.closingBalanceMinor,
+      corrected: false,
+    );
+  }
+  return AdjustedClosingTotals(
+    incomeMinor: latest.correctedIncomeMinor,
+    expenseMinor: latest.correctedExpenseMinor,
+    closingBalanceMinor: latest.correctedClosingBalanceMinor,
+    corrected: true,
+    correctionId: latest.id,
+  );
+}
+
+// --- Cash reconciliation (Week 5 Day 4, D157 — SRS D-24 / FR-FIN-02) ---
+
+/// Expected cash in the drawer at the end of [date] (D157, int
+/// paisa):
+///
+/// `opening + cash sales + cashbook income − cashbook expenses`
+///
+/// - **Opening** is the previous closing's closing balance (the
+///   cash the drawer started the day with).
+/// - **Cash sales** are the cash legs of the day's sales
+///   ([Sale.cashMinor] — every sale carries legs, D137, so a
+///   single-method cash sale counts in full and a split sale counts
+///   its cash leg only; card and credit legs never touch the drawer).
+/// - **Cashbook income / expenses** are the day's cashbook entries
+///   (cash in / cash out).
+///
+/// Deliberately NOT in the figure: card/credit sales (no cash
+/// moves), supplier payments (they are not cashbook entries — a
+/// cash supplier payment is recorded against the payable, not the
+/// drawer; see the Day 4 follow-up), and sale-return refunds (no
+/// cash refund is modelled yet). The reconciliation compares the
+/// drawer against the cash the app knows about; anything outside
+/// that scope shows up as a difference to investigate, not as a
+/// silently adjusted expectation.
+int expectedDrawerMinor({
+  required List<Sale> sales,
+  required List<CashbookEntry> entries,
+  required int openingBalanceMinor,
+  required DateTime date,
+}) {
+  final day = DateTime(date.year, date.month, date.day);
+  var expected = openingBalanceMinor;
+  for (final sale in sales) {
+    final created = sale.createdAt;
+    if (created == null) continue;
+    if (DateTime(created.year, created.month, created.day) != day) {
+      continue;
+    }
+    expected += sale.cashMinor;
+  }
+  for (final entry in entries) {
+    final entryDay = DateTime(
+      entry.date.year,
+      entry.date.month,
+      entry.date.day,
+    );
+    if (entryDay != day) continue;
+    if (entry.kind == CashbookEntryKind.income) {
+      expected += entry.amountMinor;
+    } else {
+      expected -= entry.amountMinor;
+    }
+  }
+  return expected;
+}
+
+/// The drawer difference for a count: actual − expected (int
+/// paisa). Positive = cash over, negative = cash short, 0 = exact.
+int cashReconciliationDifference({
+  required int expectedMinor,
+  required int countedMinor,
+}) => countedMinor - expectedMinor;
+
+/// Validates recording a cash count: the counted amount cannot be
+/// negative, and a future day cannot be reconciled yet.
+List<String> validateCashReconciliation({
+  required int countedMinor,
+  required DateTime date,
+  DateTime? now,
+}) {
+  final errors = <String>[];
+  if (countedMinor < 0) {
+    errors.add('Counted cash cannot be negative.');
+  }
+  final today = now ?? DateTime.now();
+  final day = DateTime(date.year, date.month, date.day);
+  final todayDay = DateTime(today.year, today.month, today.day);
+  if (day.isAfter(todayDay)) {
+    errors.add('A future day cannot be reconciled yet.');
+  }
+  return errors;
 }

@@ -67,6 +67,22 @@ class FinanceHubScreen extends ConsumerWidget {
             user: user,
             branchId: branchId,
           ),
+          const SizedBox(height: 12),
+          // Franchise royalties (Week 5 Day 5, D159 — FR-HO-07):
+          // head-office only, so this card needs write-level
+          // `branches` (Owner / HO Admin, Super Admin) — the
+          // Auditor's read-only pass does not open it.
+          _FinanceCard(
+            icon: Icons.storefront_outlined,
+            title: 'Franchise Royalties',
+            subtitle:
+                'Royalty and franchise-fee commission due per branch — head office only.',
+            capability: 'branches',
+            route: '/finance/franchise',
+            user: user,
+            branchId: branchId,
+            requireWrite: true,
+          ),
           const SizedBox(height: 16),
           const Text(
             'The P&L figures on the Statements screen come from the same '
@@ -89,6 +105,7 @@ class _FinanceCard extends StatelessWidget {
     required this.route,
     required this.user,
     required this.branchId,
+    this.requireWrite = false,
   });
 
   final IconData icon;
@@ -99,11 +116,18 @@ class _FinanceCard extends StatelessWidget {
   final AppUser? user;
   final String branchId;
 
+  /// When true, the card needs write-level access to the
+  /// capability (not just a view pass) — used by the Franchise
+  /// Royalties card (D159: the Auditor's read-only `branches`
+  /// pass does not open head-office royalty figures).
+  final bool requireWrite;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final allowed =
-        permissionService.canInBranch(user, capability, branchId);
+    final allowed = requireWrite
+        ? permissionService.canWrite(user, capability, branchId)
+        : permissionService.canInBranch(user, capability, branchId);
     return PharmaCard(
       onTap: allowed ? () => context.go(route) : null,
       child: ListTile(
