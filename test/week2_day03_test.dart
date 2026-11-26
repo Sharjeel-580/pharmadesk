@@ -50,8 +50,16 @@ import 'package:pharmadesk/models/supplier_ledger.dart';
 /// full path. Behaves like Firestore for the operations the
 /// repositories use (get / query with equality filter + document-id
 /// ordering + startAfter / limit / batch chunking at 500 /
-/// transactions). Transactions apply writes immediately (no
-/// rollback) — tests never rely on rollback.
+/// transactions).
+///
+/// Week 7 Day 2 (D172): [runTransaction] and [runBatchedWrites] are
+/// atomic — both work on a copy of the store and commit it only when
+/// every write succeeds, so a failed transaction or batch applies
+/// nothing. (Real Firestore is atomic per 500-op batch chunk, not
+/// across chunks — the fake is deliberately stricter: a whole
+/// `runBatchedWrites` call is all-or-nothing. No repo call in the app
+/// builds a multi-chunk list whose middle chunk can fail, so the
+/// stricter fake never hides a real partial commit.)
 class FakeFirestoreTransport implements FirestoreTransport {
   final Map<String, Map<String, dynamic>> docs = {};
 
@@ -152,8 +160,24 @@ class FakeFirestoreTransport implements FirestoreTransport {
     return id;
   }
 
+  /// A copy of [docs] with each document map copied too, so a
+  /// transaction or batch can work on it and commit it only on
+  /// success (D172 — a failed transaction / batch applies nothing).
+  static Map<String, Map<String, dynamic>> _copyDocs(
+    Map<String, Map<String, dynamic>> source,
+  ) => {
+    for (final entry in source.entries)
+      entry.key: Map<String, dynamic>.from(entry.value),
+  };
+
   @override
   Future<void> runBatchedWrites(List<WriteOperation> operations) async {
+    // All-or-nothing (D172): apply every operation — across all
+    // 500-op chunks — to a working copy and commit it only when the
+    // whole list succeeds. A single bad operation (e.g. an update
+    // of a missing document) leaves the store exactly as it was,
+    // including the operations in earlier chunks.
+    final working = _copyDocs(docs);
     for (var i = 0; i < operations.length; i += maxFirestoreBatchWrites) {
       final end = (i + maxFirestoreBatchWrites).clamp(0, operations.length);
       final chunk = operations.sublist(i, end);
@@ -161,27 +185,39 @@ class FakeFirestoreTransport implements FirestoreTransport {
       for (final operation in chunk) {
         switch (operation.kind) {
           case WriteOperationKind.set:
-            docs[operation.path] = Map<String, dynamic>.from(
+            working[operation.path] = Map<String, dynamic>.from(
               operation.data ?? const {},
             );
           case WriteOperationKind.update:
-            final existing = docs[operation.path];
+            final existing = working[operation.path];
             if (existing == null) {
               throw StateError('No document at ${operation.path} to update.');
             }
-            docs[operation.path] = {...existing, ...?operation.data};
+            working[operation.path] = {...existing, ...?operation.data};
           case WriteOperationKind.delete:
-            docs.remove(operation.path);
+            working.remove(operation.path);
         }
       }
     }
+    docs
+      ..clear()
+      ..addAll(working);
   }
 
   @override
   Future<T> runTransaction<T>(
     Future<T> Function(FirestoreTransaction tx) action,
   ) async {
-    return action(_FakeTransaction(docs));
+    // Commit/rollback (D172): the transaction works on a copy, so
+    // its reads see its own writes and a throw discards every write
+    // it made — the store is untouched. Only a completed action
+    // commits, all at once.
+    final working = _copyDocs(docs);
+    final result = await action(_FakeTransaction(working));
+    docs
+      ..clear()
+      ..addAll(working);
+    return result;
   }
 
   @override

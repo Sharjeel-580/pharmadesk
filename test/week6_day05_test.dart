@@ -12,8 +12,11 @@
 //   and the sale payment legs are not restored (the sale doc carries
 //   the total, method and cash received). The behaviour is stated in
 //   plain language on the backup screen and in the confirm dialog.
-//   The cross-backend edge is pinned, not fixed: a mock-export sale
-//   doc id differs from its idempotency key.
+//   The cross-backend edge was pinned here, not fixed: a mock-export
+//   sale doc id differs from its idempotency key. Week 7 Day 3
+//   (D173) fixed the restore side — the restore re-keys by
+//   idempotencyKey — and updated the two assertions below that read
+//   the restored sale back by its old mock id.
 // - D170 (brief §8): 47-route walk re-run; 390px sweep over every
 //   new/changed Week 6 screen + the Day 29 supplier-detail overflow
 //   fix; finance agreement second pass over the newly guarded
@@ -499,15 +502,24 @@ void main() {
       // — importing recreates it from the backup.
       final fresh = _Harness();
       expect(await fresh.layer.saleRepo.getById(sale.id), isNull);
+      expect(
+        await fresh.layer.saleRepo.getById('sale-d169-recreate-1'),
+        isNull,
+      );
       final report = await fresh.layer.importBackup(
         backup,
         policy: ImportPolicy.overwrite,
       );
       expect(report.errors, isEmpty);
       expect(report.created, greaterThan(0));
-      final restored = await fresh.layer.saleRepo.getById(sale.id);
+      // D173: the recreated sale comes back under its
+      // idempotencyKey, not the mock id it was committed with.
+      expect(await fresh.layer.saleRepo.getById(sale.id), isNull);
+      final restored =
+          await fresh.layer.saleRepo.getById('sale-d169-recreate-1');
       expect(restored, isNotNull);
-      expect(restored!.totalMinor, 1000000);
+      expect(restored!.id, 'sale-d169-recreate-1');
+      expect(restored.totalMinor, 1000000);
       expect(restored.idempotencyKey, 'sale-d169-recreate-1');
     });
 
@@ -563,14 +575,12 @@ void main() {
         ),
       );
       // The mock assigns its own id (`sale-DHA-…`); the key stays
-      // the client key — they differ, and that is the Day 24
-      // cross-backend edge: a mock export restored into Firestore
-      // writes the sale doc under the exported id, not the key,
-      // so the doc id ≠ idempotencyKey (D53 / rules invariant).
-      // Same-backend round-trips are unaffected. NOT fixed here:
-      // re-keying the restore by key would change restore identity
-      // + report counting and cannot be verified end-to-end
-      // without a Firebase project (a Dazy-only step).
+      // the client key — they differ in the EXPORT. Week 7 Day 3
+      // (D173) fixed the restore side: the restore re-keys by
+      // idempotencyKey, so a mock export restored into any layer
+      // lands under the key, not the mock id (the D53 / rules
+      // invariant). The export itself is unchanged — it still
+      // carries the mock id — only the restore re-keys.
       expect(saved.id, isNot('sale-d169-split-1'));
       expect(saved.idempotencyKey, 'sale-d169-split-1');
       final backup = await source.layer.exportBackup();
@@ -590,16 +600,20 @@ void main() {
         legs.map((leg) => leg['amount']),
         containsAll([600000, 400000]),
       );
-      // Round-trip into a fresh layer: both legs intact, same id.
+      // Round-trip into a fresh layer: both legs intact, under the
+      // KEY (D173) — the old mock id no longer lands.
       final fresh = _Harness();
       final report = await fresh.layer.importBackup(
         backup,
         policy: ImportPolicy.overwrite,
       );
       expect(report.errors, isEmpty);
-      final restored = await fresh.layer.saleRepo.getById(saved.id);
+      expect(await fresh.layer.saleRepo.getById(saved.id), isNull);
+      final restored =
+          await fresh.layer.saleRepo.getById('sale-d169-split-1');
       expect(restored, isNotNull);
-      expect(restored!.payments, hasLength(2));
+      expect(restored!.id, 'sale-d169-split-1');
+      expect(restored.payments, hasLength(2));
       expect(
         restored.payments.map((leg) => leg.amountMinor),
         containsAll([600000, 400000]),
@@ -635,6 +649,9 @@ void main() {
           createdAt: _day(0).add(const Duration(hours: 10)),
         ),
       );
+      // D173: the mock id differs from the key in the export; the
+      // restore lands the sale under the key.
+      expect(saved.id, isNot('sale-d169-counter-1'));
       final backup = await source.layer.exportBackup();
       final fresh = _Harness();
       // Baseline derived counters for the fresh layer (seeded
@@ -677,7 +694,12 @@ void main() {
       // DERIVED counter follows it — today's counter moves by
       // exactly the restored sale, with no counter restored from
       // the backup (there is no counters section to restore).
-      expect(await fresh.layer.saleRepo.getById(saved.id), isNotNull);
+      // D173: the restored sale lives under its key now, not its
+      // old mock id.
+      expect(
+        await fresh.layer.saleRepo.getById('sale-d169-counter-1'),
+        isNotNull,
+      );
       final todayCounterAfter = (await countersOf(fresh.layer)).lastWhere(
         (counter) =>
             counter.date.year == DateTime.now().year &&
@@ -1109,7 +1131,7 @@ void main() {
           .read(inventoryProvider.notifier)
           .quarantineBatch(batchId: batch.id, reason: 'Suspected damage');
       expect(parked, isNotNull);
-      final request = container
+      final request = await container
           .read(quarantineOutcomeQueueProvider.notifier)
           .requestOutcome(
             batch: parked!,

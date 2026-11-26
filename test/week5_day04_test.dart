@@ -564,7 +564,7 @@ void main() {
           auth: auth,
         );
         final parked = await quarantinePanadol(container);
-        final request = container
+        final request = await container
             .read(quarantineOutcomeQueueProvider.notifier)
             .requestOutcome(
               batch: parked,
@@ -622,7 +622,7 @@ void main() {
         auth: auth,
       );
       final parked = await quarantinePanadol(container);
-      final request = container
+      final request = await container
           .read(quarantineOutcomeQueueProvider.notifier)
           .requestOutcome(
             batch: parked,
@@ -632,7 +632,7 @@ void main() {
           );
       expect(request, isNotNull);
       auth.user = _userFor('owner', uid: 'test-owner');
-      final rejected = container
+      final rejected = await container
           .read(quarantineOutcomeQueueProvider.notifier)
           .rejectOutcome(requestId: request!.id, note: 'Restore it instead');
       expect(rejected, isNotNull);
@@ -650,7 +650,7 @@ void main() {
     test('a request with no reason is refused', () async {
       final container = await containerAs(_userFor('inventory_manager'));
       final parked = await quarantinePanadol(container);
-      final request = container
+      final request = await container
           .read(quarantineOutcomeQueueProvider.notifier)
           .requestOutcome(
             batch: parked,

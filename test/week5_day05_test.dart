@@ -970,7 +970,7 @@ void main() {
           .read(inventoryProvider.notifier)
           .quarantineBatch(batchId: batch.id, reason: 'Suspected damage');
       expect(parked, isNotNull);
-      final request = container
+      final request = await container
           .read(quarantineOutcomeQueueProvider.notifier)
           .requestOutcome(
             batch: parked!,

@@ -1045,9 +1045,17 @@ void main() {
       );
       expect(report.success, isTrue);
       expect(report.errors, isEmpty);
-      final restored = (await h.saleRepo.getById(saleId))!;
+      // Week 7 Day 3 (D173): the restore re-keys the sale by its
+      // idempotencyKey, so the changed sale comes back under the
+      // key — not under the mock-assigned id it was committed
+      // with. The mock upsert matches by key, so the committed
+      // sale is REPLACED in place: no duplicate, and the report
+      // counts it as overwritten, not created.
+      expect(await h.saleRepo.getById(saleId), isNull);
+      final restored = (await h.saleRepo.getById('sale-d150-1'))!;
       expect(restored.totalMinor, changedTotal);
       expect(restored.invoiceNumber, committed.sale.invoiceNumber);
+      expect((await h.saleRepo.getSales()).length, 1);
     });
 
     test('restore upserts branches: a deactivated branch reactivates',
