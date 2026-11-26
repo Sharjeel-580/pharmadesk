@@ -16,6 +16,7 @@ import '../../models/medicine.dart';
 import '../../models/order.dart';
 import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
@@ -1090,6 +1091,35 @@ StockAdjustmentRequest stockAdjustmentRequestFromFirestore(
   Map<String, dynamic> doc,
 ) {
   return StockAdjustmentRequest.fromMap(id, doc);
+}
+
+// -- Quarantine outcome approval queue ----------------------------------
+
+/// Quarantine outcome request doc (Week 7 Day 1, D171 —
+/// `branches/{branchId}/quarantineOutcomes`): the model map verbatim
+/// (`outcome` / `status` are the enum names, dates are [Timestamp]s);
+/// the doc id is the request id, so a re-filed request overwrites
+/// the same doc instead of duplicating it.
+Map<String, dynamic> quarantineOutcomeRequestToFirestore(
+  QuarantineOutcomeRequest request, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    request.toMap(),
+    orgId: orgId,
+    branchId: request.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/quarantineOutcomes', doc);
+  return doc;
+}
+
+QuarantineOutcomeRequest quarantineOutcomeRequestFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  return QuarantineOutcomeRequest.fromMap(id, doc);
 }
 
 // -- Prescriptions --------------------------------------------------------

@@ -90,6 +90,7 @@ class FirestoreSchema {
   static const String stockTransactions = 'stockTransactions';
   static const String stockTransfers = 'stockTransfers';
   static const String stockAdjustments = 'stockAdjustments';
+  static const String quarantineOutcomes = 'quarantineOutcomes';
   static const String stockCounts = 'stockCounts';
   static const String customers = 'customers';
   static const String customerLedger = 'ledger';
@@ -226,6 +227,13 @@ class FirestoreSchema {
 
   static String stockAdjustmentDocPath(String branchId, String requestId) =>
       branchDocPath(branchId, stockAdjustments, requestId);
+
+  /// `branches/{branchId}/quarantineOutcomes` (Week 7 Day 1, D171).
+  static String quarantineOutcomesPath(String branchId) =>
+      branchCollection(branchId, quarantineOutcomes);
+
+  static String quarantineOutcomeDocPath(String branchId, String requestId) =>
+      branchDocPath(branchId, quarantineOutcomes, requestId);
 
   static String stockTransferDocPath(String branchId, String transferId) =>
       branchDocPath(branchId, stockTransfers, transferId);
@@ -566,6 +574,47 @@ class FirestoreSchema {
         'string',
         notes: 'Ledger movement id once approved',
       ),
+    ],
+    // Quarantine return / disposal approval queue (Week 7 Day 1,
+    // D171 — SRS D-11 / FR-INV-07, §5.2.4): one doc per request, doc
+    // id = the request id (`qo-N`, also the idempotency key for the
+    // approval apply). Not in the SRS §3 list — the SRS names the
+    // approval flow but gives it no collection; the queue needs a
+    // durable home now that it is persisted (D146 pattern). The doc
+    // is created pending and updated in place when decided (never
+    // deleted); the outcome it applies lives on the batch row, not
+    // here.
+    'branches/{branchId}/quarantineOutcomes': [
+      FirestoreField('batchId', 'string', required: true),
+      FirestoreField('batchNo', 'string', required: true),
+      FirestoreField('medicineId', 'string', required: true),
+      FirestoreField('medicineName', 'string', required: true),
+      FirestoreField(
+        'outcome',
+        'string',
+        required: true,
+        notes: 'returnToSupplier / dispose',
+      ),
+      FirestoreField('reason', 'string', required: true),
+      FirestoreField(
+        'quantityAtRequest',
+        'int',
+        required: true,
+        notes: 'Batch quantity at request time',
+      ),
+      FirestoreField('requesterId', 'string', required: true),
+      FirestoreField('requesterName', 'string', required: true),
+      FirestoreField('requestedAt', 'timestamp', required: true),
+      FirestoreField(
+        'status',
+        'string',
+        required: true,
+        notes: 'pending / approved / rejected',
+      ),
+      FirestoreField('decidedById', 'string'),
+      FirestoreField('decidedByName', 'string'),
+      FirestoreField('decidedAt', 'timestamp'),
+      FirestoreField('decisionNote', 'string'),
     ],
     'branches/{branchId}/customers': [
       FirestoreField('name', 'string', required: true),

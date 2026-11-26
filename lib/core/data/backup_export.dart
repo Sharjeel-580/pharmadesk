@@ -39,6 +39,14 @@ import 'sync_queue.dart';
 /// records created after the export survive it, and a record that
 /// was in the backup comes back even if deleted after the export.
 /// The backup screen states all of this in plain language.
+///
+/// RE-KEY (Week 7 Day 3, D173): the live restore
+/// (`ProductionDataLayer.importBackup`) re-keys the sales and
+/// orders sections by `idempotencyKey` before writing — the doc id
+/// IS the key (D53) — so a mock export restored into the Firestore
+/// layer lands under the key, and a re-restore counts once. The
+/// export itself is unchanged (a mock export still carries the
+/// mock-assigned id); only the restore re-keys.
 
 /// Backup file format.
 class BackupFormat {

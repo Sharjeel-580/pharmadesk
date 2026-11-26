@@ -246,6 +246,7 @@ class ProductionDataLayer {
     required this.riderRepo,
     StockTransferRepository? stockTransferRepo,
     StockAdjustmentRequestRepository? stockAdjustmentRequestRepo,
+    QuarantineOutcomeRequestRepository? quarantineOutcomeRequestRepo,
     GoodsReceiptRepository? goodsReceiptRepo,
     ExpenseRepository? expenseRepo,
     FinancialTransactionRepository? financialTransactionRepo,
@@ -261,6 +262,9 @@ class ProductionDataLayer {
        stockTransferRepo = stockTransferRepo ?? MockStockTransferRepository(),
        stockAdjustmentRequestRepo =
            stockAdjustmentRequestRepo ?? MockStockAdjustmentRequestRepository(),
+       quarantineOutcomeRequestRepo =
+           quarantineOutcomeRequestRepo ??
+           MockQuarantineOutcomeRequestRepository(),
        expenseRepo = expenseRepo ?? MockExpenseRepository(),
        financialTransactionRepo =
            financialTransactionRepo ?? MockFinancialTransactionRepository(),
@@ -322,6 +326,14 @@ class ProductionDataLayer {
   /// the bundle's repo, so the requests the layer persists are the
   /// ones the queue screen re-reads.
   final StockAdjustmentRequestRepository stockAdjustmentRequestRepo;
+
+  /// The quarantine-outcome-queue store (Week 7 Day 1, D171).
+  /// Optional in the constructor on the same pattern as
+  /// [stockAdjustmentRequestRepo]: direct constructions get a fresh
+  /// mock; the app provider passes the bundle's repo, so the
+  /// requests the layer persists are the ones the queue screen
+  /// re-reads.
+  final QuarantineOutcomeRequestRepository quarantineOutcomeRequestRepo;
 
   /// The supplier-payments store (Week 5 Day 1, D147). Optional in
   /// the constructor on the same pattern: direct constructions get
@@ -397,6 +409,13 @@ class ProductionDataLayer {
   /// same id returns the original request instead of writing a
   /// second document.
   final Map<String, StockAdjustmentRequest> _filedAdjustmentKeys = {};
+
+  /// Filed quarantine outcome requests by request id (Week 7 Day 1,
+  /// D171): the request id IS the idempotency key — a re-file with
+  /// the same id returns the original request instead of writing a
+  /// second document.
+  final Map<String, QuarantineOutcomeRequest> _filedQuarantineOutcomeKeys =
+      {};
 
   /// Committed standalone stock receives by idempotency key
   /// (Week 3 Day 4, D111): a retry with the same key returns the
@@ -1205,7 +1224,10 @@ class ProductionDataLayer {
   ///    return also carries the quantity 0), so the sync chip moves
   ///    for outcome work.
   /// 4. **Idempotency** — a retry with the same key returns the
-  ///    original batch instead of re-applying the outcome.
+  ///    original batch instead of re-applying the outcome; a retry
+  ///    after a restart (empty key registry) replays the same way
+  ///    when the batch row is already in the target status (Week 7
+  ///    Day 1, D171) — the row itself is the dedupe signal then.
   ///
   /// The separation of duties (approver ≠ requester) is enforced
   /// by the queue notifier ([canApproveQuarantineOutcome]), not
@@ -1232,6 +1254,15 @@ class ProductionDataLayer {
       (item) => item.id == batchId,
       orElse: () => throw ArgumentError('No batch with id "$batchId".'),
     );
+    // Idempotent replay across a restart (Week 7 Day 1, D171): a
+    // fresh layer instance has an empty key registry, so a retry
+    // after a restart cannot hit the registry — but the batch row
+    // itself says the outcome landed: it is already in the target
+    // status. Return it without moving stock, writing audit or
+    // enqueuing sync a second time. This sits before the guard,
+    // like the registry return (D149/D161 ordering — a retry is
+    // not a new transaction).
+    if (batch.status == to) return batch;
     // FR-HO-08 (D149): a deactivated branch cannot transact — its
     // batches cannot change status either.
     await _requireBranchActive(batch.branchId);
@@ -2000,6 +2031,108 @@ class ProductionDataLayer {
     return saved;
   }
 
+  /// Files a quarantine outcome request through the production
+  /// write path (Week 7 Day 1, D171 — closes the D154 follow-up).
+  ///
+  /// The queue notifier used to keep requests in memory only. Now
+  /// filing persists the request: the repo stores it under
+  /// `branches/{branchId}/quarantineOutcomes/{id}` (mock now,
+  /// Firestore when the bundle switches) and one sync payload (the
+  /// request doc) is enqueued, so the request survives a notifier
+  /// rebuild and an app restart.
+  ///
+  /// 1. **Idempotency** — the request id IS the key (also the
+  ///    idempotency key for the approval apply, D154): a re-file
+  ///    with the same id returns the original request and writes
+  ///    nothing a second time.
+  /// 2. **Validation** — the layer re-checks the shape it owns (a
+  ///    reason); the notifier validates the full request first.
+  ///
+  /// Filing a request is NOT guarded by FR-HO-08 (D149 posture):
+  /// a request moves no stock — the approval apply goes through
+  /// [applyQuarantineOutcome], which is guarded.
+  Future<QuarantineOutcomeRequest> fileQuarantineOutcomeRequest(
+    QuarantineOutcomeRequest request,
+  ) async {
+    if (request.id.isEmpty) {
+      throw ArgumentError('A quarantine outcome request needs an id.');
+    }
+    final existing = _filedQuarantineOutcomeKeys[request.id];
+    if (existing != null) return existing;
+    if (request.reason.trim().isEmpty) {
+      throw ArgumentError('A quarantine outcome reason is required.');
+    }
+    // A request already in the store but NOT in this layer's
+    // registry (a previous layer instance filed it, e.g. before an
+    // app restart) dedupes the same way — the repo upsert would
+    // overwrite the same doc, but returning the stored request also
+    // skips the second sync payload (same shape as the orphan
+    // check in `receiveGoods`, D103).
+    final stored = await quarantineOutcomeRequestRepo.getById(request.id);
+    if (stored != null) {
+      _filedQuarantineOutcomeKeys[stored.id] = stored;
+      return stored;
+    }
+    final saved = await quarantineOutcomeRequestRepo.saveRequest(request);
+    await _enqueueFinanceSync(
+      entityType: 'quarantineOutcomeRequest',
+      entityId: saved.id,
+      branchId: saved.branchId,
+      key: saved.id,
+      docs: {
+        FirestoreSchema.quarantineOutcomeDocPath(saved.branchId, saved.id):
+            quarantineOutcomeRequestToFirestore(saved, orgId: organizationId),
+      },
+    );
+    _filedQuarantineOutcomeKeys[saved.id] = saved;
+    return saved;
+  }
+
+  /// Re-reads the persisted quarantine outcome requests (Week 7 Day
+  /// 1, D171): the queue notifier calls this on start so a rebuild
+  /// restores the requests filed in earlier sessions. Loaded
+  /// requests join the file registry, so re-filing one of them
+  /// dedupes instead of writing a second document.
+  Future<List<QuarantineOutcomeRequest>> loadQuarantineOutcomeRequests({
+    String? branchId,
+  }) async {
+    final requests = await quarantineOutcomeRequestRepo.getRequests(
+      branchId: branchId,
+    );
+    for (final request in requests) {
+      _filedQuarantineOutcomeKeys[request.id] = request;
+    }
+    return requests;
+  }
+
+  /// Persists a decided quarantine outcome request (Week 7 Day 1,
+  /// D171): the approve / reject decision is written to the same
+  /// document (upsert by id — never a second document) and one
+  /// update sync payload is enqueued. The outcome itself is applied
+  /// by [applyQuarantineOutcome] on approval; this only records
+  /// the decision.
+  Future<QuarantineOutcomeRequest> updateQuarantineOutcomeRequest(
+    QuarantineOutcomeRequest request,
+  ) async {
+    if (request.id.isEmpty) {
+      throw ArgumentError('A quarantine outcome request needs an id.');
+    }
+    final saved = await quarantineOutcomeRequestRepo.saveRequest(request);
+    await _enqueueFinanceSync(
+      entityType: 'quarantineOutcomeRequest',
+      entityId: saved.id,
+      branchId: saved.branchId,
+      key: 'quarantine-outcome-decision-${saved.id}',
+      kind: SyncOperationKind.update,
+      docs: {
+        FirestoreSchema.quarantineOutcomeDocPath(saved.branchId, saved.id):
+            quarantineOutcomeRequestToFirestore(saved, orgId: organizationId),
+      },
+    );
+    _filedQuarantineOutcomeKeys[saved.id] = saved;
+    return saved;
+  }
+
   /// Builds the Firestore batched-write payload for one cashbook
   /// write and enqueues it as one sync operation (D145 — D111
   /// pattern): one `set` per document in [docs], one queue op.
@@ -2738,6 +2871,20 @@ class ProductionDataLayer {
   /// replaces everything without duplicating a document. (The sink
   /// itself is NOT policy-gated: it records every validated doc of
   /// the last restore, applied or skipped.)
+  ///
+  /// RE-KEY (Week 7 Day 3, D173): sales and orders are the D53
+  /// sections — the doc id IS the idempotency key (SRS §2.5, and
+  /// the Firestore rules refuse a sale/order doc whose id differs
+  /// from its key). A mock export carries the mock-assigned id
+  /// (`sale-DHA-1001`) while the key is the client key, so the
+  /// restore re-keys those two sections by the payload's
+  /// `idempotencyKey` before it measures existence, records the
+  /// sink, or writes ([_restoreDocId]). Existence is measured
+  /// against the key too: a sale the target already holds under
+  /// its old mock id still counts as the same sale (overwritten /
+  /// skipped, never created twice). Every other section keeps the
+  /// exported id. The sink records the EFFECTIVE id — it is the
+  /// record of what was actually written.
   Future<ImportReport> importBackup(
     Map<String, dynamic> json, {
     ImportPolicy policy = ImportPolicy.skipExisting,
@@ -2763,24 +2910,36 @@ class ProductionDataLayer {
         final doc = rawDoc as Map;
         final id = doc['id'] as String;
         final payload = Map<String, dynamic>.from(doc)..remove('id');
+        // D173: the doc id the restore writes under — the
+        // idempotency key for sales/orders, the exported id
+        // otherwise. Existence, the sink record, the write and
+        // the report all measure the same effective id, so a
+        // re-keyed sale counts once, not twice.
+        final effectiveId = _restoreDocId(collection, id, payload);
         // Existence is measured BEFORE the sink put below (the
         // sink-only sections measure it in the sink).
-        final exists = await _restoreDocExists(collection, id, payload);
+        final exists = await _restoreDocExists(
+          collection,
+          effectiveId,
+          payload,
+        );
         // The sink records every validated doc of this restore.
-        _restoreSink.put(collection, id, payload);
+        _restoreSink.put(collection, effectiveId, payload);
         if (exists && policy == ImportPolicy.skipExisting) {
           skipped++;
           continue;
         }
         try {
-          await _restoreDoc(collection, id, payload);
+          await _restoreDoc(collection, effectiveId, payload);
           if (exists) {
             overwritten++;
           } else {
             created++;
           }
         } catch (error) {
-          docErrors.add('Section "$collection" doc "$id": $error');
+          docErrors.add(
+            'Section "$collection" doc "$effectiveId": $error',
+          );
         }
       }
     }
@@ -2790,6 +2949,35 @@ class ProductionDataLayer {
       skipped: skipped,
       errors: docErrors,
     );
+  }
+
+  /// The doc id a restored doc is written under (Week 7 Day 3,
+  /// D173 — the cross-backend restore edge, Day 24 / D169).
+  ///
+  /// Sales and orders are the D53 sections: the doc id IS the
+  /// idempotency key (SRS §2.5; the Firestore rules refuse a
+  /// sale/order doc whose id differs from its key). A mock export
+  /// carries the mock-assigned id (`sale-DHA-1001`) while the key
+  /// is the client key (`sale-<branch>-<millis>`), so restoring
+  /// under the exported id would write a Firestore doc that
+  /// breaches the invariant. The restore therefore re-keys those
+  /// two sections by the payload's `idempotencyKey` when it is
+  /// non-empty. Every other section keeps the exported id, and a
+  /// missing or empty key keeps it too (a sale whose key falls
+  /// back to its id round-trips unchanged). For orders the re-key
+  /// is a no-op today — the mock and Firestore repos both mint
+  /// the key equal to the id — but the rule is applied anyway so
+  /// a hand-built backup with a differing order key restores
+  /// under the key, like a sale.
+  String _restoreDocId(
+    String collection,
+    String id,
+    Map<String, dynamic> payload,
+  ) {
+    if (collection != 'sales' && collection != 'orders') return id;
+    final key = payload['idempotencyKey'];
+    if (key is String && key.isNotEmpty) return key;
+    return id;
   }
 
   /// True when a doc with [id] already exists in the live store for
@@ -2814,9 +3002,27 @@ class ProductionDataLayer {
       case 'riders':
         return await riderRepo.getById(id) != null;
       case 'orders':
-        return await orderRepo.getById(id) != null;
+        // D173: the restore re-keys by idempotencyKey, so a sale /
+        // order the target already holds under its old id still
+        // counts as the same record — measured by key, not only
+        // by the (effective) doc id. Without the scan, re-importing
+        // a mock layer's own export would count its sales as
+        // `created` instead of `overwritten`.
+        if (await orderRepo.getById(id) != null) return true;
+        return _restoreHasKey(
+          payload['idempotencyKey'],
+          (await orderRepo.getOrders()).map(
+            (order) => order.effectiveIdempotencyKey,
+          ),
+        );
       case 'sales':
-        return await saleRepo.getById(id) != null;
+        if (await saleRepo.getById(id) != null) return true;
+        return _restoreHasKey(
+          payload['idempotencyKey'],
+          (await saleRepo.getSales()).map(
+            (sale) => sale.idempotencyKey,
+          ),
+        );
       case 'inventory':
         final branchId = payload['branchId'] as String?;
         final items = await inventoryRepo.getInventory(branchId: branchId);
@@ -2840,6 +3046,16 @@ class ProductionDataLayer {
         // put (see [importBackup]).
         return _restoreSink.contains(collection, id);
     }
+  }
+
+  /// True when [key] is a non-empty idempotency key that already
+  /// exists among [existingKeys] (D173 — the restore's key-based
+  /// existence check for sales/orders; a missing or empty key
+  /// never matches, so a doc without a key keeps the plain
+  /// id-based check).
+  bool _restoreHasKey(Object? key, Iterable<String> existingKeys) {
+    if (key is! String || key.isEmpty) return false;
+    return existingKeys.contains(key);
   }
 
   /// Upserts one restored doc into its live repository. Sink-only
@@ -3256,6 +3472,9 @@ final productionDataLayerProvider = Provider<ProductionDataLayer>((ref) {
     stockTransferRepo: ref.read(stockTransferRepositoryProvider),
     stockAdjustmentRequestRepo: ref.read(
       stockAdjustmentRequestRepositoryProvider,
+    ),
+    quarantineOutcomeRequestRepo: ref.read(
+      quarantineOutcomeRequestRepositoryProvider,
     ),
     goodsReceiptRepo: ref.read(goodsReceiptRepositoryProvider),
     expenseRepo: ref.read(expenseRepositoryProvider),

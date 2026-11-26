@@ -16,6 +16,7 @@ import '../../models/medicine.dart';
 import '../../models/order.dart';
 import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
@@ -87,6 +88,27 @@ import 'inventory_engine.dart' show WriteOperation, WriteOperationKind;
 
 /// Page size for the internal fetch-all loop.
 const _fetchPageSize = 200;
+
+/// Parses an `ORD-<BRANCH>-<seq>` order number into its branch code
+/// and numeric sequence, or `null` when the number is not in that
+/// shape (Week 7 Day 5, D175 — the sequence-parsing rule for the
+/// restore counter advance). The code is the uppercase branch code
+/// as printed on the number (`DHA`, `GLB`); the sequence is the
+/// trailing integer, parsed with [int.tryParse] so a non-numeric
+/// suffix never throws. Numbers from another branch or in another
+/// shape (hand-written, legacy) parse to `null` / a non-matching
+/// code and never advance a counter.
+({String branchCode, int sequence})? parseOrderNumberSequence(
+  String orderNumber,
+) {
+  final match = RegExp(
+    r'^ORD-([A-Z0-9]+)-(\d+)$',
+  ).firstMatch(orderNumber.trim());
+  if (match == null) return null;
+  final sequence = int.tryParse(match.group(2)!);
+  if (sequence == null) return null;
+  return (branchCode: match.group(1)!, sequence: sequence);
+}
 
 /// Sequential counter documents (`branches/{branchId}/counters/*`).
 const _invoicesCounterId = 'invoices';
@@ -167,6 +189,33 @@ mixin _FirestoreRepositoryHelper {
         'branchId': branchId,
       });
       return value;
+    });
+  }
+
+  /// Raises the counter for [counterId] in [branchId] to at least
+  /// [value], transactionally, and leaves it untouched when it is
+  /// already there or past it (Week 7 Day 5, D175 — the restore
+  /// counter advance). Monotonic: it never lowers a counter, and a
+  /// repeated call with the same value is a no-op, so a restore
+  /// replay is idempotent. Callers only pass values that can
+  /// collide with a minted number (sequences at/above the 1001
+  /// floor); lower values are harmless here but are filtered at
+  /// the call site instead.
+  Future<void> ensureCounterAtLeast(
+    String branchId,
+    String counterId,
+    int value,
+  ) async {
+    final path = FirestoreSchema.counterDocPath(branchId, counterId);
+    await transport.runTransaction((tx) async {
+      final current = counterValueFromFirestore(await tx.get(path));
+      if (current < value) {
+        tx.set(path, {
+          'value': value,
+          'organizationId': organizationId,
+          'branchId': branchId,
+        });
+      }
     });
   }
 
@@ -491,10 +540,17 @@ class FirestoreOrderRepository
   @override
   Future<Order> upsertOrder(Order order) async {
     // A restore replays the order as given: the doc id is the
-    // order's id (never re-minted), the number comes from the
-    // per-branch counter only for a genuinely new doc, and the
-    // items subcollection is rewritten by index like `updateOrder`
-    // (a shrunk list drops its trailing stale item docs).
+    // order's id (never re-minted), the number is the backup's
+    // number when the replay carries one — a restore never
+    // re-numbers (D165 intent; Week 7 Day 4, D174 — a mock order
+    // restored into a fresh Firestore layer used to come back as
+    // ORD-DHA-1001 instead of its backup number ORD-DHA-1492,
+    // because the number was always minted from the target
+    // counter) — and the number comes from the per-branch counter
+    // only for a genuinely new doc with no number of its own.
+    // The items subcollection is rewritten by index like
+    // `updateOrder` (a shrunk list drops its trailing stale item
+    // docs).
     final docId = order.id.isNotEmpty
         ? order.id
         : transport.newDocumentId(FirestoreSchema.ordersPath(order.branchId));
@@ -502,16 +558,25 @@ class FirestoreOrderRepository
       FirestoreSchema.orderDocPath(order.branchId, docId),
     );
     final orderNumber = existing == null
-        ? 'ORD-${await branchCode(order.branchId)}-'
-              '${await nextCounterValue(order.branchId, _ordersCounterId)}'
+        ? (order.orderNumber.isNotEmpty
+              ? order.orderNumber
+              : 'ORD-${await branchCode(order.branchId)}-'
+                  '${await nextCounterValue(order.branchId, _ordersCounterId)}')
         // Week 6 Day 4 (D165): an existing doc without a number
         // falls back to the model's effective value, never the bare
         // doc id — the number shape stays `ORD-…` everywhere.
         : existing['orderNumber'] as String? ??
               order.effectiveOrderNumber;
-    final idempotencyKey =
-        existing?['idempotencyKey'] as String? ??
-        order.effectiveIdempotencyKey;
+    final idempotencyKey = existing == null
+        // Week 7 Day 2 (D172): a genuinely new doc keys off the doc
+        // id (the D53 rule — the doc id IS the key), including when
+        // the id was just minted. `order.effectiveIdempotencyKey`
+        // falls back to the order's own (possibly empty) id, which
+        // stored an empty key for a minted id — the mock already
+        // keys a new upsert off the minted id.
+        ? docId
+        : existing['idempotencyKey'] as String? ??
+            order.effectiveIdempotencyKey;
     final doc = orderToFirestore(
       order,
       orgId: organizationId,
@@ -547,6 +612,27 @@ class FirestoreOrderRepository
         ),
     ];
     await transport.runBatchedWrites(operations);
+    // Week 7 Day 5 (D175): a preserved number must advance the
+    // target's counter past its sequence, or the counter could
+    // eventually mint the same number for a different order (e.g.
+    // restoring ORD-DHA-1492 into a 1001 counter, then minting
+    // 1002…1492). Only after the write succeeds, so a failed
+    // restore advances nothing. The number's branch code must
+    // match this branch's code — a GLB number carried on a DHA
+    // order is that branch's sequence, not this one's — and
+    // sequences below the 1001 floor can never collide with a
+    // minted number. The advance is monotonic and idempotent, so
+    // a re-restore of the same number (an existing doc) is safe.
+    final preserved = parseOrderNumberSequence(orderNumber);
+    if (preserved != null &&
+        preserved.sequence >= 1001 &&
+        preserved.branchCode == await branchCode(order.branchId)) {
+      await ensureCounterAtLeast(
+        order.branchId,
+        _ordersCounterId,
+        preserved.sequence,
+      );
+    }
     // Week 6 Day 4 (D165): return the number + key that were
     // actually stored, like createOrder — previously only the id
     // came back.
@@ -1243,12 +1329,17 @@ class FirestoreSaleRepository
   @override
   Future<Sale> upsertSale(Sale sale) async {
     // A restore replays the sale as given (status, totals, items,
-    // invoice number and idempotency key) under the exported id as
-    // the doc id. The payments subcollection is NOT restored — it
-    // is not part of the backup (the sale doc carries the payment
-    // method and cash received, which is what the screens read).
-    // Items are rewritten by index like `updateOrder` (a shrunk
-    // list drops its trailing stale item docs).
+    // invoice number and idempotency key) under `sale.id` as the
+    // doc id. Week 7 Day 3 (D173): the restore re-keys by
+    // idempotencyKey in `ProductionDataLayer.importBackup` BEFORE
+    // calling this, so on a restore `sale.id` IS the key and the
+    // doc lands under the key (the D53 / rules invariant) — a
+    // mock export no longer writes a doc under its mock-assigned
+    // id. The payments subcollection is NOT restored — it is not
+    // part of the backup (the sale doc carries the payment method
+    // and cash received, which is what the screens read). Items
+    // are rewritten by index like `updateOrder` (a shrunk list
+    // drops its trailing stale item docs).
     final docId = sale.id.isNotEmpty
         ? sale.id
         : transport.newDocumentId(FirestoreSchema.salesPath(sale.branchId));
@@ -2218,6 +2309,85 @@ class FirestoreStockAdjustmentRequestRepository
     }
     await transport.setDocument(
       FirestoreSchema.stockAdjustmentDocPath(request.branchId, docId),
+      doc,
+    );
+    return saved;
+  }
+}
+
+/// Quarantine outcome approval queue (Week 7 Day 1, D171 —
+/// `branches/{branchId}/quarantineOutcomes/{id}`), one doc per
+/// request, doc id = request id. Same conventions as the adjustment
+/// repo (D146): a caller-supplied non-empty id is the doc id (D65
+/// pattern — filing and deciding share one upsert, so a retry
+/// overwrites the same document instead of writing a second one),
+/// and a rewrite keeps the original `createdAt`.
+class FirestoreQuarantineOutcomeRequestRepository
+    with _FirestoreRepositoryHelper
+    implements QuarantineOutcomeRequestRepository {
+  FirestoreQuarantineOutcomeRequestRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<QuarantineOutcomeRequest>> getRequests({String? branchId}) async {
+    final requests = <QuarantineOutcomeRequest>[];
+    final branches = branchId == null ? await branchIds() : [branchId];
+    for (final id in branches) {
+      final docs = await fetchAll(FirestoreSchema.quarantineOutcomesPath(id));
+      requests.addAll([
+        for (final doc in docs)
+          quarantineOutcomeRequestFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return requests;
+  }
+
+  @override
+  Future<QuarantineOutcomeRequest?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.quarantineOutcomes, id);
+    if (found == null) return null;
+    return quarantineOutcomeRequestFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<QuarantineOutcomeRequest> saveRequest(
+    QuarantineOutcomeRequest request,
+  ) async {
+    if (request.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to save a quarantine outcome request '
+        'in Firestore.',
+      );
+    }
+    final docId = request.id.isNotEmpty
+        ? request.id
+        : transport.newDocumentId(
+            FirestoreSchema.quarantineOutcomesPath(request.branchId),
+          );
+    final saved = request.id.isEmpty
+        ? QuarantineOutcomeRequest.fromMap(docId, request.toMap())
+        : request;
+    final existing = await transport.getDocument(
+      FirestoreSchema.quarantineOutcomeDocPath(request.branchId, docId),
+    );
+    final doc = quarantineOutcomeRequestToFirestore(
+      saved,
+      orgId: organizationId,
+    );
+    if (existing != null) {
+      // A rewrite keeps the original `createdAt` (the mapper stamps
+      // "now" — that is only correct for creates).
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(
+      FirestoreSchema.quarantineOutcomeDocPath(request.branchId, docId),
       doc,
     );
     return saved;

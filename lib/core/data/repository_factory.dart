@@ -64,6 +64,7 @@ class RepositoryBundle {
     required this.riders,
     required this.stockTransfers,
     required this.stockAdjustments,
+    required this.quarantineOutcomes,
     required this.branches,
     required this.staff,
     required this.attendance,
@@ -100,6 +101,10 @@ class RepositoryBundle {
   /// Week 5 Day 1 (D146): the adjustment approval queue joins the
   /// bundle the same way.
   final StockAdjustmentRequestRepository stockAdjustments;
+
+  /// Week 7 Day 1 (D171): the quarantine outcome queue joins the
+  /// bundle the same way.
+  final QuarantineOutcomeRequestRepository quarantineOutcomes;
 
   /// Week 5 Day 2 (D148): the branch directory joins the bundle the
   /// same way — the mock is seeded from the demo branches, the
@@ -215,6 +220,10 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      quarantineOutcomes: FirestoreQuarantineOutcomeRequestRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       branches: FirestoreBranchRepository(
         transport: firestoreTransport,
         organizationId: organizationId,
@@ -298,6 +307,7 @@ RepositoryBundle createRepositoryBundle({
     riders: MockRiderRepository(),
     stockTransfers: MockStockTransferRepository(),
     stockAdjustments: MockStockAdjustmentRequestRepository(),
+    quarantineOutcomes: MockQuarantineOutcomeRequestRepository(),
     branches: MockBranchRepository(),
     staff: MockStaffRepository(),
     attendance: MockAttendanceRepository(),
