@@ -28,6 +28,7 @@ import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 import '../services/repositories.dart';
+import '../../features/medicines/medicine_logic.dart';
 import 'firestore_mappers.dart';
 import 'firestore_schema.dart';
 import 'firestore_transport.dart';
@@ -170,8 +171,9 @@ mixin _FirestoreRepositoryHelper {
   }
 
   /// Branch code for sequential numbers (`INV-DHA-1001`): the
-  /// branch doc's `code` field when present, else a demo fallback
-  /// derived from the branch id.
+  /// branch doc's `code` field when present, else the same
+  /// migration-safe default the model derives from the id
+  /// ([defaultBranchCodeForId], D163) — one derivation, not two.
   final Map<String, String> _branchCodes = {};
 
   /// First branch id in the org (name order) — the fallback branch
@@ -198,17 +200,8 @@ mixin _FirestoreRepositoryHelper {
     return code;
   }
 
-  static String _fallbackBranchCode(String branchId) {
-    if (branchId.contains('dha')) return 'DHA';
-    if (branchId.contains('gulberg') || branchId.contains('glb')) {
-      return 'GLB';
-    }
-    final segments = branchId.split('-').where((s) => s.isNotEmpty);
-    final last = segments.isEmpty ? branchId : segments.last;
-    return last.length >= 3
-        ? last.substring(0, 3).toUpperCase()
-        : last.toUpperCase();
-  }
+  static String _fallbackBranchCode(String branchId) =>
+      defaultBranchCodeForId(branchId);
 }
 
 // -- Medicines ------------------------------------------------------------
@@ -277,6 +270,19 @@ class FirestoreMedicineRepository
     final existing = await transport.getDocument(path);
     if (existing == null) {
       throw ArgumentError('No medicine with id "${medicine.id}".');
+    }
+    // Week 6 Day 4 (D166): barcode uniqueness, same rule and
+    // message as the mock — a barcode already used by a DIFFERENT
+    // medicine is rejected. Empty barcodes and the medicine's own
+    // barcode pass.
+    final needle = medicine.barcode?.trim() ?? '';
+    if (needle.isNotEmpty) {
+      final holder = await getByBarcode(needle);
+      if (holder != null && holder.id != medicine.id) {
+        throw ArgumentError(
+          barcodeConflictMessage(needle, holder.name),
+        );
+      }
     }
     final doc = medicineToFirestore(medicine, orgId: organizationId);
     // A rewrite keeps the original `createdAt` (the mapper stamps
@@ -402,10 +408,11 @@ class FirestoreOrderRepository
     }
     final sequence = await nextCounterValue(order.branchId, _ordersCounterId);
     final code = await branchCode(order.branchId);
+    final orderNumber = 'ORD-$code-$sequence';
     final doc = orderToFirestore(
       order,
       orgId: organizationId,
-      orderNumber: 'ORD-$code-$sequence',
+      orderNumber: orderNumber,
       idempotencyKey: docId,
     );
     final operations = <WriteOperation>[
@@ -423,7 +430,14 @@ class FirestoreOrderRepository
         ),
     ];
     await transport.runBatchedWrites(operations);
-    return order.copyWith(id: docId);
+    // Week 6 Day 4 (D165): return the number + key the repo just
+    // assigned — previously only the id came back and the caller
+    // had to re-derive them.
+    return order.copyWith(
+      id: docId,
+      orderNumber: orderNumber,
+      idempotencyKey: docId,
+    );
   }
 
   @override
@@ -441,8 +455,13 @@ class FirestoreOrderRepository
     final doc = orderToFirestore(
       order,
       orgId: organizationId,
-      orderNumber: found.doc.data['orderNumber'] as String? ?? order.id,
-      idempotencyKey: found.doc.data['idempotencyKey'] as String? ?? order.id,
+      // Week 6 Day 4 (D165): an update never re-numbers — the stored
+      // number/key win; a stored doc missing them falls back to the
+      // model's own effective values, never the bare id.
+      orderNumber: found.doc.data['orderNumber'] as String? ??
+          order.effectiveOrderNumber,
+      idempotencyKey: found.doc.data['idempotencyKey'] as String? ??
+          order.effectiveIdempotencyKey,
     );
     // A rewrite keeps the original `createdAt` (the mapper stamps
     // "now" — that is only correct for creates).
@@ -485,12 +504,19 @@ class FirestoreOrderRepository
     final orderNumber = existing == null
         ? 'ORD-${await branchCode(order.branchId)}-'
               '${await nextCounterValue(order.branchId, _ordersCounterId)}'
-        : existing['orderNumber'] as String? ?? docId;
+        // Week 6 Day 4 (D165): an existing doc without a number
+        // falls back to the model's effective value, never the bare
+        // doc id — the number shape stays `ORD-…` everywhere.
+        : existing['orderNumber'] as String? ??
+              order.effectiveOrderNumber;
+    final idempotencyKey =
+        existing?['idempotencyKey'] as String? ??
+        order.effectiveIdempotencyKey;
     final doc = orderToFirestore(
       order,
       orgId: organizationId,
       orderNumber: orderNumber,
-      idempotencyKey: existing?['idempotencyKey'] as String? ?? docId,
+      idempotencyKey: idempotencyKey,
     );
     if (existing != null) {
       doc['createdAt'] = existing['createdAt'];
@@ -521,7 +547,14 @@ class FirestoreOrderRepository
         ),
     ];
     await transport.runBatchedWrites(operations);
-    return order.copyWith(id: docId);
+    // Week 6 Day 4 (D165): return the number + key that were
+    // actually stored, like createOrder — previously only the id
+    // came back.
+    return order.copyWith(
+      id: docId,
+      orderNumber: orderNumber,
+      idempotencyKey: idempotencyKey,
+    );
   }
 }
 
@@ -1369,11 +1402,19 @@ class FirestoreSupplierRepository
         'A supplier with phone ${supplier.phone} already exists.',
       );
     }
+    // Week 6 Day 4 (D165): stamp the creation time here so the
+    // returned supplier carries the same `createdAt` the mapper
+    // wrote (a supplier that already carries one keeps it).
+    final createdAt = supplier.createdAt ?? DateTime.now();
     final id = await transport.addDocument(
       FirestoreSchema.suppliers,
-      supplierToFirestore(supplier, orgId: organizationId),
+      supplierToFirestore(
+        supplier.copyWith(createdAt: createdAt),
+        orgId: organizationId,
+        now: createdAt,
+      ),
     );
-    return supplier.copyWith(id: id);
+    return supplier.copyWith(id: id, createdAt: createdAt);
   }
 
   @override

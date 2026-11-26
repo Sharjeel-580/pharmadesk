@@ -28,6 +28,17 @@ import 'sync_queue.dart';
 /// stays the full record of the last restore. [DataImporter] itself
 /// is unchanged: it still imports into a sink with the same policy,
 /// and its unit tests still pin that behaviour.
+///
+/// RESTORE LIMITS (Week 6 Day 5, D169 — decided, not extended): the
+/// export deliberately has NO `counters` section (report/stock
+/// counters are rollup state, recomputed from the restored records)
+/// and NO `salePayments` section (the sale doc carries the total,
+/// method and cash received; the per-leg split lives only in the
+/// Firestore `payments` subcollection and is not rewritten on
+/// restore). A restore only adds or replaces — it never deletes, so
+/// records created after the export survive it, and a record that
+/// was in the backup comes back even if deleted after the export.
+/// The backup screen states all of this in plain language.
 
 /// Backup file format.
 class BackupFormat {

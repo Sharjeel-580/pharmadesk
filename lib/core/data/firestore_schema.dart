@@ -319,7 +319,15 @@ class FirestoreSchema {
         notes: 'own / franchise',
       ),
       FirestoreField('name', 'string', required: true),
-      FirestoreField('code', 'string', required: true),
+      FirestoreField(
+        'code',
+        'string',
+        required: true,
+        notes: 'short uppercase branch code (e.g. DHA), used in '
+            'sequential numbers; the mapper writes the model code '
+            'when valid, else the default derived from the branch '
+            'id (D163)',
+      ),
       FirestoreField('address', 'string'),
       FirestoreField('city', 'string'),
       FirestoreField('phone', 'string'),

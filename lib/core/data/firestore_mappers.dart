@@ -118,21 +118,24 @@ void validateOrThrow(String collectionPattern, Map<String, dynamic> doc) {
   }
 }
 
-// -- Branches (Week 5 Day 2, D148) --------------------------------------
+// -- Branches (Week 5 Day 2, D148; code validation Week 6 Day 3, D163) -----
 //
 // Branch doc (§3 `branches`, SRS §3.1). The local model differs from
-// the §3 field list in three documented ways (same lossy-mapping
+// the §3 field list in two documented ways (same lossy-mapping
 // posture as the staff mapper, D99) — the model is never changed to
 // fit Firestore silently:
 // - §3 names the lifecycle field `status` (`active` / `closed`); the
 //   model carries an `active` bool. The mapper writes BOTH, and the
 //   read side accepts either (`active` wins when present).
-// - §3 lists a `code` (used for sequential numbers); the model has
-//   none — the repository helper derives `branchCode` from the doc
-//   when present, else from the branch id. The mapper writes no
-//   `code`, never an invented one. (That is also why this mapper does
-//   NOT `validateOrThrow` against the §3 `branches` list: the list
-//   marks `code` required and this mapper cannot supply it.)
+// - §3 lists a `code` (used for sequential numbers); the model
+//   carries one since D163 (`Branch.code`, default `''` = not set).
+//   The mapper writes `effectiveCode` — the stored code when valid,
+//   otherwise the migration-safe default derived from the branch id
+//   — and the read side normalizes the same way, so a legacy doc
+//   without a code (or with an invalid one) reads back with the
+//   derived default instead of crashing. Because the mapper can now
+//   always supply `code`, it DOES `validateOrThrow` against the §3
+//   `branches` list (D148 could not: the model had no `code` then).
 // - Rates are basis points (`franchiseFeeRateBps` / `royaltyRateBps`,
 //   D130); §3 names them `franchiseFeeRate` / `royaltyRate`. The
 //   mapper writes both names so a doc written by either side reads
@@ -142,10 +145,11 @@ Map<String, dynamic> branchToFirestore(
   required String orgId,
   DateTime? now,
 }) {
-  return stampNewDocument(
+  final doc = stampNewDocument(
     {
       'name': branch.name,
       'type': branch.type,
+      'code': branch.effectiveCode,
       'address': branch.address,
       'phone': branch.phone,
       'deliveryAreas': branch.deliveryAreas,
@@ -160,6 +164,8 @@ Map<String, dynamic> branchToFirestore(
     orgId: orgId,
     now: now,
   );
+  validateOrThrow('branches', doc);
+  return doc;
 }
 
 Branch branchFromFirestore(String id, Map<String, dynamic> doc) {
@@ -173,6 +179,7 @@ Branch branchFromFirestore(String id, Map<String, dynamic> doc) {
         .toList(),
     active: doc['active'] as bool? ?? (doc['status'] as String?) != 'closed',
     createdAt: _parseDate(doc['createdAt']),
+    code: normalizeBranchCode(doc['code'] as String?, branchId: id),
     type: doc['type'] as String? ?? 'own',
     managerId: doc['managerId'] as String?,
     franchiseFeeRateBps:
@@ -440,17 +447,26 @@ OrderSource orderSourceFromFirestore(String? value) => switch (value) {
 /// Order doc (§3 `branches/{branchId}/orders`). Items live in the
 /// `items` subcollection. [orderNumber] is assigned by the repository
 /// counter before this is called; [idempotencyKey] defaults to the
-/// document id the repository uses.
+/// document id the repository uses. Both fall back to the model's own
+/// fields when the caller passes nothing (or an empty number): the
+/// model's [Order.effectiveOrderNumber] / [Order.effectiveIdempotencyKey]
+/// (Week 6 Day 4, D165) — so a model → doc → model round-trip
+/// preserves the number and key the order already carries, and a
+/// legacy order (empty fields) still writes a valid §3 doc instead
+/// of failing validation on the required `orderNumber`.
 Map<String, dynamic> orderToFirestore(
   Order order, {
   required String orgId,
-  required String orderNumber,
+  String? orderNumber,
   String? idempotencyKey,
   DateTime? now,
 }) {
+  final effectiveNumber = (orderNumber ?? '').isNotEmpty
+      ? orderNumber!
+      : order.effectiveOrderNumber;
   final doc = stampNewDocument(
     {
-      'orderNumber': orderNumber,
+      'orderNumber': effectiveNumber,
       'customerId': order.customerId,
       'source': orderSourceToFirestore(order.source),
       'status': orderStatusToFirestore(order.status),
@@ -460,7 +476,8 @@ Map<String, dynamic> orderToFirestore(
       'paymentMethod': order.paymentMethod.name,
       'riderId': order.riderId,
       'prescriptionId': order.prescriptionId,
-      'idempotencyKey': idempotencyKey ?? order.id,
+      'idempotencyKey':
+          idempotencyKey ?? order.effectiveIdempotencyKey,
       // Extras: §3 lists no discount field; the local total needs it.
       'discountMinor': order.discountMinor,
       'orderNotes': order.orderNotes,
@@ -505,6 +522,12 @@ Order orderFromFirestore(
     orderNotes: doc['orderNotes'] as String?,
     prescriptionId: doc['prescriptionId'] as String?,
     totalAmount: grandTotalMinor / 100,
+    // Week 6 Day 4 (D165): a legacy doc without a number / key
+    // reads back to the model's empty defaults — never a crash.
+    // The effective getters derive the stable values from the id,
+    // so the order still shows `ORD-…` and dedupes on its doc id.
+    orderNumber: doc['orderNumber'] as String? ?? '',
+    idempotencyKey: doc['idempotencyKey'] as String? ?? '',
     discountMinor: (doc['discountMinor'] as num?)?.toInt() ?? 0,
     source: orderSourceFromFirestore(doc['source'] as String?),
     fulfillment: fulfillmentTypeFromString(doc['fulfillment'] as String?),
@@ -873,7 +896,11 @@ LedgerEntry customerLedgerEntryFromFirestore(
 
 // -- Suppliers + payables ledger ----------------------------------------
 
-/// Supplier doc (§3 root `suppliers`).
+/// Supplier doc (§3 root `suppliers`). Week 6 Day 4 (D165):
+/// `createdAt` is the model's own value when set (a mapper
+/// round-trip preserves it); otherwise the stamp's "now" — a new
+/// supplier is created now, while a legacy doc without the field
+/// reads back as `null` (unknown, never invented) on the read side.
 Map<String, dynamic> supplierToFirestore(
   Supplier supplier, {
   required String orgId,
@@ -893,6 +920,9 @@ Map<String, dynamic> supplierToFirestore(
     orgId: orgId,
     now: now,
   );
+  if (supplier.createdAt != null) {
+    doc['createdAt'] = Timestamp.fromDate(supplier.createdAt!);
+  }
   validateOrThrow('suppliers', doc);
   return doc;
 }
@@ -908,6 +938,7 @@ Supplier supplierFromFirestore(String id, Map<String, dynamic> doc) {
     taxNumber: doc['taxNumber'] as String?,
     paymentTerms: doc['paymentTerms'] as String?,
     isActive: doc['isActive'] as bool? ?? true,
+    createdAt: _parseDate(doc['createdAt']),
   );
 }
 

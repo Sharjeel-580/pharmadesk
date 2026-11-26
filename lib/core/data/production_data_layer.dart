@@ -430,6 +430,12 @@ class ProductionDataLayer {
 
   /// FR-HO-08 deactivation enforcement (Week 5 Day 2, D149 — SRS
   /// D-28 / FR-HO-08): a deactivated branch cannot transact.
+  /// Extended to the finance writes in Week 6 Day 1 (D161):
+  /// `recordExpense` / `recordIncome` / `recordSupplierPayment` /
+  /// `recordDailyClosing` / `recordClosingCorrection` /
+  /// `recordCashReconciliation` call this too, in the same position
+  /// (after the idempotency-duplicate early return, before the
+  /// first write) and with the same [ArgumentError].
   ///
   /// Every transaction write path in this layer calls this before
   /// its first write (after the idempotency-duplicate early return,
@@ -1413,6 +1419,11 @@ class ProductionDataLayer {
     }
     final existing = _committedExpenseKeys[key];
     if (existing != null) return existing;
+
+    // FR-HO-08 (D161): a deactivated branch cannot post finance
+    // writes — the expense is refused before any record is written.
+    await _requireBranchActive(branchId);
+
     final created = await expenseRepo.createExpense(
       Expense(
         id: '',
@@ -1484,6 +1495,11 @@ class ProductionDataLayer {
     }
     final existing = _committedIncomeKeys[key];
     if (existing != null) return existing;
+
+    // FR-HO-08 (D161): a deactivated branch cannot post finance
+    // writes — the income entry is refused before any record is written.
+    await _requireBranchActive(branchId);
+
     final created = await financialTransactionRepo.addTransaction(
       FinancialTransaction(
         id: '',
@@ -1535,6 +1551,10 @@ class ProductionDataLayer {
     }
     final existing = _committedClosingKeys[key];
     if (existing != null) return existing;
+
+    // FR-HO-08 (D161): a deactivated branch cannot close a day.
+    await _requireBranchActive(closing.branchId);
+
     final created = await dailyClosingRepo.createClosing(closing);
     await _enqueueFinanceSync(
       entityType: 'dailyClosing',
@@ -1581,6 +1601,10 @@ class ProductionDataLayer {
     }
     final existing = _committedCorrectionKeys[key];
     if (existing != null) return existing;
+
+    // FR-HO-08 (D161): a deactivated branch cannot correct a closing.
+    await _requireBranchActive(correction.branchId);
+
     final created = await closingCorrectionRepo.createCorrection(correction);
     await audit.write(
       AuditLogEntry.create(
@@ -1646,6 +1670,10 @@ class ProductionDataLayer {
     }
     final existing = _committedReconciliationKeys[key];
     if (existing != null) return existing;
+
+    // FR-HO-08 (D161): a deactivated branch cannot reconcile cash.
+    await _requireBranchActive(reconciliation.branchId);
+
     final created = await cashReconciliationRepo.createReconciliation(
       reconciliation,
     );
@@ -1741,6 +1769,11 @@ class ProductionDataLayer {
         isDuplicate: true,
       );
     }
+    // FR-HO-08 (D161): a deactivated branch cannot pay a supplier —
+    // refused after the duplicate early return, before any record
+    // is written or validated (a retry is not a new payment).
+    await _requireBranchActive(branchId);
+
     if (amountMinor <= 0) {
       throw ArgumentError('Payment amount must be more than zero.');
     }
