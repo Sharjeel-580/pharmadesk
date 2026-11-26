@@ -80,6 +80,7 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
     int taxRatePercent = 0,
     required SalePaymentMethod paymentMethod,
     int cashReceivedMinor = 0,
+    List<SalePayment>? splitPayments,
     String? idempotencyKey,
   }) async {
     if (_completing) {
@@ -125,6 +126,7 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
         outstandingMinor: outstanding,
         creditLimitMinor: creditLimit,
         sellableStockByMedicine: sellableByMedicine,
+        splitPayments: splitPayments,
       );
       if (errors.isNotEmpty) {
         return (sale: null, error: errors.first);
@@ -143,6 +145,7 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
         taxRatePercent: taxRatePercent,
         paymentMethod: paymentMethod,
         cashReceivedMinor: cashReceivedMinor,
+        splitPayments: splitPayments,
         idempotencyKey: _pendingSaleKey,
       );
 
@@ -153,13 +156,15 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
       // returns the original sale and moves no stock twice.
       final layer = ref.read(productionDataLayerProvider);
       LedgerEntry? creditEntry;
-      if (sale.isCredit && customerId != null) {
+      // D137: the khata takes the credit LEG only — a split sale
+      // with a Rs 400 credit part owes Rs 400, not the full total.
+      if (sale.creditMinor > 0 && customerId != null) {
         creditEntry = LedgerEntry(
           id: '',
           customerId: customerId,
           kind: LedgerEntryKind.creditSale,
-          amountMinor: sale.totalMinor,
-          reason: 'Credit sale',
+          amountMinor: sale.creditMinor,
+          reason: sale.isSplit ? 'Credit part of split sale' : 'Credit sale',
           referenceId: '',
           balanceAfterMinor: 0, // set by the repository
           createdAt: DateTime.now(),

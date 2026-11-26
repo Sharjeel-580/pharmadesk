@@ -19,6 +19,7 @@ import 'billing_logic.dart';
 import 'billing_provider.dart';
 import 'parked_sales.dart';
 import '../customers/customers_provider.dart';
+import '../settings/org_settings.dart';
 
 /// POS / billing screen (Day 6, SRS §8 + FR-POS-01–04, FR-POS-09).
 ///
@@ -31,7 +32,8 @@ import '../customers/customers_provider.dart';
 ///   are all expired can never be added (D30).
 /// - Cart with quantity steppers (capped at sellable stock), per-line
 ///   discount, bill discount, tax, payment method (cash / card /
-///   credit-khata), change calculation for cash.
+///   credit-khata) or a split payment across methods (D137), change
+///   calculation for cash.
 /// - Completing a sale saves it, decrements stock FEFO, updates the
 ///   dashboards immediately and opens the receipt. A credit sale needs
 ///   a customer and updates their khata outstanding.
@@ -49,6 +51,14 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   final _billDiscountController = TextEditingController();
   final _cashReceivedController = TextEditingController();
 
+  /// Split-payment amounts, whole rupees (Week 4 Day 5, D137 —
+  /// FR-POS-05). Only read while [_splitPayment] is on; the cash
+  /// field is both the cash leg and the cash received (split cash is
+  /// exact — no change on a split sale, see `buildSale`).
+  final _splitCashController = TextEditingController();
+  final _splitCardController = TextEditingController();
+  final _splitCreditController = TextEditingController();
+
   /// Barcode scan field (Week 2 Day 4): a hardware wedge scanner
   /// types the code here + Enter; the field keeps focus after a scan
   /// so the next scan lands in it without a tap.
@@ -63,20 +73,71 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   List<CartLine> _lines = [];
   String? _customerId;
   SalePaymentMethod _paymentMethod = SalePaymentMethod.cash;
-  int _taxRatePercent = 0;
+  late int _taxRatePercent;
   List<String> _errors = [];
   String? _scanMessage;
   bool _completing = false;
+
+  /// Split payment on/off (D137). Off = the single-method flow
+  /// (unchanged); on = the three leg fields below, which must sum
+  /// to the total.
+  bool _splitPayment = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Week 4 Day 4 (D136): the tax rate comes from Organization
+    // Settings (SRS D-34) — the default there is 0%, the rate the
+    // POS charged before this wiring, so existing behaviour is
+    // unchanged until an owner changes the setting.
+    _taxRatePercent = ref.read(orgSettingsProvider).taxRatePercent;
+  }
 
   @override
   void dispose() {
     _billDiscountController.dispose();
     _cashReceivedController.dispose();
+    _splitCashController.dispose();
+    _splitCardController.dispose();
+    _splitCreditController.dispose();
     _scanController.dispose();
     _scanFocusNode.dispose();
     _notesController.dispose();
     super.dispose();
   }
+
+  int _splitLegMinor(TextEditingController controller) {
+    final rupees = int.tryParse(controller.text.trim());
+    if (rupees == null) return 0;
+    return rupees * 100;
+  }
+
+  /// The split legs as entered (only legs above zero), or `null`
+  /// when split payment is off. The cash leg doubles as the cash
+  /// received (split cash is exact — no change).
+  List<SalePayment>? get _splitPayments {
+    if (!_splitPayment) return null;
+    final legs = <SalePayment>[];
+    final cash = _splitLegMinor(_splitCashController);
+    if (cash > 0) {
+      legs.add(SalePayment(method: SalePaymentMethod.cash, amountMinor: cash));
+    }
+    final card = _splitLegMinor(_splitCardController);
+    if (card > 0) {
+      legs.add(SalePayment(method: SalePaymentMethod.card, amountMinor: card));
+    }
+    final credit = _splitLegMinor(_splitCreditController);
+    if (credit > 0) {
+      legs.add(
+        SalePayment(method: SalePaymentMethod.credit, amountMinor: credit),
+      );
+    }
+    return legs;
+  }
+
+  /// Cash handed over for the cash leg in split mode (exact).
+  int get _splitCashReceivedMinor =>
+      _splitLegMinor(_splitCashController);
 
   int get _billDiscountMinor {
     final rupees = int.tryParse(_billDiscountController.text.trim());
@@ -215,6 +276,10 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       _notesController.clear();
       _billDiscountController.clear();
       _cashReceivedController.clear();
+      _splitPayment = false;
+      _splitCashController.clear();
+      _splitCardController.clear();
+      _splitCreditController.clear();
     });
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -280,7 +345,20 @@ class _PosScreenState extends ConsumerState<PosScreen> {
         int.tryParse(billDiscountText) == null) {
       errors.add('Bill discount must be a whole number of rupees.');
     }
-    if (_paymentMethod == SalePaymentMethod.cash) {
+    if (_splitPayment) {
+      // D137: each leg field must parse; the sum check itself lives
+      // in validateSale (the provider reports the shortfall).
+      for (final entry in {
+        'Cash': _splitCashController,
+        'Card': _splitCardController,
+        'Credit': _splitCreditController,
+      }.entries) {
+        final text = entry.value.text.trim();
+        if (text.isNotEmpty && int.tryParse(text) == null) {
+          errors.add('${entry.key} amount must be a whole number of rupees.');
+        }
+      }
+    } else if (_paymentMethod == SalePaymentMethod.cash) {
       final cashText = _cashReceivedController.text.trim();
       if (cashText.isNotEmpty && int.tryParse(cashText) == null) {
         errors.add('Cash received must be a whole number of rupees.');
@@ -304,7 +382,10 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       billDiscountMinor: _billDiscountMinor,
       taxRatePercent: _taxRatePercent,
       paymentMethod: _paymentMethod,
-      cashReceivedMinor: _cashReceivedMinor,
+      cashReceivedMinor: _splitPayment
+          ? _splitCashReceivedMinor
+          : _cashReceivedMinor,
+      splitPayments: _splitPayments,
     );
     if (!mounted) return;
     setState(() => _completing = false);
@@ -313,6 +394,12 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       setState(() => _errors = [result.error ?? 'Sale could not complete.']);
       return;
     }
+    setState(() {
+      _splitPayment = false;
+      _splitCashController.clear();
+      _splitCardController.clear();
+      _splitCreditController.clear();
+    });
     context.go('/billing/receipt/${sale.id}');
   }
 
@@ -502,7 +589,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                     valueMinor: _taxMinor,
                   ),
                 _TotalRow(label: 'Total', valueMinor: _totalMinor, bold: true),
-                if (_paymentMethod == SalePaymentMethod.cash &&
+                if (!_splitPayment &&
+                    _paymentMethod == SalePaymentMethod.cash &&
                     _totalMinor > 0) ...[
                   const SizedBox(height: 4),
                   _TotalRow(
@@ -576,37 +664,100 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
-                SegmentedButton<SalePaymentMethod>(
-                  segments: const [
-                    ButtonSegment(
-                      value: SalePaymentMethod.cash,
-                      label: Text('Cash'),
-                      icon: Icon(Icons.money_outlined),
+                // Week 4 Day 5 (D137): split payment — one switch,
+                // three leg fields, live remaining. Off = the
+                // single-method flow, unchanged.
+                SwitchListTile(
+                  key: const ValueKey('pos-split-payment'),
+                  title: const Text('Split payment'),
+                  subtitle: const Text(
+                    'Pay across methods — the parts must add up to the total.',
+                  ),
+                  value: _splitPayment,
+                  onChanged: (value) =>
+                      setState(() => _splitPayment = value),
+                ),
+                if (_splitPayment) ...[
+                  const SizedBox(height: 8),
+                  PharmaTextField(
+                    key: const ValueKey('pos-split-cash'),
+                    controller: _splitCashController,
+                    label: 'Cash (Rs)',
+                    hintText: '0',
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 8),
+                  PharmaTextField(
+                    key: const ValueKey('pos-split-card'),
+                    controller: _splitCardController,
+                    label: 'Card (Rs)',
+                    hintText: '0',
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 8),
+                  PharmaTextField(
+                    key: const ValueKey('pos-split-credit'),
+                    controller: _splitCreditController,
+                    label: 'Credit — khata (Rs)',
+                    hintText: '0',
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 8),
+                  _SplitRemainingRow(
+                    totalMinor: _totalMinor,
+                    splitMinor: (_splitPayments ?? const []).fold(
+                      0,
+                      (sum, leg) => sum + leg.amountMinor,
                     ),
-                    ButtonSegment(
-                      value: SalePaymentMethod.card,
-                      label: Text('Card'),
-                      icon: Icon(Icons.credit_card_outlined),
+                  ),
+                  if ((_splitPayments ?? const []).any(
+                    (leg) => leg.method == SalePaymentMethod.credit,
+                  ))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        _customerId == null
+                            ? 'The credit part needs a customer — pick one above.'
+                            : 'The credit part will be added to this customer\'s khata outstanding.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ),
-                    ButtonSegment(
-                      value: SalePaymentMethod.credit,
-                      label: Text('Credit (khata)'),
-                      icon: Icon(Icons.book_outlined),
+                ] else ...[
+                  SegmentedButton<SalePaymentMethod>(
+                    segments: const [
+                      ButtonSegment(
+                        value: SalePaymentMethod.cash,
+                        label: Text('Cash'),
+                        icon: Icon(Icons.money_outlined),
+                      ),
+                      ButtonSegment(
+                        value: SalePaymentMethod.card,
+                        label: Text('Card'),
+                        icon: Icon(Icons.credit_card_outlined),
+                      ),
+                      ButtonSegment(
+                        value: SalePaymentMethod.credit,
+                        label: Text('Credit (khata)'),
+                        icon: Icon(Icons.book_outlined),
+                      ),
+                    ],
+                    selected: {_paymentMethod},
+                    onSelectionChanged: (selection) => setState(
+                      () => _paymentMethod = selection.first,
+                    ),
+                  ),
+                  if (_paymentMethod == SalePaymentMethod.credit) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _customerId == null
+                          ? 'Credit sales need a customer — pick one above. The sale total is added to their khata.'
+                          : 'The sale total will be added to this customer\'s khata outstanding.',
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
-                  selected: {_paymentMethod},
-                  onSelectionChanged: (selection) => setState(
-                    () => _paymentMethod = selection.first,
-                  ),
-                ),
-                if (_paymentMethod == SalePaymentMethod.credit) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    _customerId == null
-                        ? 'Credit sales need a customer — pick one above. The sale total is added to their khata.'
-                        : 'The sale total will be added to this customer\'s khata outstanding.',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
                 ],
                 const SizedBox(height: 12),
                 Row(
@@ -650,7 +801,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                     ),
                   ],
                 ),
-                if (_paymentMethod == SalePaymentMethod.cash) ...[
+                if (!_splitPayment &&
+                    _paymentMethod == SalePaymentMethod.cash) ...[
                   const SizedBox(height: 12),
                   PharmaTextField(
                     controller: _cashReceivedController,
@@ -670,28 +822,47 @@ class _PosScreenState extends ConsumerState<PosScreen> {
             ),
           ),
           const SizedBox(height: 24),
-          Row(
-            children: [
-              PharmaButton(
+          // Week 4 Day 5 (D142): at 390px "Hold sale" measures ~202px
+          // in the test font, leaving "Complete Sale" 128px for a
+          // 221px label — the Day 1 133px overflow. Below 480px the
+          // two actions stack full-width (Complete first); at desktop
+          // widths they stay side by side as before.
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final holdButton = PharmaButton(
                 key: const ValueKey('pos-hold-sale'),
                 label: 'Hold sale',
                 icon: Icons.pause_circle_outline,
                 variant: PharmaButtonVariant.secondary,
                 onPressed: _lines.isEmpty ? null : _holdSale,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: PharmaButton(
-                  label: _completing ? 'Completing sale…' : 'Complete Sale',
-                  icon: Icons.point_of_sale_outlined,
-                  loading: _completing,
-                  expand: true,
-                  onPressed: _completing || _lines.isEmpty
-                      ? null
-                      : _completeSale,
-                ),
-              ),
-            ],
+              );
+              final completeButton = PharmaButton(
+                label: _completing ? 'Completing sale…' : 'Complete Sale',
+                icon: Icons.point_of_sale_outlined,
+                loading: _completing,
+                expand: true,
+                onPressed: _completing || _lines.isEmpty
+                    ? null
+                    : _completeSale,
+              );
+              if (constraints.maxWidth < 480) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    completeButton,
+                    const SizedBox(height: 12),
+                    holdButton,
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  holdButton,
+                  const SizedBox(width: 12),
+                  Expanded(child: completeButton),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -997,6 +1168,59 @@ class _LineDiscountFieldState extends State<_LineDiscountField> {
           final rupees = int.tryParse(value.trim()) ?? 0;
           widget.onChanged(rupees * 100);
         },
+      ),
+    );
+  }
+}
+
+/// Live split-payment remaining (Week 4 Day 5, D137): total minus
+/// the legs entered so far. "Remaining" while short, "Over by" when
+/// the legs exceed the total, "Split adds up" at exactly zero.
+class _SplitRemainingRow extends StatelessWidget {
+  const _SplitRemainingRow({
+    required this.totalMinor,
+    required this.splitMinor,
+  });
+
+  final int totalMinor;
+  final int splitMinor;
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = totalMinor - splitMinor;
+    final label = remaining == 0
+        ? 'Split adds up ✓'
+        : remaining > 0
+        ? 'Remaining to allocate'
+        : 'Over by';
+    final value = remaining == 0
+        ? formatPkr(totalMinor)
+        : formatPkr(remaining.abs());
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: remaining == 0
+                    ? StatusKind.success.color
+                    : StatusKind.warning.color,
+              ),
+            ),
+          ),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w700,
+              color: remaining == 0
+                  ? StatusKind.success.color
+                  : StatusKind.warning.color,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -101,6 +101,46 @@ int cashShortfallMinor({
   return shortfall < 0 ? 0 : shortfall;
 }
 
+/// Validates a split payment (Week 4 Day 5, D137 — FR-POS-05).
+/// Returns the problems (empty = the split is valid):
+///
+/// - At least one leg; every leg positive; no method twice.
+/// - The legs must sum to the sale total exactly — no shortfall, no
+///   overpayment (a cash leg that is overpaid is change, handled by
+///   the cash-received check in [validateSale], not here).
+List<String> validateSplitPayments({
+  required int totalMinor,
+  required List<SalePayment> splits,
+}) {
+  final errors = <String>[];
+  if (splits.isEmpty) {
+    errors.add('Add at least one payment method to the split.');
+    return errors;
+  }
+  final seen = <SalePaymentMethod>{};
+  var sum = 0;
+  for (final leg in splits) {
+    if (leg.amountMinor <= 0) {
+      errors.add(
+        '${salePaymentMethodLabel(leg.method)} amount must be above zero.',
+      );
+    }
+    if (!seen.add(leg.method)) {
+      errors.add(
+        '${salePaymentMethodLabel(leg.method)} appears twice in the split.',
+      );
+    }
+    sum += leg.amountMinor;
+  }
+  if (sum != totalMinor) {
+    errors.add(
+      'Split payments (${formatPkr(sum)}) must add up to the total '
+      '(${formatPkr(totalMinor)}).',
+    );
+  }
+  return errors;
+}
+
 /// Validates a sale before it is completed. Returns the list of
 /// problems (empty = the sale may complete).
 ///
@@ -114,6 +154,10 @@ int cashShortfallMinor({
 /// - Cash needs enough received to cover the total.
 /// - Credit needs a customer, and (when the customer has a limit) the
 ///   new outstanding must stay within it.
+/// - [splitPayments] (D137): when given, the split rules replace the
+///   single-method rules — the legs must sum to the total, a cash leg
+///   needs enough cash received for that leg, and a credit leg needs
+///   a customer with headroom for that leg only (not the full total).
 List<String> validateSale({
   required List<CartLine> lines,
   int billDiscountMinor = 0,
@@ -124,6 +168,7 @@ List<String> validateSale({
   int outstandingMinor = 0,
   int creditLimitMinor = 0,
   Map<String, int> sellableStockByMedicine = const {},
+  List<SalePayment>? splitPayments,
 }) {
   final errors = <String>[];
   if (lines.isEmpty) {
@@ -168,6 +213,38 @@ List<String> validateSale({
     billDiscountMinor: billDiscountMinor,
     taxMinor: tax,
   );
+  final splits = splitPayments;
+  if (splits != null && splits.isNotEmpty) {
+    errors.addAll(
+      validateSplitPayments(totalMinor: total, splits: splits),
+    );
+    final cashLeg = splits
+        .where((leg) => leg.method == SalePaymentMethod.cash)
+        .fold(0, (sum, leg) => sum + leg.amountMinor);
+    if (cashLeg > 0 && cashReceivedMinor < cashLeg) {
+      errors.add(
+        'Cash received (${formatPkr(cashReceivedMinor)}) is less than '
+        'the cash part (${formatPkr(cashLeg)}).',
+      );
+    }
+    final creditLeg = splits
+        .where((leg) => leg.method == SalePaymentMethod.credit)
+        .fold(0, (sum, leg) => sum + leg.amountMinor);
+    if (creditLeg > 0) {
+      if (customerId == null || customerId.isEmpty) {
+        errors.add('The credit part needs a customer — pick one first.');
+      }
+      if (creditLimitMinor > 0 &&
+          outstandingMinor + creditLeg > creditLimitMinor) {
+        errors.add(
+          'Credit limit exceeded: outstanding ${formatPkr(outstandingMinor)} '
+          '+ this credit part ${formatPkr(creditLeg)} is over the limit '
+          '${formatPkr(creditLimitMinor)}.',
+        );
+      }
+    }
+    return errors;
+  }
   switch (paymentMethod) {
     case SalePaymentMethod.cash:
       if (cashReceivedMinor < total) {
@@ -255,6 +332,13 @@ allocateFefo({
 /// duplicate the sale. When omitted a fresh key is minted — callers
 /// that retry (the POS notifier, D54) pass the key they minted on the
 /// first attempt so the retry dedupes against the original commit.
+///
+/// [splitPayments] (D137): when given, the sale carries those legs
+/// and [paymentMethod] is the primary method (the largest leg).
+/// Without it the sale is single-method, with one leg settling the
+/// whole total. Change is computed against the cash leg only: a
+/// split sale's cash is exact (the leg amount is what was handed
+/// over), so split cash never produces change.
 Sale buildSale({
   required String branchId,
   String? customerId,
@@ -264,6 +348,7 @@ Sale buildSale({
   required int taxRatePercent,
   required SalePaymentMethod paymentMethod,
   int cashReceivedMinor = 0,
+  List<SalePayment>? splitPayments,
   String? idempotencyKey,
 }) {
   final subtotal = items.fold(0, (sum, item) => sum + item.lineTotalMinor);
@@ -276,11 +361,22 @@ Sale buildSale({
     billDiscountMinor: billDiscountMinor,
     taxMinor: tax,
   );
-  final received = paymentMethod == SalePaymentMethod.cash
-      ? cashReceivedMinor
-      : 0;
-  final change = paymentMethod == SalePaymentMethod.cash
-      ? changeDueMinor(totalMinor: total, cashReceivedMinor: received)
+  final payments = splitPayments ??
+      [SalePayment(method: paymentMethod, amountMinor: total)];
+  var primaryMethod = paymentMethod;
+  var largestLeg = 0;
+  for (final leg in payments) {
+    if (leg.amountMinor > largestLeg) {
+      largestLeg = leg.amountMinor;
+      primaryMethod = leg.method;
+    }
+  }
+  final cashLeg = payments
+      .where((leg) => leg.method == SalePaymentMethod.cash)
+      .fold(0, (sum, leg) => sum + leg.amountMinor);
+  final received = cashLeg > 0 ? cashReceivedMinor : 0;
+  final change = cashLeg > 0
+      ? changeDueMinor(totalMinor: cashLeg, cashReceivedMinor: received)
       : 0;
   final key =
       idempotencyKey ??
@@ -296,7 +392,8 @@ Sale buildSale({
     billDiscountMinor: billDiscountMinor,
     taxMinor: tax,
     totalMinor: total,
-    paymentMethod: paymentMethod,
+    paymentMethod: primaryMethod,
+    payments: List.unmodifiable(payments),
     cashReceivedMinor: received,
     changeMinor: change,
     idempotencyKey: key,
@@ -346,13 +443,22 @@ String receiptText({
     buffer.writeln('Tax: ${formatPkr(sale.taxMinor)}');
   }
   buffer.writeln('TOTAL: ${formatPkr(sale.totalMinor)}');
-  buffer.writeln('Payment: ${salePaymentMethodLabel(sale.paymentMethod)}');
-  if (sale.paymentMethod == SalePaymentMethod.cash) {
+  buffer.writeln('Payment: ${salePaymentSummary(sale)}');
+  if (sale.isSplit) {
+    for (final leg in sale.payments) {
+      buffer.writeln(
+        '  ${salePaymentMethodLabel(leg.method)}: ${formatPkr(leg.amountMinor)}',
+      );
+    }
+  }
+  if (sale.cashReceivedMinor > 0) {
     buffer.writeln('Cash received: ${formatPkr(sale.cashReceivedMinor)}');
     buffer.writeln('Change: ${formatPkr(sale.changeMinor)}');
   }
-  if (sale.isCredit) {
-    buffer.writeln('On credit — added to the customer khata.');
+  if (sale.hasCreditLeg) {
+    buffer.writeln(
+      'On credit — ${formatPkr(sale.creditMinor)} added to the customer khata.',
+    );
   }
   buffer.writeln('Thank you for shopping with us!');
   buffer.writeln('DEMO — not a real receipt.');

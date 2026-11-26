@@ -102,8 +102,8 @@ class _SaleRow extends ConsumerWidget {
             ),
             const SizedBox(width: 12),
             StatusBadge(
-              label: salePaymentMethodLabel(sale.paymentMethod),
-              kind: sale.isCredit
+              label: salePaymentSummary(sale),
+              kind: sale.hasCreditLeg
                   ? StatusKind.warning
                   : StatusKind.success,
             ),

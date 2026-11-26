@@ -171,9 +171,20 @@ class ReceiptScreen extends ConsumerWidget {
                 ),
                 _ReceiptRow(
                   label: 'Payment',
-                  value: salePaymentMethodLabel(sale.paymentMethod),
+                  value: salePaymentSummary(sale),
                 ),
-                if (sale.paymentMethod == SalePaymentMethod.cash) ...[
+                if (sale.isSplit)
+                  for (final leg in sale.payments)
+                    _ReceiptRow(
+                      label: '  ${salePaymentMethodLabel(leg.method)}',
+                      value: formatPkr(leg.amountMinor),
+                    ),
+                // The cash rows describe the cash actually handed
+                // over (`cashReceivedMinor`), not the cash leg: a
+                // Sale built by hand (or read from a legacy doc)
+                // can carry cash without a `payments` leg, and the
+                // rows must still render (D137 fix, Day 5).
+                if (sale.cashReceivedMinor > 0) ...[
                   _ReceiptRow(
                     label: 'Cash received',
                     value: formatPkr(sale.cashReceivedMinor),
@@ -183,11 +194,11 @@ class ReceiptScreen extends ConsumerWidget {
                     value: formatPkr(sale.changeMinor),
                   ),
                 ],
-                if (sale.isCredit)
+                if (sale.hasCreditLeg)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(
-                      'On credit — added to the customer khata.',
+                      'On credit — ${formatPkr(sale.creditMinor)} added to the customer khata.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
