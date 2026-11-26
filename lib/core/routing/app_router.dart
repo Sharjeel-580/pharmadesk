@@ -21,9 +21,11 @@ import '../../features/dashboard/dashboard_screen.dart';
 import '../../features/finance/aging_screen.dart';
 import '../../features/finance/cashbook_screen.dart';
 import '../../features/finance/finance_hub_screen.dart';
+import '../../features/finance/franchise_screen.dart';
 import '../../features/finance/statements_screen.dart';
 import '../../features/inventory/inventory_screen.dart';
 import '../../features/inventory/adjustment_queue_screen.dart';
+import '../../features/inventory/quarantine_outcome_screen.dart';
 import '../../features/inventory/stock_transfer_detail_screen.dart';
 import '../../features/inventory/stock_transfer_form_screen.dart';
 import '../../features/inventory/stock_transfer_list_screen.dart';
@@ -161,8 +163,7 @@ const appModules = <AppModule>[
     title: 'Staff & HR',
     route: '/staff',
     icon: Icons.badge_outlined,
-    description:
-        'Staff directory, roles, attendance, shifts and salary.',
+    description: 'Staff directory, roles, attendance, shifts and salary.',
     day: 'Week 2 — Day 5',
   ),
   AppModule(
@@ -240,23 +241,15 @@ GoRouter createAppRouter({
         path: '/splash',
         builder: (context, state) => const SplashScreen(),
       ),
-      GoRoute(
-        path: '/login',
-        builder: (context, state) => const LoginScreen(),
-      ),
+      GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(
         path: '/forgot-password',
         builder: (context, state) => const ForgotPasswordScreen(),
       ),
-      GoRoute(
-        path: '/',
-        redirect: (context, state) => '/dashboard',
-      ),
+      GoRoute(path: '/', redirect: (context, state) => '/dashboard'),
       ShellRoute(
-        builder: (context, state, child) => AppShell(
-          currentLocation: state.uri.path,
-          child: child,
-        ),
+        builder: (context, state, child) =>
+            AppShell(currentLocation: state.uri.path, child: child),
         routes: [
           GoRoute(
             path: '/dashboard',
@@ -290,9 +283,7 @@ GoRouter createAppRouter({
             path: '/orders/:id/edit',
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
-              child: OrderFormScreen(
-                orderId: state.pathParameters['id'],
-              ),
+              child: OrderFormScreen(orderId: state.pathParameters['id']),
             ),
           ),
           GoRoute(
@@ -364,6 +355,17 @@ GoRouter createAppRouter({
               child: const AdjustmentQueueScreen(),
             ),
           ),
+          // Quarantine return / disposal queue (Week 5 Day 4, D154
+          // — SRS D-11 / FR-INV-07): a sub-screen of the Inventory
+          // module, gated on `stockAdjustReq` at the route (see
+          // `routeCapability`).
+          GoRoute(
+            path: '/inventory/quarantine-outcomes',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const QuarantineOutcomeScreen(),
+            ),
+          ),
           // Riders & delivery (Week 4 Day 2, D119/D121 — SRS D-21):
           // a sub-screen of the Orders module for navigation (same
           // feature toggle via the shell entries); no separate
@@ -388,10 +390,8 @@ GoRouter createAppRouter({
           ),
           GoRoute(
             path: '/billing',
-            builder: (context, state) => FeatureGate(
-              route: state.uri.path,
-              child: const PosScreen(),
-            ),
+            builder: (context, state) =>
+                FeatureGate(route: state.uri.path, child: const PosScreen()),
           ),
           GoRoute(
             path: '/billing/history',
@@ -420,9 +420,7 @@ GoRouter createAppRouter({
             path: '/billing/receipt/:id',
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
-              child: ReceiptScreen(
-                saleId: state.pathParameters['id'] ?? '',
-              ),
+              child: ReceiptScreen(saleId: state.pathParameters['id'] ?? ''),
             ),
           ),
           GoRoute(
@@ -469,8 +467,7 @@ GoRouter createAppRouter({
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
               child: PurchaseFormScreen(
-                preselectedSupplierId:
-                    state.uri.queryParameters['supplier'],
+                preselectedSupplierId: state.uri.queryParameters['supplier'],
               ),
             ),
           ),
@@ -534,16 +531,28 @@ GoRouter createAppRouter({
           ),
           GoRoute(
             path: '/finance/aging',
-            builder: (context, state) => FeatureGate(
-              route: state.uri.path,
-              child: const AgingScreen(),
-            ),
+            builder: (context, state) =>
+                FeatureGate(route: state.uri.path, child: const AgingScreen()),
           ),
           GoRoute(
             path: '/finance/statements',
             builder: (context, state) => FeatureGate(
               route: state.uri.path,
               child: const StatementsScreen(),
+            ),
+          ),
+          // Franchise royalties (Week 5 Day 5, D159 — SRS D-28 /
+          // FR-HO-07): a sub-screen of the Finance module (same
+          // feature toggle), capability-gated on `branches` at the
+          // route (see `routeCapability`) — the screen itself
+          // requires write-level `branches`, so the Auditor's
+          // read-only pass at the route gate still stops at the
+          // screen (head-office financials, not reference data).
+          GoRoute(
+            path: '/finance/franchise',
+            builder: (context, state) => FeatureGate(
+              route: state.uri.path,
+              child: const FranchiseScreen(),
             ),
           ),
           GoRoute(
@@ -562,17 +571,13 @@ GoRouter createAppRouter({
           ),
           GoRoute(
             path: '/staff/shifts',
-            builder: (context, state) => FeatureGate(
-              route: state.uri.path,
-              child: const ShiftsScreen(),
-            ),
+            builder: (context, state) =>
+                FeatureGate(route: state.uri.path, child: const ShiftsScreen()),
           ),
           GoRoute(
             path: '/staff/salary',
-            builder: (context, state) => FeatureGate(
-              route: state.uri.path,
-              child: const SalaryScreen(),
-            ),
+            builder: (context, state) =>
+                FeatureGate(route: state.uri.path, child: const SalaryScreen()),
           ),
           GoRoute(
             path: '/notifications',
@@ -618,10 +623,8 @@ GoRouter createAppRouter({
           ),
           GoRoute(
             path: '/backup',
-            builder: (context, state) => FeatureGate(
-              route: state.uri.path,
-              child: const BackupScreen(),
-            ),
+            builder: (context, state) =>
+                FeatureGate(route: state.uri.path, child: const BackupScreen()),
           ),
           GoRoute(
             path: '/authentication',
@@ -630,9 +633,8 @@ GoRouter createAppRouter({
         ],
       ),
     ],
-    errorBuilder: (context, state) => _RouteNotFoundScreen(
-      attemptedPath: state.uri.path,
-    ),
+    errorBuilder: (context, state) =>
+        _RouteNotFoundScreen(attemptedPath: state.uri.path),
   );
 }
 
@@ -657,10 +659,7 @@ class _RouteNotFoundScreen extends StatelessWidget {
                 color: theme.colorScheme.primary,
               ),
               const SizedBox(height: 16),
-              Text(
-                'Page not found',
-                style: theme.textTheme.headlineSmall,
-              ),
+              Text('Page not found', style: theme.textTheme.headlineSmall),
               const SizedBox(height: 8),
               Text(
                 'There is no screen at "$attemptedPath".',
