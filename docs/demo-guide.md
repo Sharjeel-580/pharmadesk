@@ -1,15 +1,21 @@
-# PharmaDesk — Demo Guide (final, Day 7, 24 Nov 2026)
+# PharmaDesk — Demo Guide (refreshed Week 8 Day 41, 26 Nov 2026)
 
-> **Status: final for the Week 1 demo.** All 14 modules are real —
-> no placeholder screens remain. Demo credentials are rotated per
-> demo build (SRS §8.1) — the table below is for this build only.
-> Known limitations live in `docs/known-limitations.md` — read it
-> before showing the demo to the client.
+> **Status: refreshed for the final Week 8 handover.** Every figure
+> below was re-checked against the final tree on Day 41 (see
+> `docs/day-41-progress.md` for the per-figure verdicts). All 14
+> modules are real — no placeholder screens remain. Demo credentials
+> are rotated per demo build (SRS §8.1) — the table below is for this
+> build only. Known limitations live in
+> `docs/known-limitations.md` — read it before showing the demo to
+> the client. Install steps, demo accounts and the admin/backup
+> guide live in `docs/deployment-guide.md`; the role-based manual is
+> `docs/user-manual.md`.
 
 ## What the demo is
 
-PharmaDesk is a staff/owner pharmacy management app (Flutter + Firebase
-Spark, permanently free). This build is a **functional interactive
+PharmaDesk is a staff/owner pharmacy management app (Flutter +
+Firebase Blaze, pay-as-you-go — decided 25 Nov 2026, D62,
+superseding the 23 Nov Spark decision). This build is a **functional interactive
 demo on fictional sample data** — every screen works; nothing is a
 static screenshot. Look for the **DEMO MODE** badge: it is on every
 screen (top bar on module screens; on the splash, login and
@@ -24,14 +30,20 @@ stock, no real money. Demo data never mixes with production data
 - **Web (this build):** `flutter run -d chrome` from
   `~/workspace/fazal-din-pharma/`, or serve the built web app
   (`flutter build web --release` → `build/web/`; `main.dart.js`
-  3,951,416 bytes).
-- **Android APK:** not in this build — APK build is
-  environment-blocked in the dev sandbox (see
-  `docs/technical-decisions.md` D14/D15). Build it on GitHub Actions
-  or a machine with direct Gradle access. **No APK exists from this
-  build — do not claim one does.**
-- **Windows:** unverified on this Linux VM; needs real Windows
-  hardware.
+  4,683,590 bytes).
+- **Android APK:** CI-built release APKs exist in the workspace —
+  latest `pharmadesk-week7.apk` (70,881,526 bytes, 26 Nov 2026),
+  previous `pharmadesk-week6.apk` (70,865,142 bytes). Release build
+  signed with the debug keys (see `docs/deployment-guide.md` §2 for
+  install steps and the signing note). The APK cannot be rebuilt on
+  the dev sandbox (Gradle is environment-blocked there — D14/D15/D52);
+  rebuilds go through GitHub Actions CI.
+- **Windows:** CI-built zips exist — latest
+  `pharmadesk-windows-week7.zip` (26,276,306 bytes), previous
+  `pharmadesk-windows-week6.zip` (26,273,637 bytes); unzip and run
+  `pharmadesk.exe` (see `docs/deployment-guide.md` §3). The zip has
+  not been launched on a real Windows PC by the team — the Linux VM
+  cannot run it.
 - **Backend:** none in this build. All data is local mock data; there
   is no Firebase project yet, so there is no cloud sync and no login
   beyond the demo accounts below. Firebase setup is Dazy's call
@@ -64,7 +76,7 @@ Names, emails and figures are fictional.
 - Per-branch stock with mixed expiry: some batches near-expiry, a
   few expired, some low-stock — the alerts radar is live.
 - Supplier ledger seed: Sami Pharmaceuticals owes Rs 125,000.00,
-  MedServe Rs 48,250.00, Hassan Traders Rs 0.00, CareLine
+  MedServe Rs 48,250.00, Hassan Pharma Traders Rs 0.00, CareLine
   Rs 21,000.00.
 - Two prescriptions (`rx-dha-1`, `rx-glb-11`) start Pending and are
   linked to today's first order of each branch, so the prescription
@@ -135,7 +147,8 @@ different stock levels and different low-stock items.
    no WhatsApp API; the staff member's phone is the WhatsApp part).
 2. Add items (expired batches are un-addable), set an advance payment.
 3. Advance the order through **New → Confirmed → Processing → Ready
-   → Dispatched → Delivered**, assigning a rider at dispatch.
+   → Dispatched → Delivered**, assigning a rider at Ready (before
+   dispatch).
 4. **Prescription guard:** open today's first DHA order — it is held
    at dispatch until prescription `rx-dha-1` is approved. Open
    **Prescriptions**, approve `rx-dha-1`, go back: the order can now
@@ -162,21 +175,26 @@ different stock levels and different low-stock items.
 - **Settings:** General (theme, default branch); **Branding** — change
   the organization name and colours and watch the shell rebrand
   immediately; try the **Fazal Din preset** (one tap) and Reset;
-  **Roles & Permissions** — the 10 roles × 21 capabilities matrix
+  **Roles & Permissions** — the 10 roles × 24 capabilities matrix
   (SRS §5.1, read-only display); **Features** — switch a module off
   and it disappears from the sidebar; open it directly and you get a
   clear "module is disabled" state.
 
 ### 8. No dead buttons
 
-Every button in the app does something real — verified by the full
-route walk test (14 modules, no placeholders, no "Page not found").
-If you find a button that does nothing, that is a bug: report it.
+Every button in the app does something real — verified by the final
+full route walk (Week 8 Day 39): all 47 routes resolve at desktop
+and at 390px phone width with no placeholder/404, and the fresh
+390px sweep is 0 distinct overflows. If you find a button that does
+nothing, that is a bug: report it.
 
 ## Known limitations (summary — full list in `docs/known-limitations.md`)
 
 - No backend: data resets on restart; nothing syncs.
-- No APK from this build (environment-blocked); Windows unverified.
+- Android APK exists (CI-built, release signed with debug keys —
+  `pharmadesk-week7.apk` latest); Windows zip exists (CI-built —
+  `pharmadesk-windows-week7.zip`) but has not been launched on a real
+  Windows PC by the team.
 - Prescription photos are bundled SAMPLE assets, not real photos.
 - PDF export is a simple tabular sales report; CSV covers every
   section.
@@ -192,3 +210,12 @@ If you find a button that does nothing, that is a bug: report it.
 - Day 7 (24 Nov 2026): finalized — corrected counts (491 orders, 180
   medicines), all 14 modules real, full §8.4 walkthrough, limitations
   moved to `docs/known-limitations.md`.
+- Day 41 (26 Nov 2026): Week 8 refresh — every figure re-checked
+  against the final tree. Corrected: backend is Blaze, not Spark
+  (D62, 25 Nov); APK exists (`pharmadesk-week7.apk` latest, CI-built,
+  debug-signed); Windows zip exists (`pharmadesk-windows-week7.zip`);
+  `main.dart.js` 4,683,590 bytes; supplier name is Hassan Pharma
+  Traders; roles matrix is 10 × 24 capabilities; rider is assigned at
+  Ready, not at dispatch; §8 now cites the final 47-route walk
+  (Day 39, 0 overflows at 390px). All other figures re-verified
+  unchanged (see `docs/day-41-progress.md`).
