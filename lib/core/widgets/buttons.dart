@@ -50,7 +50,20 @@ class PharmaButton extends StatelessWidget {
   );
 
   Widget _labelWithIcon(Color spinnerColor) {
-    final labelWidget = Text(label, style: _textStyle);
+    // Week 6 Day 5 (D170): the label is Flexible INSIDE the icon /
+    // spinner Row, so a button whose text is wider than its
+    // allotted width ellipsizes instead of overflowing (the
+    // supplier Export-statement button overflowed by 0.2px at 390px
+    // in the test font before this). The icon-less branch returns
+    // the plain Text: a Flexible there would sit directly under
+    // the button's centring Align, not inside a Flex, and throw an
+    // "Incorrect use of ParentDataWidget" error — the Text itself
+    // still ellipsizes when the button is width-constrained.
+    final labelWidget = Text(
+      label,
+      style: _textStyle,
+      overflow: TextOverflow.ellipsis,
+    );
     if (loading) {
       return Row(
         mainAxisSize: MainAxisSize.min,
@@ -64,7 +77,7 @@ class PharmaButton extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          labelWidget,
+          Flexible(child: labelWidget),
         ],
       );
     }
@@ -74,7 +87,7 @@ class PharmaButton extends StatelessWidget {
       children: [
         Icon(icon, size: 18),
         const SizedBox(width: 8),
-        labelWidget,
+        Flexible(child: labelWidget),
       ],
     );
   }

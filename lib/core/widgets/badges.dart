@@ -60,13 +60,20 @@ class StatusBadge extends StatelessWidget {
             ),
             const SizedBox(width: 6),
           ],
-          Text(
-            label,
-            style: TextStyle(
-              fontFamily: 'Inter',
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: color,
+          // Week 6 Day 5 (D170): the label is Flexible so a badge
+          // whose text is wider than its line WRAPS instead of
+          // overflowing — a money figure must stay complete, so no
+          // ellipsis here (the supplier aging badges overflowed by
+          // 63px at 390px in the test font before this).
+          Flexible(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
             ),
           ),
         ],

@@ -28,8 +28,14 @@ class PagedListControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.end,
+    // Week 6 Day 5 (D170): a Wrap, not a Row — at 390px the three
+    // controls overflowed by 120px in the test font (the daily
+    // sales table is only 310px wide inside its card). On desktop
+    // it renders identically (one right-aligned line); on a phone
+    // the Next button flows below instead of overflowing.
+    return Wrap(
+      alignment: WrapAlignment.end,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         TextButton.icon(
           key: const ValueKey('page-previous'),
