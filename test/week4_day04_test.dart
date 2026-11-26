@@ -789,8 +789,12 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('restore-validate-button')));
       await tester.pumpAndSettle();
       expect(find.text('Restore this backup?'), findsOneWidget);
+      // Week 6 Day 5 (D169): the confirm dialog no longer promises
+      // a rollback ("will replace the current live data") — it
+      // states the upsert-by-id semantics: add or replace only,
+      // nothing outside the backup is touched.
       expect(
-        find.textContaining('will replace the current live data'),
+        find.textContaining('add or replace the documents in this backup'),
         findsOneWidget,
       );
       await tester.tap(find.text('Restore backup'));
