@@ -19,9 +19,13 @@ import 'feature_config.dart';
 /// module the user has no permission for shows the "no permission"
 /// state instead — with working actions to go back (Dashboard).
 /// Routes that are not toggleable modules (dashboard, settings,
-/// profile, auth, unknown) always render their child, and routes
-/// with no capability mapping ([routeCapability] returns `null`) are
-/// gated on the feature flag only.
+/// profile, auth, unknown) render their child — EXCEPT when the route
+/// carries a capability ([routeCapability] returns non-`null`): since
+/// Week 4 Day 4 (D135) those routes are capability-gated too, so the
+/// system-hub screens (`/branches`, `/audit-log`, `/backup`) — which
+/// are sub-screens of Settings, not modules of their own — still stop
+/// a role the §5.1 matrix excludes. Routes with no capability mapping
+/// are gated on the feature flag only.
 ///
 /// A signed-out user (`null`) is never permission-blocked here: the
 /// router's auth redirect is the signed-out guard, and the permission
@@ -37,17 +41,35 @@ class FeatureGate extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final module = featureModuleForRoute(route);
-    if (module == null) return child;
+    final capability = routeCapability(route);
+    if (module == null) {
+      // Not a toggleable module: no feature flag applies, but a
+      // capability mapping still gates the route (D135).
+      if (capability == null) return child;
+      final user = ref.watch(authProvider);
+      if (user != null) {
+        final branchId = ref.watch(activeBranchProvider).id;
+        if (!permissionService.canInBranch(user, capability, branchId)) {
+          return _NoPermissionScreen(
+            title: _titleForRoute(route),
+            subtitle: _subtitleForRoute(route),
+            capability: capability,
+            user: user,
+          );
+        }
+      }
+      return child;
+    }
     final enabled = ref.watch(featureConfigProvider).contains(module.key);
     if (!enabled) return _ModuleDisabledScreen(module: module);
-    final capability = routeCapability(route);
     if (capability != null) {
       final user = ref.watch(authProvider);
       if (user != null) {
         final branchId = ref.watch(activeBranchProvider).id;
         if (!permissionService.canInBranch(user, capability, branchId)) {
           return _NoPermissionScreen(
-            module: module,
+            title: module.title,
+            subtitle: module.description,
             capability: capability,
             user: user,
           );
@@ -56,6 +78,44 @@ class FeatureGate extends ConsumerWidget {
     }
     return child;
   }
+}
+
+/// Display title for a non-module gated route (D135). Prefix-aware:
+/// `/branches/:id` is still Branch Management.
+String _titleForRoute(String route) {
+  if (route == '/branches' || route.startsWith('/branches/')) {
+    return 'Branch Management';
+  }
+  if (route == '/audit-log' || route.startsWith('/audit-log/')) {
+    return 'Audit Log';
+  }
+  if (route == '/backup' || route.startsWith('/backup/')) {
+    return 'Backup & Restore';
+  }
+  if (route == '/inventory/adjustments' ||
+      route.startsWith('/inventory/adjustments/')) {
+    return 'Adjustment Approvals';
+  }
+  return 'This screen';
+}
+
+/// Display subtitle for a non-module gated route (D135).
+String _subtitleForRoute(String route) {
+  if (route == '/branches' || route.startsWith('/branches/')) {
+    return 'Own branches and franchises — list, detail, franchise '
+        'settings, commission / royalty.';
+  }
+  if (route == '/audit-log' || route.startsWith('/audit-log/')) {
+    return 'Filterable log of all important actions.';
+  }
+  if (route == '/backup' || route.startsWith('/backup/')) {
+    return 'Backup status, manual backup, restore (admin only).';
+  }
+  if (route == '/inventory/adjustments' ||
+      route.startsWith('/inventory/adjustments/')) {
+    return 'Review and approve stock adjustments.';
+  }
+  return '';
 }
 
 class _ModuleDisabledScreen extends StatelessWidget {
@@ -108,12 +168,14 @@ class _ModuleDisabledScreen extends StatelessWidget {
 /// anything about other users.
 class _NoPermissionScreen extends StatelessWidget {
   const _NoPermissionScreen({
-    required this.module,
+    required this.title,
+    required this.subtitle,
     required this.capability,
     required this.user,
   });
 
-  final FeatureModuleConfig module;
+  final String title;
+  final String subtitle;
   final String capability;
   final AppUser user;
 
@@ -125,8 +187,8 @@ class _NoPermissionScreen extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SectionHeader(
-            title: module.title,
-            subtitle: module.description,
+            title: title,
+            subtitle: subtitle,
             actionLabel: 'Back to Dashboard',
             actionIcon: Icons.dashboard_outlined,
             onAction: () => context.go('/dashboard'),
@@ -134,7 +196,7 @@ class _NoPermissionScreen extends StatelessWidget {
           const SizedBox(height: 16),
           PharmaEmptyState(
             icon: Icons.lock_outline,
-            title: 'No permission for ${module.title}',
+            title: 'No permission for $title',
             message:
                 'Your role (${user.roleLabel}) does not have the '
                 '"$capability" permission for this branch (SRS §5.1). '

@@ -70,6 +70,15 @@ const roleCapabilities = <RoleCapability>[
   RoleCapability(key: 'stockReceive', label: 'Stock receive / count'),
   RoleCapability(key: 'stockAdjustReq', label: 'Stock adjustment (request)'),
   RoleCapability(key: 'stockAdjustApprove', label: 'Stock adjustment (approve)'),
+  // SRS §5.1 "Stock transfer (request/approve)" (Week 4 Day 2,
+  // D118): Super Admin none, Owner allowed, HO Admin allowed,
+  // Regional Mgr allowed, Branch Mgr own, Pharmacist none, Cashier
+  // none, Inventory Mgr own, Accountant none, Auditor read-only.
+  // The one capability covers the whole lifecycle (request, approve,
+  // dispatch, receive) — the SRS names no separate dispatch/receive
+  // row; the layer enforces the status order and approval
+  // separation instead.
+  RoleCapability(key: 'stockTransfer', label: 'Stock transfer (request/approve)'),
   RoleCapability(key: 'poManage', label: 'Purchase order create/approve'),
   RoleCapability(key: 'supplierPay', label: 'Supplier payment'),
   RoleCapability(key: 'khata', label: 'Customer credit (khata)'),
@@ -241,6 +250,22 @@ const rolePermissionMatrix = <String, List<RolePermission>>{
     RolePermission.none,
     RolePermission.none,
   ],
+  // SRS §5.1 "Stock transfer (request/approve)" (Week 4 Day 2,
+  // D118): Super Admin none, Owner allowed, HO Admin allowed,
+  // Regional Mgr allowed, Branch Mgr own, Pharmacist none, Cashier
+  // none, Inventory Mgr own, Accountant none, Auditor read-only.
+  'stockTransfer': [
+    RolePermission.none,
+    RolePermission.allowed,
+    RolePermission.allowed,
+    RolePermission.allowed,
+    RolePermission.own,
+    RolePermission.none,
+    RolePermission.none,
+    RolePermission.own,
+    RolePermission.none,
+    RolePermission.readOnly,
+  ],
   'poManage': [
     RolePermission.none,
     RolePermission.allowed,
@@ -396,6 +421,7 @@ IconData featureModuleIcon(String key) => switch (key) {
   'purchases' => Icons.shopping_cart_outlined,
   'prescriptions' => Icons.description_outlined,
   'reports' => Icons.bar_chart_outlined,
+  'finance' => Icons.account_balance_outlined,
   'notifications' => Icons.notifications_outlined,
   _ => Icons.extension_outlined,
 };

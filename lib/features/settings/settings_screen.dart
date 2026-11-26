@@ -5,17 +5,24 @@ import '../../core/services/branch_context.dart';
 import '../../core/theme/theme_mode_provider.dart';
 import '../../core/theme/white_label.dart';
 import '../../core/widgets/design_system.dart';
+import '../../core/widgets/sync_status_widget.dart';
 import '../../features/billing/receipt_printer.dart';
 import 'feature_config.dart';
+import 'org_settings.dart';
 import 'roles_permissions.dart';
 
 /// Settings (Day 7, SRS FR-SYS-05/06, D-29/30/31/34).
 ///
 /// Route `/settings`.
 ///
-/// Four tabs:
+/// Six tabs:
 /// - **General** — theme (light / dark / system), default branch,
 ///   demo-mode notes.
+/// - **Organization** (Week 4 Day 4, D134 — SRS D-34) — tax config,
+///   payment methods, receipt format, discount limits.
+/// - **Sync** (Week 4 Day 4, D134 — SRS D-34) — live sync status
+///   from the layer (pending queue + last sync), never a faked
+///   status.
 /// - **Branding** — white-label Brand Settings: organization name,
 ///   app name, receipt header, primary/secondary colours. Applying
 ///   rebrands the shell immediately (the theme follows the brand).
@@ -39,7 +46,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 6,
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -55,6 +62,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               isScrollable: true,
               tabs: [
                 Tab(text: 'General'),
+                Tab(text: 'Organization'),
+                Tab(text: 'Sync'),
                 Tab(text: 'Branding'),
                 Tab(text: 'Roles & Permissions'),
                 Tab(text: 'Features'),
@@ -65,6 +74,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               child: TabBarView(
                 children: [
                   _GeneralTab(),
+                  const _OrganizationTab(),
+                  const _SyncTab(),
                   const _BrandingTab(),
                   _RolesTab(highlightRole: _highlightRole,
                     onRoleChanged: (role) =>
@@ -185,6 +196,340 @@ class _GeneralTab extends ConsumerWidget {
                   'syncs between devices. Settings on this screen apply '
                   'for the session only — production persists them in '
                   'Firestore per organization.',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Organization (D-34) ----------------------------------------------
+
+/// Organization settings (Week 4 Day 4, D134 — SRS D-34): tax
+/// config, payment methods, receipt format, discount limits.
+/// Defaults are the behaviour the app already has (see
+/// `org_settings.dart`); nothing here invents a client rate.
+class _OrganizationTab extends ConsumerStatefulWidget {
+  const _OrganizationTab();
+
+  @override
+  ConsumerState<_OrganizationTab> createState() => _OrganizationTabState();
+}
+
+class _OrganizationTabState extends ConsumerState<_OrganizationTab> {
+  late final TextEditingController _taxController;
+  late final TextEditingController _footerController;
+  late final TextEditingController _lineCapController;
+  late final TextEditingController _billCapController;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = ref.read(orgSettingsProvider);
+    _taxController = TextEditingController(
+      text: '${settings.taxRatePercent}',
+    );
+    _footerController = TextEditingController(text: settings.receiptFooter);
+    _lineCapController = TextEditingController(
+      text: settings.maxLineDiscountPercent?.toString() ?? '',
+    );
+    _billCapController = TextEditingController(
+      text: settings.maxBillDiscountPercent?.toString() ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _taxController.dispose();
+    _footerController.dispose();
+    _lineCapController.dispose();
+    _billCapController.dispose();
+    super.dispose();
+  }
+
+  int? _parsePercent(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return null;
+    return int.tryParse(trimmed);
+  }
+
+  void _applyTax() {
+    final value = _parsePercent(_taxController.text);
+    if (value == null) {
+      setState(() => _error = 'Tax rate must be a whole number.');
+      return;
+    }
+    if (!ref.read(orgSettingsProvider.notifier).setTaxRate(value)) {
+      setState(() => _error = 'Tax rate must be between 0% and 100%.');
+      return;
+    }
+    setState(() => _error = null);
+  }
+
+  void _applyCap({
+    required TextEditingController controller,
+    required bool Function(int?) setter,
+    required String label,
+  }) {
+    final text = controller.text.trim();
+    if (text.isEmpty) {
+      setter(null);
+      setState(() => _error = null);
+      return;
+    }
+    final value = int.tryParse(text);
+    if (value == null) {
+      setState(() => _error = '$label must be a whole number.');
+      return;
+    }
+    if (!setter(value)) {
+      setState(() => _error = '$label must be between 0% and 100%.');
+      return;
+    }
+    setState(() => _error = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(orgSettingsProvider);
+    final notifier = ref.read(orgSettingsProvider.notifier);
+    final theme = Theme.of(context);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_error != null) ...[
+            PharmaErrorBox(errors: [_error!]),
+            const SizedBox(height: 16),
+          ],
+          PharmaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Tax config',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Default tax rate applied to taxable sales. The '
+                  'SRS names no tax rate, and the POS charges 0% '
+                  'today — so the default is 0%. The POS reads this '
+                  'rate for new bills (D136).',
+                ),
+                const SizedBox(height: 12),
+                PharmaTextField(
+                  controller: _taxController,
+                  label: 'Tax rate (%)',
+                  hintText: '0',
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => _applyTax(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          PharmaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Payment methods',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Which recorded payment methods the organization '
+                  'accepts (FR-POS-04 — payments are recorded, never '
+                  'processed, FR-POS-06). Cash, card and credit '
+                  '(khata) are what the POS offers today; bank '
+                  'transfer, JazzCash and Easypaisa start off.',
+                ),
+                const SizedBox(height: 8),
+                for (final method in OrgPaymentMethod.values)
+                  SwitchListTile(
+                    title: Text(orgPaymentMethodLabel(method)),
+                    value: settings.paymentMethods.contains(method),
+                    onChanged: (enabled) =>
+                        notifier.togglePaymentMethod(method, enabled),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          PharmaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Receipt format',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Paper width and footer line for printed receipts. '
+                  'The receipt header lives in Branding.',
+                ),
+                const SizedBox(height: 12),
+                DropdownButton<int>(
+                  key: const ValueKey('receipt-paper-width'),
+                  value: settings.receiptPaperWidthMm,
+                  items: [
+                    for (final width in receiptPaperWidthsMm)
+                      DropdownMenuItem(
+                        value: width,
+                        child: Text('$width mm thermal paper'),
+                      ),
+                  ],
+                  onChanged: (width) {
+                    if (width != null) {
+                      notifier.setReceiptPaperWidth(width);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                PharmaTextField(
+                  controller: _footerController,
+                  label: 'Receipt footer',
+                  hintText: 'e.g. Thank you for shopping with us',
+                  onChanged: (value) => notifier.setReceiptFooter(value),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          PharmaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Discount limits',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Maximum discounts in whole percent. Blank means '
+                  'no cap — the SRS names role-based limits '
+                  '(FR-POS-03) but gives no numbers, and the POS '
+                  'enforces no cap today, so no number is invented '
+                  'here. Wiring the POS to enforce these caps is a '
+                  'follow-up (D134).',
+                ),
+                const SizedBox(height: 12),
+                PharmaTextField(
+                  controller: _lineCapController,
+                  label: 'Maximum line discount (%) — blank = no limit',
+                  hintText: 'Leave blank for no limit',
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => _applyCap(
+                    controller: _lineCapController,
+                    setter: (value) => notifier.setMaxLineDiscountPercent(
+                      value,
+                    ),
+                    label: 'Maximum line discount',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                PharmaTextField(
+                  controller: _billCapController,
+                  label: 'Maximum bill discount (%) — blank = no limit',
+                  hintText: 'Leave blank for no limit',
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => _applyCap(
+                    controller: _billCapController,
+                    setter: (value) => notifier.setMaxBillDiscountPercent(
+                      value,
+                    ),
+                    label: 'Maximum bill discount',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Sync (D-34) ---------------------------------------------------------
+
+/// Sync status (Week 4 Day 4, D134 — SRS D-34): the live sync state
+/// from the layer — the same `syncStatusProvider` the sync chip on
+/// the POS / inventory / orders screens reads (D108). Pending count
+/// and last-sync time are real layer values; when nothing has synced
+/// yet the screen says "Never synced" instead of inventing a time.
+class _SyncTab extends ConsumerWidget {
+  const _SyncTab();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final statusAsync = ref.watch(syncStatusProvider);
+    final theme = Theme.of(context);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          PharmaCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Sync status',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Live from the sync queue (D108). Offline POS and '
+                  'stock operations queue locally and sync when '
+                  'connectivity returns (§2.5); nothing here is a '
+                  'stored or faked status.',
+                ),
+                const SizedBox(height: 12),
+                const SyncStatusChip(),
+                const SizedBox(height: 12),
+                statusAsync.when(
+                  loading: () => const Text('Reading sync queue…'),
+                  error: (error, _) =>
+                      Text('Sync status unavailable: $error'),
+                  data: (status) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        status.available
+                            ? '${status.pendingCount} operation(s) pending sync'
+                            : 'Sync status unavailable',
+                      ),
+                      Text(status.lastSyncLabel),
+                      if (status.pendingOperations.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Pending operations',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        for (final op in status.pendingOperations)
+                          Text(
+                            '• ${op.kind.name} ${op.entityType} '
+                            '${op.entityId} (${op.status.name})',
+                          ),
+                      ],
+                    ],
+                  ),
                 ),
               ],
             ),

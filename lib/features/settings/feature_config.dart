@@ -87,6 +87,13 @@ const featureModules = <FeatureModuleConfig>[
     route: '/reports',
   ),
   FeatureModuleConfig(
+    key: 'finance',
+    title: 'Finance',
+    description:
+        'Cashbook, payables/receivables aging, P&L and branch statements.',
+    route: '/finance',
+  ),
+  FeatureModuleConfig(
     key: 'staff',
     title: 'Staff & HR',
     description:
