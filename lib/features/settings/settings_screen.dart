@@ -156,7 +156,11 @@ class _GeneralTab extends ConsumerWidget {
                   'branches from the top bar at any time.',
                 ),
                 const SizedBox(height: 8),
+                // Week 8 Day 2 (D177): isExpanded (the D153/D162
+                // trap) — the branch name is wider than the 390px
+                // card line without it.
                 DropdownButton<String>(
+                  isExpanded: true,
                   value: branch.id,
                   items: [
                     for (final b in demoBranches)
