@@ -57,23 +57,31 @@ class _RiderListScreenState extends ConsumerState<RiderListScreen> {
             spacing: 8,
             runSpacing: 8,
             children: [
-              DropdownButton<String?>(
-                key: const ValueKey('rider-branch-filter'),
-                value: _branchFilter,
-                hint: const Text('All branches'),
-                items: [
-                  const DropdownMenuItem<String?>(
-                    value: null,
-                    child: Text('All branches'),
-                  ),
-                  for (final branch in demoBranches)
-                    DropdownMenuItem<String?>(
-                      value: branch.id,
-                      child: Text(branch.name),
+              // Week 8 Day 2 (D177): capped at 280px with isExpanded
+              // (the D153/D162 trap) — same branch-name overflow as
+              // the transfer list; the cap keeps the desktop filters
+              // side by side.
+              SizedBox(
+                width: 280,
+                child: DropdownButton<String?>(
+                  key: const ValueKey('rider-branch-filter'),
+                  isExpanded: true,
+                  value: _branchFilter,
+                  hint: const Text('All branches'),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('All branches'),
                     ),
-                ],
-                onChanged: (selected) =>
-                    setState(() => _branchFilter = selected),
+                    for (final branch in demoBranches)
+                      DropdownMenuItem<String?>(
+                        value: branch.id,
+                        child: Text(branch.name),
+                      ),
+                  ],
+                  onChanged: (selected) =>
+                      setState(() => _branchFilter = selected),
+                ),
               ),
               for (final availability in [
                 null,

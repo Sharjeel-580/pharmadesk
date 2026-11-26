@@ -78,13 +78,18 @@ class _RiderDetailScreenState extends ConsumerState<RiderDetailScreen> {
             onAction: () => context.go('/riders'),
           ),
           const SizedBox(height: 16),
-          Row(
+          // Week 8 Day 2 (D177): a Wrap, not a Row — the
+          // availability badge plus the 'Demo — sample rider' badge
+          // are wider than the 390px line in the test font; on
+          // desktop they still sit on one line.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               StatusBadge(
                 label: availability.label,
                 kind: availability.kind,
               ),
-              const SizedBox(width: 8),
               const StatusBadge(
                 label: 'Demo — sample rider',
                 kind: StatusKind.neutral,
