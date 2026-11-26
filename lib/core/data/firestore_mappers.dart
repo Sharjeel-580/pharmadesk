@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
 import '../../models/goods_receipt.dart';
@@ -15,6 +16,7 @@ import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
+import '../../models/stock_transfer.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
 import '../../models/supplier.dart';
@@ -472,6 +474,7 @@ Map<String, dynamic> medicineToFirestore(
       'sellingPrice': medicine.priceMinor,
       'purchasePrice': medicine.purchasePriceMinor,
       'barcode': medicine.barcode,
+      'location': medicine.location,
       'prescriptionClass': medicine.requiresPrescription
           ? 'prescription'
           : 'otc',
@@ -503,6 +506,7 @@ Medicine medicineFromFirestore(String id, Map<String, dynamic> doc) {
         (doc['requiresPrescription'] as bool? ?? false),
     imageUrl: doc['imagePath'] as String? ?? doc['imageUrl'] as String?,
     barcode: doc['barcode'] as String?,
+    location: doc['location'] as String?,
     createdAt: _parseDate(doc['createdAt']),
     updatedAt: _parseDate(doc['updatedAt']),
   );
@@ -854,6 +858,8 @@ SupplierLedgerEntry supplierLedgerEntryFromFirestore(
 
 /// Rider doc (§3 `branches/{branchId}/riders`): §3 `status` is a
 /// string (`active` / `inactive`); `currentOrderId` is an extra.
+/// `branchId` is a Week 4 Day 2 extra (D119) — the rider's home
+/// branch, carried on the doc like the employees extras in D99.
 Map<String, dynamic> riderToFirestore(
   Rider rider, {
   required String orgId,
@@ -867,6 +873,7 @@ Map<String, dynamic> riderToFirestore(
       'vehicle': rider.vehicle,
       'status': rider.active ? 'active' : 'inactive',
       'currentOrderId': rider.currentOrderId,
+      'branchId': rider.branchId ?? branchId,
     },
     orgId: orgId,
     branchId: branchId,
@@ -886,8 +893,38 @@ Rider riderFromFirestore(String id, Map<String, dynamic> doc) {
         (doc['status'] as String? ?? 'active') != 'inactive' &&
         (doc['active'] as bool? ?? true),
     currentOrderId: doc['currentOrderId'] as String?,
+    branchId: doc['branchId'] as String?,
     createdAt: _parseDate(doc['createdAt']),
   );
+}
+
+// -- Stock transfers ------------------------------------------------------
+
+/// Stock transfer doc (§3 `branches/{fromBranchId}/stockTransfers`,
+/// Week 4 Day 2, D118/D120): `transferNumber`, `items` (embedded
+/// lines), `note`, the four actor stamps and `dispatchAllocations`
+/// are extras over the §3 contract, which named only the branch ids,
+/// the status and the request/approve actors — see the schema notes.
+Map<String, dynamic> stockTransferToFirestore(
+  StockTransfer transfer, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    transfer.toMap(),
+    orgId: orgId,
+    branchId: transfer.fromBranchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/stockTransfers', doc);
+  return doc;
+}
+
+StockTransfer stockTransferFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  return StockTransfer.fromMap(id, doc);
 }
 
 // -- Prescriptions --------------------------------------------------------
@@ -1243,6 +1280,32 @@ Expense expenseFromFirestore(String id, Map<String, dynamic> doc) {
     approvedBy: doc['approvedBy'] as String?,
     createdAt: _parseDate(doc['createdAt']),
   );
+}
+
+/// Daily cashbook closing doc (Week 4 Day 3, D126 — §3
+/// `branches/{branchId}/dailyClosings`). The model's `toMap` already
+/// uses the contract field names, so the mapper only stamps the
+/// document and validates it.
+Map<String, dynamic> dailyClosingToFirestore(
+  DailyClosing closing, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    closing.toMap(),
+    orgId: orgId,
+    branchId: closing.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/dailyClosings', doc);
+  return doc;
+}
+
+DailyClosing dailyClosingFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  return DailyClosing.fromMap(id, doc);
 }
 
 /// Local transaction type → §3 snake_case.

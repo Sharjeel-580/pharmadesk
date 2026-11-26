@@ -62,6 +62,7 @@ class RepositoryBundle {
     required this.prescriptions,
     required this.purchaseOrders,
     required this.riders,
+    required this.stockTransfers,
     required this.staff,
     required this.attendance,
     required this.shifts,
@@ -71,6 +72,7 @@ class RepositoryBundle {
     required this.goodsReceipts,
     required this.salary,
     required this.reportCounters,
+    required this.dailyClosings,
     required this.auth,
     required this.photoUploader,
   });
@@ -86,6 +88,10 @@ class RepositoryBundle {
   final PrescriptionRepository prescriptions;
   final PurchaseOrderRepository purchaseOrders;
   final RiderRepository riders;
+
+  /// Week 4 Day 2 (D118): stock transfers join the bundle the same
+  /// way as the Day 3 repos (D101 pattern).
+  final StockTransferRepository stockTransfers;
 
   /// Week 3 Day 1 (D101): the six Day 5 repos join the bundle —
   /// Firestore implementations behind the same interfaces, mock
@@ -107,6 +113,10 @@ class RepositoryBundle {
   /// demo data, the Firestore implementation reads the rollup
   /// Function's output docs.
   final ReportCounterRepository reportCounters;
+
+  /// Week 4 Day 3 (D126): daily cashbook closings join the bundle
+  /// the same way.
+  final DailyClosingRepository dailyClosings;
 
   final AuthRepository auth;
   final PrescriptionPhotoUploader photoUploader;
@@ -179,6 +189,10 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      stockTransfers: FirestoreStockTransferRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       staff: FirestoreStaffRepository(
         transport: firestoreTransport,
         organizationId: organizationId,
@@ -215,6 +229,10 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      dailyClosings: FirestoreDailyClosingRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       auth: firebaseAuth == null
           ? MockAuthRepository()
           : FirebaseAuthRepository(firebaseAuth: firebaseAuth),
@@ -244,6 +262,7 @@ RepositoryBundle createRepositoryBundle({
     prescriptions: MockPrescriptionRepository(),
     purchaseOrders: MockPurchaseOrderRepository(),
     riders: MockRiderRepository(),
+    stockTransfers: MockStockTransferRepository(),
     staff: MockStaffRepository(),
     attendance: MockAttendanceRepository(),
     shifts: MockShiftRepository(),
@@ -259,6 +278,7 @@ RepositoryBundle createRepositoryBundle({
       inventory: mockInventory,
       medicines: mockMedicines,
     ),
+    dailyClosings: MockDailyClosingRepository(),
     auth: MockAuthRepository(),
     photoUploader: LocalPrescriptionPhotoUploader(),
   );

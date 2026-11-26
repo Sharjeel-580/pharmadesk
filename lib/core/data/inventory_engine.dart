@@ -816,6 +816,137 @@ class InventoryEngine {
     return movements;
   }
 
+  /// Dispatches reserved stock out of the source branch for a stock
+  /// transfer (Week 4 Day 2, D118).
+  ///
+  /// Mirrors [confirm] but books `transfer_out` movements (negative
+  /// quantity, reference type `stockTransfer`) instead of `sale`
+  /// movements: the held units leave the shelf, the batch snapshots
+  /// and counters drop together, one ledger entry + one audit entry
+  /// per batch chunk. The caller applies the same decrements to the
+  /// repository (its `adjustStock`) and records the FEFO allocations
+  /// on the transfer, so the destination receive can recreate the
+  /// batches exactly.
+  Future<List<StockMovement>> transferOut({
+    required List<StockReservation> reservations,
+    required String transferId,
+    required String userId,
+    required String actorName,
+  }) async {
+    final movements = <StockMovement>[];
+    for (final reservation in reservations) {
+      final held = _reservations[reservation.id];
+      if (held == null || held.status != ReservationStatus.reserved) {
+        continue;
+      }
+      final batch = _batches[held.batchId];
+      if (batch == null) continue;
+      final before = batch.quantity;
+      final after = before - held.quantity;
+      _batches[held.batchId] = batch.copyWith(quantity: after, updatedAt: now);
+      final counter = counterFor(held.medicineId);
+      _counters[held.medicineId] = counter.copyWith(
+        quantityOnHand: counter.quantityOnHand - held.quantity,
+        quantityReserved: counter.quantityReserved - held.quantity,
+      );
+      _reservations[held.id] = held.copyWith(
+        status: ReservationStatus.confirmed,
+      );
+      final movement = ledger.append(
+        StockMovement.create(
+          organizationId: organizationId,
+          branchId: held.branchId,
+          medicineId: held.medicineId,
+          batchId: held.batchId,
+          type: StockMovementType.transferOut,
+          quantity: -held.quantity,
+          unitCostMinor: batch.costMinor,
+          referenceType: 'stockTransfer',
+          referenceId: transferId,
+          userId: userId,
+          reason: 'Transfer dispatched — $transferId',
+          createdAt: now,
+        ),
+      );
+      movements.add(movement);
+      await audit.write(
+        AuditLogEntry.stockMovement(
+          organizationId: organizationId,
+          branchId: held.branchId,
+          userId: userId,
+          actorName: actorName,
+          movementType: 'transfer_out',
+          batchId: held.batchId,
+          medicineId: held.medicineId,
+          quantityDelta: -held.quantity,
+          quantityBefore: before,
+          quantityAfter: after,
+          referenceId: transferId,
+        ),
+      );
+    }
+    return movements;
+  }
+
+  /// Books transferred stock into the destination branch (Week 4 Day
+  /// 2, D118).
+  ///
+  /// Mirrors [receive] but books `transfer_in` movements (positive
+  /// quantity, reference type `stockTransfer`) instead of `receive`
+  /// movements: the batch joins `_batches`, the per-medicine counter
+  /// rises, one ledger movement + one audit entry per batch. [batches]
+  /// are the rows the repository just created at the destination, so
+  /// their ids exist.
+  Future<List<StockMovement>> transferIn({
+    required List<InventoryItem> batches,
+    required String transferId,
+    required String userId,
+    required String actorName,
+    String? reason,
+  }) async {
+    final movements = <StockMovement>[];
+    for (final batch in batches) {
+      _batches[batch.id] = batch;
+      final counter = counterFor(batch.medicineId);
+      _counters[batch.medicineId] = counter.copyWith(
+        quantityOnHand: counter.quantityOnHand + batch.quantity,
+      );
+      final movement = ledger.append(
+        StockMovement.create(
+          organizationId: organizationId,
+          branchId: batch.branchId,
+          medicineId: batch.medicineId,
+          batchId: batch.id,
+          type: StockMovementType.transferIn,
+          quantity: batch.quantity,
+          unitCostMinor: batch.costMinor,
+          referenceType: 'stockTransfer',
+          referenceId: transferId,
+          userId: userId,
+          reason: reason ?? 'Transfer received — $transferId',
+          createdAt: now,
+        ),
+      );
+      movements.add(movement);
+      await audit.write(
+        AuditLogEntry.stockMovement(
+          organizationId: organizationId,
+          branchId: batch.branchId,
+          userId: userId,
+          actorName: actorName,
+          movementType: 'transfer_in',
+          batchId: batch.id,
+          medicineId: batch.medicineId,
+          quantityDelta: batch.quantity,
+          quantityBefore: 0,
+          quantityAfter: batch.quantity,
+          referenceId: transferId,
+        ),
+      );
+    }
+    return movements;
+  }
+
   /// Open reservations for one sale key (used by the data layer to
   /// apply the same decrements to the repository).
   List<StockReservation> reservationsForSale(String saleKey) =>

@@ -115,6 +115,7 @@ class FirestoreSchema {
   static const String financialTransactions = 'financialTransactions';
   static const String notifications = 'notifications';
   static const String cashDrawers = 'cashDrawers';
+  static const String dailyClosings = 'dailyClosings';
   static const String counters = 'counters';
 
   // -- Organization subcollections ------------------------------------
@@ -163,6 +164,10 @@ class FirestoreSchema {
   static String saleItemsPath(String branchId, String saleId) =>
       nestedCollection(branchId, sales, saleId, saleItems);
 
+  /// `branches/{branchId}/sales/{saleId}/payments` (D137 — SRS §3.4).
+  static String salePaymentsPath(String branchId, String saleId) =>
+      nestedCollection(branchId, sales, saleId, salePayments);
+
   static String saleReturnsPath(String branchId) =>
       branchCollection(branchId, saleReturns);
 
@@ -207,6 +212,13 @@ class FirestoreSchema {
 
   static String stockTransactionsPath(String branchId) =>
       branchCollection(branchId, stockTransactions);
+
+  /// `branches/{branchId}/stockTransfers` (Week 4 Day 2, D118).
+  static String stockTransfersPath(String branchId) =>
+      branchCollection(branchId, stockTransfers);
+
+  static String stockTransferDocPath(String branchId, String transferId) =>
+      branchDocPath(branchId, stockTransfers, transferId);
 
   static String customerLedgerPath(String branchId, String customerId) =>
       nestedCollection(branchId, customers, customerId, customerLedger);
@@ -348,6 +360,11 @@ class FirestoreSchema {
       FirestoreField('packSize', 'string'),
       FirestoreField('sku', 'string', notes: 'Unique per org'),
       FirestoreField('barcode', 'string'),
+      FirestoreField(
+        'location',
+        'string',
+        notes: 'Shelf / bin — default storage location (D138)',
+      ),
       FirestoreField('purchasePrice', 'int (paisa)', required: true),
       FirestoreField('sellingPrice', 'int (paisa)', required: true),
       FirestoreField('taxRateBps', 'int'),
@@ -431,15 +448,56 @@ class FirestoreSchema {
       FirestoreField('approvedBy', 'string'),
     ],
     'branches/{branchId}/stockTransfers': [
+      FirestoreField('transferNumber', 'string', required: true),
       FirestoreField('fromBranchId', 'string', required: true),
       FirestoreField('toBranchId', 'string', required: true),
       FirestoreField(
         'status',
         'string',
-        notes: 'requested / approved / dispatched / received / cancelled',
+        notes:
+            'requested / approved / dispatched / received / rejected / '
+            'cancelled — Week 4 Day 2 (D120): `rejected` is added to '
+            'the SRS contract, which listed no rejection state even '
+            'though approval implies one',
       ),
+      FirestoreField(
+        'items',
+        'map[]',
+        required: true,
+        notes:
+            'Embedded lines ({medicineId, medicineName, quantity}) — '
+            'Week 4 Day 2 (D120): the SRS contract named no items '
+            'shape, so the lines live on the transfer doc instead of '
+            'a subcollection (a transfer is one small document)',
+      ),
+      FirestoreField('note', 'string'),
       FirestoreField('requestedBy', 'string'),
       FirestoreField('approvedBy', 'string'),
+      FirestoreField(
+        'dispatchedBy',
+        'string',
+        notes: 'Added Week 4 Day 2 (D120)',
+      ),
+      FirestoreField(
+        'receivedBy',
+        'string',
+        notes: 'Added Week 4 Day 2 (D120)',
+      ),
+      FirestoreField(
+        'dispatchAllocations',
+        'map[]',
+        notes:
+            'Added Week 4 Day 2 (D120): the FEFO allocations '
+            'recorded at dispatch ({medicineId, batchId, batchNo, '
+            'quantity, mfgDate, expiryDate, unitCostMinor}) — the '
+            'receive step recreates the destination batches from '
+            'these, so it never guesses which batch the units left in',
+      ),
+      FirestoreField(
+        'isDemo',
+        'bool',
+        notes: 'True for seeded sample transfers (D118)',
+      ),
     ],
     'branches/{branchId}/stockCounts': [
       FirestoreField('status', 'string', notes: 'open / submitted / approved'),
@@ -617,6 +675,14 @@ class FirestoreSchema {
       FirestoreField('phone', 'string'),
       FirestoreField('vehicle', 'string'),
       FirestoreField('status', 'string'),
+      FirestoreField(
+        'branchId',
+        'string',
+        notes:
+            'Extra (Week 4 Day 2, D119): the rider\'s home branch — '
+            'riders live in a branch-scoped collection, so the doc '
+            'carries its branch like the employees extras in D99',
+      ),
     ],
     'branches/{branchId}/purchaseOrders': [
       FirestoreField('poNumber', 'string', required: true),
@@ -841,6 +907,23 @@ class FirestoreSchema {
       FirestoreField('actualClosing', 'int (paisa)'),
       FirestoreField('difference', 'int (paisa)'),
       FirestoreField('status', 'string', notes: 'open / closed'),
+    ],
+    // Daily cashbook closings (Week 4 Day 3, D126 — new collection,
+    // not in the SRS §3 list: the SRS names daily closing (FR-FIN-02)
+    // but gives it no collection; `cashDrawers` is the physical
+    // drawer count (expected vs actual cash), while a closing is the
+    // cashbook day's snapshot — totals in/out + carried balance).
+    // Append-only: one doc per (branch, day), never edited.
+    'branches/{branchId}/dailyClosings': [
+      FirestoreField('date', 'timestamp', required: true),
+      FirestoreField('totalIncome', 'int (paisa)', required: true),
+      FirestoreField('totalExpense', 'int (paisa)', required: true),
+      FirestoreField('openingBalance', 'int (paisa)', required: true),
+      FirestoreField('closingBalance', 'int (paisa)', required: true),
+      FirestoreField('closedBy', 'string'),
+      FirestoreField('closedAt', 'timestamp'),
+      FirestoreField('note', 'string'),
+      FirestoreField('isDemo', 'bool'),
     ],
     'branches/{branchId}/counters': [
       FirestoreField('value', 'int', required: true),

@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
 import '../../models/goods_receipt.dart';
@@ -17,6 +18,7 @@ import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
+import '../../models/stock_transfer.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
@@ -85,6 +87,7 @@ const _invoicesCounterId = 'invoices';
 const _ordersCounterId = 'orders';
 const _purchaseOrdersCounterId = 'purchaseOrders';
 const _goodsReceiptsCounterId = 'goodsReceipts';
+const _stockTransfersCounterId = 'stockTransfers';
 
 /// Shared helpers for the Firestore repositories.
 mixin _FirestoreRepositoryHelper {
@@ -249,6 +252,21 @@ class FirestoreMedicineRepository
     );
     if (docs.isEmpty) return null;
     return medicineFromFirestore(docs.first.id, docs.first.data);
+  }
+
+  @override
+  Future<Medicine> updateMedicine(Medicine medicine) async {
+    final path = '${FirestoreSchema.medicines}/${medicine.id}';
+    final existing = await transport.getDocument(path);
+    if (existing == null) {
+      throw ArgumentError('No medicine with id "${medicine.id}".');
+    }
+    final doc = medicineToFirestore(medicine, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (the mapper stamps
+    // "now" — that is only correct for creates, D138).
+    doc['createdAt'] = existing['createdAt'];
+    await transport.setDocument(path, doc);
+    return medicine.copyWith(updatedAt: DateTime.now());
   }
 }
 
@@ -602,6 +620,34 @@ class FirestoreInventoryRepository
       transactionType: 'adjustment',
       computeNewQuantity: (_) => countedQty,
       signedQuantityBuilder: (old) => countedQty - old.quantity,
+    );
+  }
+
+  @override
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
+  }) async {
+    // A status change moves no stock, so no stock transaction is
+    // written — the audit entry is the layer's job (D140), and the
+    // sync payload is one batch-doc update enqueued by the layer.
+    final found = await findInBranches(FirestoreSchema.batches, batchId);
+    if (found == null) {
+      throw ArgumentError('No batch with id "$batchId".');
+    }
+    final batchPath = FirestoreSchema.branchDocPath(
+      found.branchId,
+      FirestoreSchema.batches,
+      batchId,
+    );
+    await transport.updateDocument(batchPath, {
+      'status': status.name,
+      'updatedAt': Timestamp.fromDate(DateTime.now()),
+    });
+    return batchFromFirestore(found.doc.id, found.doc.data).copyWith(
+      status: status,
+      updatedAt: DateTime.now(),
     );
   }
 
@@ -1478,6 +1524,147 @@ class FirestoreRiderRepository
     if (found == null) return null;
     return riderFromFirestore(found.doc.id, found.doc.data);
   }
+
+  @override
+  Future<void> updateRider(Rider rider) async {
+    final found = await findInBranches(FirestoreSchema.riders, rider.id);
+    if (found == null) {
+      throw ArgumentError('No rider with id "${rider.id}".');
+    }
+    final branchId = rider.branchId ?? found.branchId;
+    final doc = riderToFirestore(
+      rider,
+      orgId: organizationId,
+      branchId: branchId,
+    );
+    // A rewrite keeps the original `createdAt` (the mapper stamps
+    // "now" — that is only correct for creates).
+    doc['createdAt'] = found.doc.data['createdAt'];
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(branchId, FirestoreSchema.riders, rider.id),
+      doc,
+    );
+  }
+}
+
+// -- Stock transfers (Week 4 Day 2, D118) ---------------------------------
+
+/// Firestore stock transfers: one doc per transfer under the source
+/// branch (`branches/{fromBranchId}/stockTransfers/{id}`), lines and
+/// dispatch allocations embedded on the doc (D120). Same conventions
+/// as the Day 3 repos (D73): a caller-supplied non-empty id is the
+/// doc id (D65 pattern), the transfer number comes from the
+/// per-branch counter, and a rewrite keeps the original `createdAt`.
+class FirestoreStockTransferRepository
+    with _FirestoreRepositoryHelper
+    implements StockTransferRepository {
+  FirestoreStockTransferRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<StockTransfer>> getTransfers({String? branchId}) async {
+    final transfers = <StockTransfer>[];
+    final branches = branchId == null
+        ? await branchIds()
+        : [branchId];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.stockTransfersPath(id),
+      );
+      transfers.addAll([
+        for (final doc in docs)
+          stockTransferFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    if (branchId != null) {
+      // A branch-scoped read also returns transfers where this
+      // branch is the destination — those live under the OTHER
+      // branch's collection, so they are fetched by scanning the
+      // org's branches and filtering (same shape as the mock).
+      final seen = {for (final t in transfers) t.id};
+      for (final id in await branchIds()) {
+        if (id == branchId) continue;
+        final docs = await fetchAll(
+          FirestoreSchema.stockTransfersPath(id),
+        );
+        for (final doc in docs) {
+          final transfer = stockTransferFromFirestore(doc.id, doc.data);
+          if (transfer.toBranchId == branchId && !seen.contains(transfer.id)) {
+            transfers.add(transfer);
+            seen.add(transfer.id);
+          }
+        }
+      }
+    }
+    return transfers;
+  }
+
+  @override
+  Future<StockTransfer?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.stockTransfers, id);
+    if (found == null) return null;
+    return stockTransferFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<StockTransfer> createTransfer(StockTransfer transfer) async {
+    final docId = transfer.id.isNotEmpty
+        ? transfer.id
+        : transport.newDocumentId(
+            FirestoreSchema.stockTransfersPath(transfer.fromBranchId),
+          );
+    // Client id = doc id (D65 pattern): a retry returns the original.
+    final existing = await transport.getDocument(
+      FirestoreSchema.stockTransferDocPath(transfer.fromBranchId, docId),
+    );
+    if (existing != null) {
+      return stockTransferFromFirestore(docId, existing);
+    }
+    final sequence = await nextCounterValue(
+      transfer.fromBranchId,
+      _stockTransfersCounterId,
+    );
+    final fromCode = await branchCode(transfer.fromBranchId);
+    final toCode = await branchCode(transfer.toBranchId);
+    final numbered = transfer.copyWith(
+      id: docId,
+      transferNumber: transfer.transferNumber.isEmpty
+          ? 'TR-$fromCode-$toCode-$sequence'
+          : transfer.transferNumber,
+    );
+    final doc = stockTransferToFirestore(numbered, orgId: organizationId);
+    await transport.setDocument(
+      FirestoreSchema.stockTransferDocPath(transfer.fromBranchId, docId),
+      doc,
+    );
+    return numbered;
+  }
+
+  @override
+  Future<void> updateTransfer(StockTransfer transfer) async {
+    final found = await findInBranches(
+      FirestoreSchema.stockTransfers,
+      transfer.id,
+    );
+    if (found == null) {
+      throw ArgumentError('No transfer with id "${transfer.id}".');
+    }
+    final doc = stockTransferToFirestore(transfer, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (the mapper stamps
+    // "now" — that is only correct for creates).
+    doc['createdAt'] = found.doc.data['createdAt'];
+    await transport.setDocument(
+      FirestoreSchema.stockTransferDocPath(found.branchId, transfer.id),
+      doc,
+    );
+  }
 }
 
 // -- Staff & HR (Week 3 Day 1, D100/D101) ---------------------------------
@@ -1967,7 +2154,12 @@ class FirestoreFinancialTransactionRepository
     if (existing != null) {
       return financialTransactionFromFirestore(docId, existing);
     }
-    final created = txn.copyWith(id: docId, createdAt: DateTime.now());
+    final created = txn.copyWith(
+      id: docId,
+      // Week 4 Day 3 (D125): keep a caller-supplied `createdAt` —
+      // a backdated cashbook income entry lands on its entry date.
+      createdAt: txn.createdAt ?? DateTime.now(),
+    );
     await transport.setDocument(
       FirestoreSchema.branchDocPath(
         txn.branchId,
@@ -1975,6 +2167,92 @@ class FirestoreFinancialTransactionRepository
         docId,
       ),
       financialTransactionToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+/// Daily cashbook closings (Week 4 Day 3, D126 — Firestore
+/// implementation of [DailyClosingRepository], D101 pattern).
+class FirestoreDailyClosingRepository
+    with _FirestoreRepositoryHelper
+    implements DailyClosingRepository {
+  FirestoreDailyClosingRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  @override
+  Future<List<DailyClosing>> getClosings({String? branchId}) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final closings = <DailyClosing>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(id, FirestoreSchema.dailyClosings),
+      );
+      closings.addAll([
+        for (final doc in docs)
+          dailyClosingFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return closings;
+  }
+
+  @override
+  Future<DailyClosing?> getClosing({
+    required String branchId,
+    required DateTime date,
+  }) async {
+    final closings = await getClosings(branchId: branchId);
+    for (final closing in closings) {
+      if (_sameDay(closing.date, date)) return closing;
+    }
+    return null;
+  }
+
+  @override
+  Future<DailyClosing> createClosing(DailyClosing closing) async {
+    if (closing.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a daily closing in Firestore.',
+      );
+    }
+    if (await getClosing(
+          branchId: closing.branchId,
+          date: closing.date,
+        ) !=
+        null) {
+      throw ArgumentError(
+        'A closing already exists for this branch and day.',
+      );
+    }
+    final docId = closing.id.isNotEmpty
+        ? closing.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              closing.branchId,
+              FirestoreSchema.dailyClosings,
+            ),
+          );
+    final created = closing.copyWith(
+      id: docId,
+      closedAt: closing.closedAt ?? DateTime.now(),
+    );
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        closing.branchId,
+        FirestoreSchema.dailyClosings,
+        docId,
+      ),
+      dailyClosingToFirestore(created, orgId: organizationId),
     );
     return created;
   }

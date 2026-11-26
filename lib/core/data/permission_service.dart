@@ -114,7 +114,48 @@ const _routeCapabilities = <String, String>{
   // everyone else (incl. Branch Manager) is stopped here. The
   // staff directory itself stays open: viewing staff is not a
   // matrix capability, only their salary figures are.
+  // Week 4 Day 2 (D118): the stock transfer screens are gated on
+  // `stockTransfer` — Owner / HO Admin / Regional Mgr may view,
+  // Branch Mgr + Inventory Mgr in their own branch, Auditor
+  // read-only; Pharmacist / Cashier / Accountant are stopped here.
+  // The inventory screen itself stays open: viewing stock is not a
+  // matrix capability (same posture as `/inventory` vs
+  // `stockAdjustApprove`).
+  // Week 4 Day 3 (D124): the finance screens are gated on the
+  // §5.1 finance capabilities — the cashbook on `financeEntry`
+  // (Owner / HO Admin / Accountant, Branch Mgr + Cashier in their
+  // own branch, Auditor read-only), aging + statements on
+  // `financeReports` (Owner / HO Admin / Accountant all branches,
+  // Regional + Branch Mgr own, Auditor read-only). The `/finance`
+  // hub itself is NOT in this map: it is flag-gated only, and each
+  // of its cards checks its capability in the active branch — a
+  // Cashier must reach the cashbook even though `financeReports`
+  // is `none` for them, and a Regional Manager must reach the
+  // statements even though `financeEntry` is `none` for them.
+  // (Longest-prefix-first order: the `/finance/...` entries must
+  // come before any shorter `/finance` entry — there is none.)
+  '/finance/cashbook': 'financeEntry',
+  '/finance/aging': 'financeReports',
+  '/finance/statements': 'financeReports',
+  '/inventory/transfers': 'stockTransfer',
+  // Week 4 Day 5 (D141): the adjustment queue is gated on
+  // `stockAdjustReq` — Owner / HO Admin, Branch Mgr + Inventory
+  // Mgr in their own branch. All approvers are also requesters,
+  // so no approver is locked out of the queue by this gate; the
+  // per-row Approve / Reject buttons apply the stricter
+  // `stockAdjustApprove` + not-the-requester check.
+  '/inventory/adjustments': 'stockAdjustReq',
   '/staff/salary': 'hrSalary',
+  // Week 4 Day 4 (D135): the system-hub screens are sub-screens of
+  // Settings for navigation (sidebar + More sheet), but they carry
+  // their own §5.1 capabilities at the route — `branches` (Owner /
+  // HO Admin, Auditor read-only), `auditLog` (Owner / HO Admin,
+  // Branch Mgr own, Auditor read-only) and `sysSettings` (Super
+  // Admin / Owner / HO Admin only). All three are existing matrix
+  // rows — no new capability invented.
+  '/branches': 'branches',
+  '/audit-log': 'auditLog',
+  '/backup': 'sysSettings',
 };
 
 /// The permission service for the app (pure — no state).
