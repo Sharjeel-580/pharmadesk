@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/attendance.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
+import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
 import '../../models/goods_receipt.dart';
@@ -15,6 +16,7 @@ import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
+import '../../models/stock_transfer.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
 import '../../models/supplier.dart';
@@ -40,6 +42,11 @@ abstract class MedicineRepository {
   Future<List<Medicine>> getMedicines({String? branchId});
   Future<Medicine?> getById(String id);
   Future<Medicine?> getByBarcode(String barcode);
+
+  /// Replaces a whole medicine (Week 4 Day 5, D138 — the location
+  /// edit). The id must already exist; throws [ArgumentError] when
+  /// it does not. Returns the saved medicine.
+  Future<Medicine> updateMedicine(Medicine medicine);
 }
 
 abstract class OrderRepository {
@@ -95,6 +102,17 @@ abstract class InventoryRepository {
     required String batchId,
     required int countedQty,
     String? note,
+  });
+
+  /// Sets a batch's status — used for quarantine / un-quarantine
+  /// (Week 4 Day 5, D140 — SRS D-11). `reason` is recorded for the
+  /// audit trail. The quantity is untouched: quarantine parks a
+  /// batch out of the saleable pool, it does not write it off.
+  /// Throws [ArgumentError] when the batch does not exist.
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
   });
 }
 
@@ -250,6 +268,47 @@ abstract class PurchaseOrderRepository {
 abstract class RiderRepository {
   Future<List<Rider>> getRiders();
   Future<Rider?> getById(String id);
+
+  /// Saves an edited rider (Week 4 Day 2, D121): assignment changes
+  /// the rider's `currentOrderId`, so the rider row must be writable
+  /// — until now the repository was read-only because nothing wrote
+  /// riders. The id must already exist; throws [ArgumentError] when
+  /// it does not.
+  Future<void> updateRider(Rider rider);
+}
+
+/// Stock transfers between branches (Week 4 Day 2, D118 — SRS D-16).
+///
+/// The mock keeps transfers in memory for the session, seeded from
+/// [demoTransfers] (one per live status). The Firestore implementation
+/// stores them under `branches/{fromBranchId}/stockTransfers/{id}`
+/// (schema paths already exist) — it lands with the Firebase-wiring
+/// chunk, the same Day 7 → Day 3 pattern as suppliers and purchase
+/// orders (D89). Screens depend only on this interface.
+///
+/// The repository owns the transfer NUMBER, not the layer: the mock
+/// mints `TR-{fromCode}-{toCode}-{seq}` and the Firestore
+/// implementation mints the same shape from the per-branch counter,
+/// so a transfer created through either backend carries a number.
+/// A caller-supplied non-empty id is kept as the document id (D65
+/// pattern — the layer passes the idempotency key as the id, so a
+/// retried create returns the existing document instead of writing
+/// a second one).
+abstract class StockTransferRepository {
+  /// All transfers, optionally scoped to one branch — a transfer
+  /// belongs to a branch when it is the source OR the destination,
+  /// so a branch-scoped read returns both directions.
+  Future<List<StockTransfer>> getTransfers({String? branchId});
+
+  Future<StockTransfer?> getById(String id);
+
+  /// Saves a new transfer (status Requested). The repository assigns
+  /// the transfer number and returns the saved transfer.
+  Future<StockTransfer> createTransfer(StockTransfer transfer);
+
+  /// Replaces a whole transfer (status changes, allocations, actor
+  /// stamps). The id must already exist.
+  Future<void> updateTransfer(StockTransfer transfer);
 }
 
 /// Staff directory (Week 2 Day 5, SRS §3.7 `employees` / §5.1
@@ -324,6 +383,26 @@ abstract class FinancialTransactionRepository {
   /// Appends one transaction. The repository assigns the id and
   /// returns the saved record.
   Future<FinancialTransaction> addTransaction(FinancialTransaction txn);
+}
+
+/// Daily cashbook closings (Week 4 Day 3, D126 — SRS §3.7
+/// `dailyClosings`, new collection; FR-FIN-02). Append-only — a
+/// closing is a snapshot record, never edited. One closing per
+/// (branch, day); a second close for the same day is rejected.
+abstract class DailyClosingRepository {
+  Future<List<DailyClosing>> getClosings({String? branchId});
+
+  /// The closing for one branch-day, or `null` when the day was
+  /// never closed.
+  Future<DailyClosing?> getClosing({
+    required String branchId,
+    required DateTime date,
+  });
+
+  /// Saves a new closing. The repository assigns the id and returns
+  /// the saved record. Throws [ArgumentError] when a closing already
+  /// exists for the same branch and day.
+  Future<DailyClosing> createClosing(DailyClosing closing);
 }
 
 /// Supplier payments (Week 2 Day 5, SRS §3.6 `supplierPayments`).
@@ -404,6 +483,17 @@ class MockMedicineRepository implements MedicineRepository {
       if (medicine.barcode == needle) return medicine;
     }
     return null;
+  }
+
+  @override
+  Future<Medicine> updateMedicine(Medicine medicine) async {
+    final index = demoMedicines.indexWhere((m) => m.id == medicine.id);
+    if (index == -1) {
+      throw ArgumentError('No medicine with id "${medicine.id}".');
+    }
+    final saved = medicine.copyWith(updatedAt: DateTime.now());
+    demoMedicines[index] = saved;
+    return saved;
   }
 }
 
@@ -569,6 +659,22 @@ class MockInventoryRepository implements InventoryRepository {
     }
     final updated = _items[index].copyWith(
       quantity: countedQty,
+      updatedAt: DateTime.now(),
+    );
+    _items[index] = updated;
+    return updated;
+  }
+
+  @override
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
+  }) async {
+    final index = _items.indexWhere((item) => item.id == batchId);
+    if (index == -1) throw ArgumentError('No batch with id "$batchId".');
+    final updated = _items[index].copyWith(
+      status: status,
       updatedAt: DateTime.now(),
     );
     _items[index] = updated;
@@ -784,15 +890,92 @@ class MockSupplierRepository implements SupplierRepository {
 }
 
 class MockRiderRepository implements RiderRepository {
+  /// Mutable copy of the seed riders: assignment writes
+  /// (`currentOrderId`) rewrite entries in place, exactly like a
+  /// Firestore update would (Week 4 Day 2, D121).
+  final List<Rider> _riders = List.of(demoRiders);
+
   @override
-  Future<List<Rider>> getRiders() async => List.unmodifiable(demoRiders);
+  Future<List<Rider>> getRiders() async => List.unmodifiable(_riders);
 
   @override
   Future<Rider?> getById(String id) async {
-    for (final rider in demoRiders) {
+    for (final rider in _riders) {
       if (rider.id == id) return rider;
     }
     return null;
+  }
+
+  @override
+  Future<void> updateRider(Rider rider) async {
+    final index = _riders.indexWhere((r) => r.id == rider.id);
+    if (index == -1) {
+      throw ArgumentError('No rider with id "${rider.id}".');
+    }
+    _riders[index] = rider;
+  }
+}
+
+/// Stock transfers (Week 4 Day 2, D118): mutable in-memory transfers
+/// for the session, seeded from [demoTransfers].
+class MockStockTransferRepository implements StockTransferRepository {
+  final List<StockTransfer> _transfers = List.of(demoTransfers);
+
+  @override
+  Future<List<StockTransfer>> getTransfers({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_transfers);
+    return List.unmodifiable(
+      _transfers.where(
+        (transfer) =>
+            transfer.fromBranchId == branchId ||
+            transfer.toBranchId == branchId,
+      ),
+    );
+  }
+
+  @override
+  Future<StockTransfer?> getById(String id) async {
+    for (final transfer in _transfers) {
+      if (transfer.id == id) return transfer;
+    }
+    return null;
+  }
+
+  @override
+  Future<StockTransfer> createTransfer(StockTransfer transfer) async {
+    final id = transfer.id.isEmpty
+        ? 'tr-${_transfers.length + 1}'
+        : transfer.id;
+    if (_transfers.any((t) => t.id == id)) {
+      // D65 pattern: a retry with the same id returns the existing
+      // document instead of writing a second one.
+      return _transfers.firstWhere((t) => t.id == id);
+    }
+    final fromCode = transfer.fromBranchId == 'branch-dha-main'
+        ? 'DHA'
+        : 'GLB';
+    final toCode = transfer.toBranchId == 'branch-dha-main'
+        ? 'DHA'
+        : 'GLB';
+    final created = transfer.copyWith(
+      id: id,
+      transferNumber: transfer.transferNumber.isEmpty
+          ? 'TR-$fromCode-$toCode-${1000 + _transfers.length + 1}'
+          : transfer.transferNumber,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    _transfers.add(created);
+    return created;
+  }
+
+  @override
+  Future<void> updateTransfer(StockTransfer transfer) async {
+    final index = _transfers.indexWhere((t) => t.id == transfer.id);
+    if (index == -1) {
+      throw ArgumentError('No transfer with id "${transfer.id}".');
+    }
+    _transfers[index] = transfer.copyWith(updatedAt: DateTime.now());
   }
 }
 
@@ -989,11 +1172,63 @@ class MockFinancialTransactionRepository
   Future<FinancialTransaction> addTransaction(
     FinancialTransaction txn,
   ) async {
+    // Week 4 Day 3 (D125): a caller-supplied `createdAt` is the
+    // transaction's business date (a backdated cashbook income entry
+    // lands on its entry date, not today) — it is kept. Only a
+    // missing date is stamped now.
     final created = txn.copyWith(
       id: 'ftx-${_txns.length + 1}',
-      createdAt: DateTime.now(),
+      createdAt: txn.createdAt ?? DateTime.now(),
     );
     _txns.add(created);
+    return created;
+  }
+}
+
+/// Daily cashbook closings (Week 4 Day 3, D126): mutable in-memory
+/// closings for the session. The demo starts with none — no day has
+/// been closed yet, so the cashbook screen's closing history starts
+/// empty and the close-day flow creates the records.
+class MockDailyClosingRepository implements DailyClosingRepository {
+  final List<DailyClosing> _closings = [];
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  @override
+  Future<List<DailyClosing>> getClosings({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_closings);
+    return List.unmodifiable(
+      _closings.where((closing) => closing.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<DailyClosing?> getClosing({
+    required String branchId,
+    required DateTime date,
+  }) async {
+    for (final closing in _closings) {
+      if (closing.branchId == branchId && _sameDay(closing.date, date)) {
+        return closing;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<DailyClosing> createClosing(DailyClosing closing) async {
+    if (await getClosing(branchId: closing.branchId, date: closing.date) !=
+        null) {
+      throw ArgumentError(
+        'A closing already exists for this branch and day.',
+      );
+    }
+    final created = closing.copyWith(
+      id: 'dc-${_closings.length + 1}',
+      closedAt: closing.closedAt ?? DateTime.now(),
+    );
+    _closings.add(created);
     return created;
   }
 }
@@ -1368,6 +1603,16 @@ final riderRepositoryProvider = Provider<RiderRepository>(
   (ref) => ref.watch(repositoryBundleProvider).riders,
 );
 
+/// Week 4 Day 2 stock transfers (D118): mock-backed by default —
+/// the provider reads from the [RepositoryBundle], so the mock bundle
+/// is the default and a Firestore bundle override switches it to the
+/// Firestore implementation exactly like the Day 3 repos (D101
+/// pattern).
+final stockTransferRepositoryProvider =
+    Provider<StockTransferRepository>(
+      (ref) => ref.watch(repositoryBundleProvider).stockTransfers,
+    );
+
 /// Week 2 Day 5 repositories (D89): mock-backed by default — the
 /// providers below read from the [RepositoryBundle] (Week 3 Day 1,
 /// D101), so the mock bundle is the default and a Firestore bundle
@@ -1397,6 +1642,15 @@ final financialTransactionRepositoryProvider =
 
 final supplierPaymentRepositoryProvider = Provider<SupplierPaymentRepository>(
   (ref) => ref.watch(repositoryBundleProvider).supplierPayments,
+);
+
+/// Week 4 Day 3 repositories (D126): mock-backed by default — the
+/// provider below reads from the [RepositoryBundle], so the mock
+/// bundle is the default and a Firestore bundle override switches it
+/// to the Firestore implementation exactly like the Day 3 repos
+/// (D101 pattern).
+final dailyClosingRepositoryProvider = Provider<DailyClosingRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).dailyClosings,
 );
 
 /// Week 3 Day 2 repositories (D102/D103): mock-backed by default —

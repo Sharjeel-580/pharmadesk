@@ -11,6 +11,7 @@ import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
 import '../../models/rider.dart';
 import '../../models/salary_record.dart';
+import '../../models/stock_transfer.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
 import '../../models/supplier.dart';
@@ -901,24 +902,32 @@ List<PurchaseOrder> generateDemoPurchaseOrders({DateTime? now}) {
 /// Sample delivery riders (fictional). Two per demo branch area; all
 /// active. Orders created by the Day 4 flow assign one of these when
 /// the fulfilment is delivery.
+///
+/// Week 4 Day 2 (D119): each rider carries his home branch — riders
+/// 1–2 run out of DHA, riders 3–4 out of Gulberg — so the Riders
+/// screen can filter by branch and a rider only takes orders from
+/// his own branch.
 const demoRiders = <Rider>[
   Rider(
     id: 'rider-1',
     name: 'Bilal Ahmed',
     phone: '0300-1010101',
     vehicle: 'Honda CD 70 — LEA-1234',
+    branchId: 'branch-dha-main',
   ),
   Rider(
     id: 'rider-2',
     name: 'Usman Khalid',
     phone: '0300-2020202',
     vehicle: 'Suzuki GD 110 — LEA-5678',
+    branchId: 'branch-dha-main',
   ),
   Rider(
     id: 'rider-3',
     name: 'Ahmed Nawaz',
     phone: '0300-3030303',
     vehicle: 'Honda CD 70 — LEA-9012',
+    branchId: 'branch-demo-gulberg',
   ),
   Rider(
     id: 'rider-4',
@@ -926,6 +935,112 @@ const demoRiders = <Rider>[
     phone: '0300-4040404',
     vehicle: 'United 70 — LEA-3456',
     active: false,
+    branchId: 'branch-demo-gulberg',
+  ),
+];
+
+/// Sample stock transfers (fictional, Week 4 Day 2, D118).
+///
+/// One per live status — Requested, Dispatched, Received — so the
+/// transfer list shows every stage of the lifecycle on sight. All
+/// three are labelled demo/sample wherever they appear.
+///
+/// These are SAMPLE RECORDS, not live stock movements: the demo
+/// inventory is generated independently (random batches per
+/// medicine), so a seeded Received transfer's units are NOT
+/// subtracted from / added to the generated stock — the same posture
+/// as the seeded sales and orders, whose stock effects the generated
+/// inventory also never reflects. Only transfers created through the
+/// app (layer `dispatchTransfer` / `receiveTransfer`) move real
+/// stock. The seeded Dispatched transfer carries its FEFO
+/// allocations so its detail screen shows exactly which batches
+/// left DHA; the seeded Received transfer carries allocations too,
+/// as the record of what arrived in Gulberg.
+const demoTransfers = <StockTransfer>[
+  StockTransfer(
+    id: 'tr-demo-1',
+    transferNumber: 'TR-DHA-GLB-1001',
+    fromBranchId: 'branch-dha-main',
+    toBranchId: 'branch-demo-gulberg',
+    status: StockTransferStatus.requested,
+    items: [
+      TransferItem(
+        medicineId: 'med-panadol-extra',
+        medicineName: 'Panadol Extra',
+        quantity: 20,
+      ),
+      TransferItem(
+        medicineId: 'med-brufen-400',
+        medicineName: 'Brufen',
+        quantity: 10,
+      ),
+    ],
+    note: 'Gulberg is short on pain relief ahead of the weekend.',
+    requestedBy: 'demo-branch_manager',
+    isDemo: true,
+    createdAt: null,
+    updatedAt: null,
+  ),
+  StockTransfer(
+    id: 'tr-demo-2',
+    transferNumber: 'TR-GLB-DHA-1002',
+    fromBranchId: 'branch-demo-gulberg',
+    toBranchId: 'branch-dha-main',
+    status: StockTransferStatus.dispatched,
+    items: [
+      TransferItem(
+        medicineId: 'med-zyrtec-10',
+        medicineName: 'Zyrtec',
+        quantity: 15,
+      ),
+    ],
+    note: 'DHA allergy shelf is empty; Gulberg had surplus.',
+    requestedBy: 'demo-branch_manager',
+    approvedBy: 'demo-owner',
+    dispatchedBy: 'demo-inventory_manager',
+    dispatchAllocations: [
+      TransferAllocation(
+        medicineId: 'med-zyrtec-10',
+        batchId: 'inv-GLB-sample-1',
+        batchNo: 'GLB-9-1-412',
+        quantity: 15,
+        unitCostMinor: 30000,
+      ),
+    ],
+    isDemo: true,
+    createdAt: null,
+    updatedAt: null,
+  ),
+  StockTransfer(
+    id: 'tr-demo-3',
+    transferNumber: 'TR-DHA-GLB-1003',
+    fromBranchId: 'branch-dha-main',
+    toBranchId: 'branch-demo-gulberg',
+    status: StockTransferStatus.received,
+    items: [
+      TransferItem(
+        medicineId: 'med-risek-20',
+        medicineName: 'Risek',
+        quantity: 12,
+      ),
+    ],
+    note: 'Monthly rebalancing — Gulberg gastric shelf.',
+    requestedBy: 'demo-inventory_manager',
+    approvedBy: 'demo-owner',
+    dispatchedBy: 'demo-inventory_manager',
+    receivedBy: 'demo-branch_manager',
+    dispatchAllocations: [
+      TransferAllocation(
+        medicineId: 'med-risek-20',
+        batchId: 'inv-DHA-sample-1',
+        batchNo: 'DHA-3-1-208',
+        quantity: 12,
+        unitCostMinor: 64000,
+      ),
+    ],
+    isDemo: true,
+    createdAt: null,
+    updatedAt: null,
   ),
 ];
 
