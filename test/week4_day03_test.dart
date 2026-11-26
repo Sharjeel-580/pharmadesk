@@ -67,11 +67,7 @@ DateTime _day(int daysAgo) {
 List<SignedEntry> _charges(List<(int daysAgo, int amountMinor)> charges) {
   return [
     for (var i = 0; i < charges.length; i++)
-      (
-        id: 'c$i',
-        date: _day(charges[i].$1),
-        amountMinor: charges[i].$2,
-      ),
+      (id: 'c$i', date: _day(charges[i].$1), amountMinor: charges[i].$2),
   ];
 }
 
@@ -121,7 +117,11 @@ void main() {
       final now = DateTime.now();
       final summary = computeAging(
         entries: [
-          (id: 'c0', date: now.add(const Duration(days: 3)), amountMinor: 40000),
+          (
+            id: 'c0',
+            date: now.add(const Duration(days: 3)),
+            amountMinor: 40000,
+          ),
         ],
         now: now,
       );
@@ -178,61 +178,88 @@ void main() {
       expect(entries.last.note, 'Monthly shop rent');
     });
 
-    test('validateCashbookEntry rejects bad category, zero, future, long note', () {
-      expect(
-        validateCashbookEntry(
-          isIncome: false,
-          category: 'Not a category',
-          amountMinor: 10000,
-          date: _day(0),
-        ),
-        isNotEmpty,
-      );
-      expect(
-        validateCashbookEntry(
-          isIncome: true,
-          category: 'Other income',
-          amountMinor: 0,
-          date: _day(0),
-        ),
-        isNotEmpty,
-      );
-      expect(
-        validateCashbookEntry(
-          isIncome: false,
-          category: 'Rent',
-          amountMinor: 10000,
-          date: DateTime.now().add(const Duration(days: 1)),
-        ),
-        isNotEmpty,
-      );
-      expect(
-        validateCashbookEntry(
-          isIncome: false,
-          category: 'Rent',
-          amountMinor: 10000,
-          date: _day(0),
-          note: 'x' * 201,
-        ),
-        isNotEmpty,
-      );
-      expect(
-        validateCashbookEntry(
-          isIncome: true,
-          category: 'Owner contribution',
-          amountMinor: 10000,
-          date: _day(0),
-        ),
-        isEmpty,
-      );
-    });
+    test(
+      'validateCashbookEntry rejects bad category, zero, future, long note',
+      () {
+        expect(
+          validateCashbookEntry(
+            isIncome: false,
+            category: 'Not a category',
+            amountMinor: 10000,
+            date: _day(0),
+          ),
+          isNotEmpty,
+        );
+        expect(
+          validateCashbookEntry(
+            isIncome: true,
+            category: 'Other income',
+            amountMinor: 0,
+            date: _day(0),
+          ),
+          isNotEmpty,
+        );
+        expect(
+          validateCashbookEntry(
+            isIncome: false,
+            category: 'Rent',
+            amountMinor: 10000,
+            date: DateTime.now().add(const Duration(days: 1)),
+          ),
+          isNotEmpty,
+        );
+        expect(
+          validateCashbookEntry(
+            isIncome: false,
+            category: 'Rent',
+            amountMinor: 10000,
+            date: _day(0),
+            note: 'x' * 201,
+          ),
+          isNotEmpty,
+        );
+        expect(
+          validateCashbookEntry(
+            isIncome: true,
+            category: 'Owner contribution',
+            amountMinor: 10000,
+            date: _day(0),
+          ),
+          isEmpty,
+        );
+      },
+    );
   });
 
   group('Daily closing — totals, opening, validation, stale (D126)', () {
     final entries = <CashbookEntry>[
-      (id: 'i1', date: _day(0), kind: CashbookEntryKind.income, category: 'Other income', amountMinor: 250000, note: '', referenceId: null),
-      (id: 'e1', date: _day(0), kind: CashbookEntryKind.expense, category: 'Rent', amountMinor: 1000000, note: '', referenceId: null),
-      (id: 'e2', date: _day(1), kind: CashbookEntryKind.expense, category: 'Utilities', amountMinor: 50000, note: '', referenceId: null),
+      (
+        id: 'i1',
+        date: _day(0),
+        kind: CashbookEntryKind.income,
+        category: 'Other income',
+        amountMinor: 250000,
+        note: '',
+        referenceId: null,
+      ),
+      (
+        id: 'e1',
+        date: _day(0),
+        kind: CashbookEntryKind.expense,
+        category: 'Rent',
+        amountMinor: 1000000,
+        note: '',
+        referenceId: null,
+      ),
+      (
+        id: 'e2',
+        date: _day(1),
+        kind: CashbookEntryKind.expense,
+        category: 'Utilities',
+        amountMinor: 50000,
+        note: '',
+        referenceId: null,
+      ),
     ];
 
     test('computeDailyClosing counts only that day, opening + in − out', () {
@@ -325,20 +352,12 @@ void main() {
         ),
       ];
       expect(
-        validateDailyClosing(
-          date: _day(0),
-          existing: existing,
-          branchId: _dha,
-        ),
+        validateDailyClosing(date: _day(0), existing: existing, branchId: _dha),
         isNotEmpty,
       );
       // Same day, other branch: fine.
       expect(
-        validateDailyClosing(
-          date: _day(0),
-          existing: existing,
-          branchId: _glb,
-        ),
+        validateDailyClosing(date: _day(0), existing: existing, branchId: _glb),
         isEmpty,
       );
     });
@@ -374,32 +393,35 @@ void main() {
   });
 
   group('Income + closing through the notifiers (D125/D126)', () {
-    test('recordIncome writes an income transaction, visible in the cashbook', () async {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-      final result = await container
-          .read(financialTransactionsProvider.notifier)
-          .recordIncome(
-            branchId: _dha,
-            category: 'Owner contribution',
-            amountMinor: 500000,
-            date: _day(0),
-          );
-      expect(result.error, isNull);
-      expect(result.transaction, isNotNull);
-      expect(result.transaction!.type, FinancialTransactionType.income);
-      await container.read(expensesProvider.future);
-      await container.read(financialTransactionsProvider.future);
-      final entries = container.read(cashbookEntriesProvider(_dha));
-      expect(
-        entries.any(
-          (entry) =>
-              entry.kind == CashbookEntryKind.income &&
-              entry.amountMinor == 500000,
-        ),
-        isTrue,
-      );
-    });
+    test(
+      'recordIncome writes an income transaction, visible in the cashbook',
+      () async {
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        final result = await container
+            .read(financialTransactionsProvider.notifier)
+            .recordIncome(
+              branchId: _dha,
+              category: 'Owner contribution',
+              amountMinor: 500000,
+              date: _day(0),
+            );
+        expect(result.error, isNull);
+        expect(result.transaction, isNotNull);
+        expect(result.transaction!.type, FinancialTransactionType.income);
+        await container.read(expensesProvider.future);
+        await container.read(financialTransactionsProvider.future);
+        final entries = container.read(cashbookEntriesProvider(_dha));
+        expect(
+          entries.any(
+            (entry) =>
+                entry.kind == CashbookEntryKind.income &&
+                entry.amountMinor == 500000,
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test('recordIncome keeps a backdated business date (D125)', () async {
       final container = ProviderContainer();
@@ -448,13 +470,15 @@ void main() {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       // Yesterday: Rs 1,000 expense. Today: Rs 2,500 income.
-      await container.read(expensesProvider.notifier).recordExpense(
-        branchId: _dha,
-        category: 'Supplies',
-        amountMinor: 100000,
-        description: 'Yesterday supplies',
-        expenseDate: _day(1),
-      );
+      await container
+          .read(expensesProvider.notifier)
+          .recordExpense(
+            branchId: _dha,
+            category: 'Supplies',
+            amountMinor: 100000,
+            description: 'Yesterday supplies',
+            expenseDate: _day(1),
+          );
       await container
           .read(financialTransactionsProvider.notifier)
           .recordIncome(
@@ -533,14 +557,8 @@ void main() {
           reports.profitLoss.cogsMinor,
           reason: '$branchId / $days COGS',
         );
-        expect(
-          statement.grossProfitMinor,
-          reports.profitLoss.grossProfitMinor,
-        );
-        expect(
-          statement.otherIncomeMinor,
-          reports.profitLoss.otherIncomeMinor,
-        );
+        expect(statement.grossProfitMinor, reports.profitLoss.grossProfitMinor);
+        expect(statement.otherIncomeMinor, reports.profitLoss.otherIncomeMinor);
         expect(statement.expensesMinor, reports.profitLoss.expensesMinor);
         expect(statement.netProfitMinor, reports.profitLoss.netProfitMinor);
       }
@@ -551,14 +569,18 @@ void main() {
       addTearDown(container.dispose);
       final orders = await container.read(orderRepositoryProvider).getOrders();
       final sales = await container.read(saleRepositoryProvider).getSales();
-      final returns =
-          await container.read(saleReturnRepositoryProvider).getReturns();
-      final inventory =
-          await container.read(inventoryRepositoryProvider).getInventory();
-      final medicines =
-          await container.read(medicineRepositoryProvider).getMedicines();
-      final expenses =
-          await container.read(expenseRepositoryProvider).getExpenses();
+      final returns = await container
+          .read(saleReturnRepositoryProvider)
+          .getReturns();
+      final inventory = await container
+          .read(inventoryRepositoryProvider)
+          .getInventory();
+      final medicines = await container
+          .read(medicineRepositoryProvider)
+          .getMedicines();
+      final expenses = await container
+          .read(expenseRepositoryProvider)
+          .getExpenses();
       final transactions = await container
           .read(financialTransactionRepositoryProvider)
           .getTransactions();
@@ -721,12 +743,11 @@ void main() {
   });
 
   group('Finance routes + screens (widget)', () {
-    testWidgets('route walk: hub + cashbook + aging + statements render',
-        (WidgetTester tester) async {
+    testWidgets('route walk: hub + cashbook + aging + statements render', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
 
       const present = <(String, String)>[
@@ -751,37 +772,40 @@ void main() {
       }
     });
 
-    testWidgets('hub shows the three finance cards (owner)',
-        (WidgetTester tester) async {
+    testWidgets('hub shows the four finance cards (owner)', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/finance');
       await tester.pumpAndSettle();
       expect(find.text('Cashbook'), findsOneWidget);
       expect(find.text('Payables & Receivables'), findsOneWidget);
       expect(find.text('P&L & Statements'), findsOneWidget);
+      expect(find.text('Franchise Royalties'), findsOneWidget);
       expect(find.textContaining('No access'), findsNothing);
     });
 
-    testWidgets('hub marks the cards a cashier may not use (D124)',
-        (WidgetTester tester) async {
+    testWidgets('hub marks the cards a cashier may not use (D124)', (
+      WidgetTester tester,
+    ) async {
       final (_, router) = await pumpRouterAppAsRole(tester, 'cashier');
       router.go('/finance');
       await tester.pumpAndSettle();
       expect(find.text('Cashbook'), findsOneWidget);
       // Cashier has `financeReports` none: aging + statements locked.
-      expect(find.textContaining('No access'), findsNWidgets(2));
+      // The Franchise Royalties card is locked too (D159 — head
+      // office only, `branches` write level), so three cards show
+      // "No access" now, not two.
+      expect(find.textContaining('No access'), findsNWidgets(3));
     });
 
-    testWidgets('cashbook shows seeded expenses + aging totals',
-        (WidgetTester tester) async {
+    testWidgets('cashbook shows seeded expenses + aging totals', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
@@ -801,12 +825,11 @@ void main() {
       expect(find.text('Rs 32,000.00'), findsWidgets);
     });
 
-    testWidgets('cashbook add-entry + close-day end to end',
-        (WidgetTester tester) async {
+    testWidgets('cashbook add-entry + close-day end to end', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
@@ -815,7 +838,19 @@ void main() {
 
       await tester.tap(find.text('Add entry'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextFormField).first, '5000');
+      // Scope the field to the dialog: the cashbook screen itself now
+      // has text fields (drawer-count, Week 5 Day 4) that come before
+      // the dialog's fields in tree order, so an unscoped `.first`
+      // would type into the screen behind the dialog.
+      await tester.enterText(
+        find
+            .descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(TextFormField),
+            )
+            .first,
+        '5000',
+      );
       await tester.tap(find.text('Save entry'));
       await tester.pumpAndSettle();
       expect(find.text('Cashbook entry recorded.'), findsOneWidget);
@@ -834,12 +869,11 @@ void main() {
       expect(find.text('Day closed'), findsOneWidget);
     });
 
-    testWidgets('aging row navigates to the supplier detail',
-        (WidgetTester tester) async {
+    testWidgets('aging row navigates to the supplier detail', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/finance/aging');
       await tester.pumpAndSettle();
@@ -848,12 +882,11 @@ void main() {
       expect(find.text('Payables ledger'), findsOneWidget);
     });
 
-    testWidgets('statements show the consolidated P&L + branch cards',
-        (WidgetTester tester) async {
+    testWidgets('statements show the consolidated P&L + branch cards', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/finance/statements');
       await tester.pumpAndSettle();
@@ -866,12 +899,11 @@ void main() {
       expect(find.text('Demo Branch — Gulberg'), findsWidgets);
     });
 
-    testWidgets('sidebar lists Finance under Insights (desktop)',
-        (WidgetTester tester) async {
+    testWidgets('sidebar lists Finance under Insights (desktop)', (
+      WidgetTester tester,
+    ) async {
       final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
+      await container.read(authProvider.notifier).signInAsDemo(DemoRole.owner);
       await tester.pumpAndSettle();
       router.go('/dashboard');
       await tester.pumpAndSettle();
@@ -900,16 +932,18 @@ void main() {
       expect(routeCapability('/finance/statements'), 'financeReports');
     });
 
-    testWidgets('pharmacist is stopped at the cashbook route',
-        (WidgetTester tester) async {
+    testWidgets('pharmacist is stopped at the cashbook route', (
+      WidgetTester tester,
+    ) async {
       final (_, router) = await pumpRouterAppAsRole(tester, 'pharmacist');
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
       expect(find.text('No permission for Finance'), findsOneWidget);
     });
 
-    testWidgets('cashier may use the cashbook but not the statements',
-        (WidgetTester tester) async {
+    testWidgets('cashier may use the cashbook but not the statements', (
+      WidgetTester tester,
+    ) async {
       final (_, router) = await pumpRouterAppAsRole(tester, 'cashier');
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
@@ -919,8 +953,9 @@ void main() {
       expect(find.text('No permission for Finance'), findsOneWidget);
     });
 
-    testWidgets('auditor may view the cashbook but sees no Add entry',
-        (WidgetTester tester) async {
+    testWidgets('auditor may view the cashbook but sees no Add entry', (
+      WidgetTester tester,
+    ) async {
       final (_, router) = await pumpRouterAppAsRole(tester, 'auditor');
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
@@ -928,12 +963,10 @@ void main() {
       expect(find.text('Add entry'), findsNothing);
     });
 
-    testWidgets('regional manager may view statements, not the cashbook',
-        (WidgetTester tester) async {
-      final (_, router) = await pumpRouterAppAsRole(
-        tester,
-        'regional_manager',
-      );
+    testWidgets('regional manager may view statements, not the cashbook', (
+      WidgetTester tester,
+    ) async {
+      final (_, router) = await pumpRouterAppAsRole(tester, 'regional_manager');
       router.go('/finance/cashbook');
       await tester.pumpAndSettle();
       expect(find.text('No permission for Finance'), findsOneWidget);
@@ -1008,9 +1041,7 @@ Future<(ProviderContainer, GoRouter)> pumpRouterAppAsRole(
   addTearDown(tester.view.resetDevicePixelRatio);
   final user = _userFor(roleKey, branchIds: branchIds);
   final container = ProviderContainer(
-    overrides: [
-      authProvider.overrideWith(() => _FixedAuthNotifier(user)),
-    ],
+    overrides: [authProvider.overrideWith(() => _FixedAuthNotifier(user))],
   );
   addTearDown(container.dispose);
   final router = createAppRouter(
@@ -1142,8 +1173,7 @@ class _FakeFirestoreTransaction implements FirestoreTransaction {
   final _FakeFirestoreTransport transport;
 
   @override
-  Future<Map<String, dynamic>?> get(String path) =>
-      transport.getDocument(path);
+  Future<Map<String, dynamic>?> get(String path) => transport.getDocument(path);
 
   @override
   void set(String path, Map<String, dynamic> data, {bool merge = false}) {

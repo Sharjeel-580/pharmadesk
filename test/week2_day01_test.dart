@@ -908,18 +908,23 @@ void main() {
       );
       expect(total, greaterThan(0));
 
-      final first = layer.importBackup(doc);
+      // Week 5 Day 2 (D150): the restore now targets the LIVE repos,
+      // so importing an export of the live data itself creates
+      // nothing under skip policy — every doc already exists — and
+      // replaces everything under overwrite policy, still without
+      // duplicating a document.
+      final first = await layer.importBackup(doc);
       expect(first.success, isTrue);
-      expect(first.created, total);
-      expect(first.skipped, 0);
+      expect(first.created, 0);
+      expect(first.skipped, total);
 
       // Same backup again, skip policy: nothing new, nothing duplicated.
-      final second = layer.importBackup(doc);
+      final second = await layer.importBackup(doc);
       expect(second.created, 0);
       expect(second.skipped, total);
 
       // Overwrite policy: every doc replaced, still no duplicates.
-      final third = layer.importBackup(
+      final third = await layer.importBackup(
         doc,
         policy: ImportPolicy.overwrite,
       );

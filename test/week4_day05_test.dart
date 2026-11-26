@@ -706,6 +706,8 @@ void main() {
       );
     });
 
+    // Week 5 Day 3 (D153): the location-only dialog is now the full
+    // master edit form — the same flow, through the new dialog keys.
     testWidgets('detail screen edits location end to end (Owner)',
         (tester) async {
       final (container, router) = await pumpRouterAppAsRole(
@@ -717,13 +719,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1500));
       await tester.pumpAndSettle();
       expect(find.text('Not set'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('medicine-edit-location')));
+      await tester.tap(find.byKey(const ValueKey('medicine-edit')));
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byKey(const ValueKey('medicine-location-field')),
         'Rack A • Shelf 2',
       );
-      await tester.tap(find.byKey(const ValueKey('medicine-location-save')));
+      await tester.tap(find.byKey(const ValueKey('medicine-edit-save')));
       await tester.pumpAndSettle();
       expect(find.text('Rack A • Shelf 2'), findsOneWidget);
       // Restore the seed state for later tests.
@@ -746,7 +748,11 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1500));
       await tester.pumpAndSettle();
       expect(
-        find.byKey(const ValueKey('medicine-edit-location')),
+        find.byKey(const ValueKey('medicine-edit')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('medicine-branch-shelf')),
         findsNothing,
       );
     });
@@ -1143,7 +1149,7 @@ void main() {
       final notifier = container.read(
         stockAdjustmentQueueProvider.notifier,
       );
-      final request = notifier.requestAdjustment(
+      final request = await notifier.requestAdjustment(
         batchId: batch.id,
         batchNo: batch.batchNo ?? '—',
         medicineId: batch.medicineId,
@@ -1185,7 +1191,9 @@ void main() {
             .quantity,
         beforeQty - 2,
       );
-      expect(await layer.syncQueue.pendingCount(), 1);
+      // Week 5 Day 1 (D146): filing persists the request (1) and the
+      // approval persists the decision (1) on top of the apply (1).
+      expect(await layer.syncQueue.pendingCount(), 3);
       // Approving twice is a no-op (already decided).
       expect(
         await notifier.approveAdjustment(requestId: request.id),
@@ -1210,7 +1218,7 @@ void main() {
       final notifier = container.read(
         stockAdjustmentQueueProvider.notifier,
       );
-      final request = notifier.requestAdjustment(
+      final request = await notifier.requestAdjustment(
         batchId: batch.id,
         batchNo: batch.batchNo ?? '—',
         medicineId: batch.medicineId,
@@ -1223,14 +1231,14 @@ void main() {
       expect(request, isNotNull);
       // The requester cannot reject their own request either.
       expect(
-        notifier.rejectAdjustment(
+        await notifier.rejectAdjustment(
           requestId: request!.id,
           note: 'No',
         ),
         isNull,
       );
       auth.user = _userFor('owner', uid: 'test-owner-2');
-      final rejected = notifier.rejectAdjustment(
+      final rejected = await notifier.rejectAdjustment(
         requestId: request.id,
         note: 'Count does not match',
       );

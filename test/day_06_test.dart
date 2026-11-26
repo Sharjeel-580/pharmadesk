@@ -25,6 +25,7 @@ import 'package:pharmadesk/features/dashboard/dashboard_data.dart';
 import 'package:pharmadesk/features/inventory/inventory_logic.dart';
 import 'package:pharmadesk/models/customer.dart';
 import 'package:pharmadesk/models/customer_ledger.dart';
+import 'package:pharmadesk/models/branch_inventory_location.dart';
 import 'package:pharmadesk/models/inventory_item.dart';
 import 'package:pharmadesk/models/sale.dart';
 
@@ -1333,4 +1334,27 @@ class _FakeInventoryRepository implements InventoryRepository {
     required BatchStatus status,
     String? reason,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<InventoryItem> upsertInventoryItem(InventoryItem item) async =>
+      throw UnimplementedError();
+
+  @override
+  Future<BranchInventoryLocation?> getBranchLocation({
+    required String branchId,
+    required String medicineId,
+  }) async =>
+      throw UnimplementedError();
+
+  @override
+  Future<List<BranchInventoryLocation>> getBranchLocations({
+    String? branchId,
+  }) async =>
+      throw UnimplementedError();
+
+  @override
+  Future<BranchInventoryLocation> saveBranchLocation(
+    BranchInventoryLocation location,
+  ) async =>
+      throw UnimplementedError();
 }

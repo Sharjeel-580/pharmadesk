@@ -185,11 +185,13 @@ void main() {
       expect(branches.map((b) => b.id), containsAll([_dha, _glb]));
     });
 
-    test('addBranch adds; empty name refused', () {
+    test('addBranch adds; empty name refused', () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       final notifier = container.read(branchDirectoryProvider.notifier);
-      final errors = notifier.addBranch(
+      // Week 5 Day 2 (D148): add / update / setActive persist
+      // through the layer first, so they are async now.
+      final errors = await notifier.addBranch(
         const Branch(
           id: 'branch-model-town',
           name: 'Demo Branch — Model Town',
@@ -199,30 +201,30 @@ void main() {
       );
       expect(errors, isEmpty);
       expect(container.read(branchDirectoryProvider).length, 3);
-      final bad = notifier.addBranch(
+      final bad = await notifier.addBranch(
         const Branch(id: 'branch-x', name: '  ', address: '', phone: ''),
       );
       expect(bad, contains('Branch name is required.'));
       expect(container.read(branchDirectoryProvider).length, 3);
     });
 
-    test('addBranch refuses a duplicate id', () {
+    test('addBranch refuses a duplicate id', () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       final notifier = container.read(branchDirectoryProvider.notifier);
-      final errors = notifier.addBranch(
+      final errors = await notifier.addBranch(
         const Branch(id: _dha, name: 'Copy', address: '', phone: ''),
       );
       expect(errors, isNotEmpty);
       expect(container.read(branchDirectoryProvider).length, 2);
     });
 
-    test('updateBranch changes address and phone', () {
+    test('updateBranch changes address and phone', () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       final notifier = container.read(branchDirectoryProvider.notifier);
       final branch = container.read(branchDirectoryProvider).first;
-      final errors = notifier.updateBranch(
+      final errors = await notifier.updateBranch(
         branch.id,
         branch.copyWith(address: 'New address', phone: '0300-0000000'),
       );
@@ -233,16 +235,17 @@ void main() {
       expect(updated.id, branch.id);
     });
 
-    test('setActive deactivates; the last active branch is protected', () {
+    test('setActive deactivates; the last active branch is protected',
+        () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
       final notifier = container.read(branchDirectoryProvider.notifier);
-      expect(notifier.setActive(_glb, false), isEmpty);
+      expect(await notifier.setActive(_glb, false), isEmpty);
       expect(notifier.byId(_glb)!.active, false);
-      final errors = notifier.setActive(_dha, false);
+      final errors = await notifier.setActive(_dha, false);
       expect(errors, contains('The last active branch cannot be deactivated.'));
       expect(notifier.byId(_dha)!.active, true);
-      expect(notifier.setActive(_glb, true), isEmpty);
+      expect(await notifier.setActive(_glb, true), isEmpty);
     });
 
     test('validateBranchForm refuses rates over 100%', () {
@@ -372,27 +375,30 @@ void main() {
       final layer = _layer();
       final doc = await layer.exportBackup();
       expect(DataImporter.validateBackup(doc), isEmpty);
-      final first = layer.importBackup(doc);
+      // Week 5 Day 2 (D150): the restore now targets the LIVE repos,
+      // so importing an export of the live data itself creates
+      // nothing under skip policy — every doc already exists.
+      final first = await layer.importBackup(doc);
       expect(first.success, true);
-      expect(first.created, backupTotalDocs(doc));
-      expect(first.created, greaterThan(0));
-      final second = layer.importBackup(doc);
+      expect(first.created, 0);
+      expect(first.skipped, backupTotalDocs(doc));
+      final second = await layer.importBackup(doc);
       expect(second.created, 0);
-      expect(second.skipped, first.created);
+      expect(second.skipped, backupTotalDocs(doc));
       expect(layer.restoredData.count('medicines'), greaterThan(0));
     });
 
     test('overwrite policy replaces instead of duplicating', () async {
       final layer = _layer();
       final doc = await layer.exportBackup();
-      final first = layer.importBackup(doc);
-      expect(first.created, greaterThan(0));
-      final again = layer.importBackup(
+      final first = await layer.importBackup(doc);
+      expect(first.skipped, backupTotalDocs(doc));
+      final again = await layer.importBackup(
         doc,
         policy: ImportPolicy.overwrite,
       );
       expect(again.created, 0);
-      expect(again.overwritten, first.created);
+      expect(again.overwritten, backupTotalDocs(doc));
       expect(again.skipped, 0);
     });
 
@@ -420,9 +426,9 @@ void main() {
       );
     });
 
-    test('a malformed doc aborts the whole import', () {
+    test('a malformed doc aborts the whole import', () async {
       final layer = _layer();
-      final report = layer.importBackup({
+      final report = await layer.importBackup({
         'format': 'pharmadesk-backup',
         'formatVersion': 1,
         'organizationId': _org,
@@ -784,7 +790,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Restore this backup?'), findsOneWidget);
       expect(
-        find.textContaining('will replace the current restored data'),
+        find.textContaining('will replace the current live data'),
         findsOneWidget,
       );
       await tester.tap(find.text('Restore backup'));
