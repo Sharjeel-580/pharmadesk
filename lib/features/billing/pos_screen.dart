@@ -115,34 +115,54 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   /// The split legs as entered (only legs above zero), or `null`
   /// when split payment is off. The cash leg doubles as the cash
   /// received (split cash is exact — no change).
+  ///
+  /// Week 5 Day 4 (D155): only legs for methods the Organization
+  /// Settings enable are offered — a disabled method's field is
+  /// never shown, so its leg can never be entered here.
   List<SalePayment>? get _splitPayments {
     if (!_splitPayment) return null;
+    final offered = posPaymentMethods(ref.read(orgSettingsProvider));
     final legs = <SalePayment>[];
-    final cash = _splitLegMinor(_splitCashController);
-    if (cash > 0) {
-      legs.add(SalePayment(method: SalePaymentMethod.cash, amountMinor: cash));
+    if (offered.contains(SalePaymentMethod.cash)) {
+      final cash = _splitLegMinor(_splitCashController);
+      if (cash > 0) {
+        legs.add(
+          SalePayment(method: SalePaymentMethod.cash, amountMinor: cash),
+        );
+      }
     }
-    final card = _splitLegMinor(_splitCardController);
-    if (card > 0) {
-      legs.add(SalePayment(method: SalePaymentMethod.card, amountMinor: card));
+    if (offered.contains(SalePaymentMethod.card)) {
+      final card = _splitLegMinor(_splitCardController);
+      if (card > 0) {
+        legs.add(
+          SalePayment(method: SalePaymentMethod.card, amountMinor: card),
+        );
+      }
     }
-    final credit = _splitLegMinor(_splitCreditController);
-    if (credit > 0) {
-      legs.add(
-        SalePayment(method: SalePaymentMethod.credit, amountMinor: credit),
-      );
+    if (offered.contains(SalePaymentMethod.credit)) {
+      final credit = _splitLegMinor(_splitCreditController);
+      if (credit > 0) {
+        legs.add(
+          SalePayment(method: SalePaymentMethod.credit, amountMinor: credit),
+        );
+      }
     }
     return legs;
   }
 
   /// Cash handed over for the cash leg in split mode (exact).
-  int get _splitCashReceivedMinor =>
-      _splitLegMinor(_splitCashController);
+  int get _splitCashReceivedMinor => _splitLegMinor(_splitCashController);
 
   int get _billDiscountMinor {
     final rupees = int.tryParse(_billDiscountController.text.trim());
     if (rupees == null) return 0;
-    return rupees * 100;
+    // Week 5 Day 4 (D155): the bill discount is clamped to the
+    // Organization Settings cap (no cap configured = unchanged).
+    return cappedBillDiscountMinor(
+      subtotalMinor: _subtotalMinor,
+      discountMinor: rupees * 100,
+      maxPercent: ref.read(orgSettingsProvider).maxBillDiscountPercent,
+    );
   }
 
   int get _cashReceivedMinor {
@@ -212,14 +232,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     switch (result.outcome) {
       case BarcodeScanOutcome.found:
         setState(() => _scanMessage = null);
-        _addMedicine(
-          result.medicine!,
-          sellableStock: result.sellableQuantity,
-        );
+        _addMedicine(result.medicine!, sellableStock: result.sellableQuantity);
       case BarcodeScanOutcome.notFound:
-        setState(
-          () => _scanMessage = 'No medicine with barcode "$code".',
-        );
+        setState(() => _scanMessage = 'No medicine with barcode "$code".');
       case BarcodeScanOutcome.notSellable:
         setState(
           () => _scanMessage =
@@ -260,13 +275,15 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     if (_lines.isEmpty) return;
     final branch = ref.read(activeBranchProvider);
     final user = ref.read(authProvider);
-    final parked = ref.read(parkedSalesProvider.notifier).park(
-      branchId: branch.id,
-      lines: _lines,
-      customerId: _customerId,
-      notes: _notesController.text.trim(),
-      cashierName: user?.name ?? 'Counter Staff',
-    );
+    final parked = ref
+        .read(parkedSalesProvider.notifier)
+        .park(
+          branchId: branch.id,
+          lines: _lines,
+          customerId: _customerId,
+          notes: _notesController.text.trim(),
+          cashierName: user?.name ?? 'Counter Staff',
+        );
     if (parked == null) return;
     setState(() {
       _lines = [];
@@ -316,8 +333,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       if (nextQty < 1) {
         _lines = List.of(_lines)..removeAt(index);
       } else {
-        _lines = List.of(_lines)
-          ..[index] = line.copyWith(quantity: nextQty);
+        _lines = List.of(_lines)..[index] = line.copyWith(quantity: nextQty);
       }
     });
   }
@@ -326,9 +342,16 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     final index = _lines.indexWhere((l) => l.medicineId == medicineId);
     if (index == -1) return;
     final line = _lines[index];
+    // Week 5 Day 4 (D155): the line discount is clamped to the
+    // Organization Settings cap (no cap configured = unchanged).
+    final capped = cappedLineDiscountMinor(
+      lineGrossMinor: line.grossMinor,
+      discountMinor: discountMinor,
+      maxPercent: ref.read(orgSettingsProvider).maxLineDiscountPercent,
+    );
     setState(() {
       _lines = List.of(_lines)
-        ..[index] = line.copyWith(lineDiscountMinor: discountMinor);
+        ..[index] = line.copyWith(lineDiscountMinor: capped);
     });
   }
 
@@ -340,9 +363,23 @@ class _PosScreenState extends ConsumerState<PosScreen> {
 
   Future<void> _completeSale() async {
     final errors = <String>[];
+    // Week 5 Day 4 (D155): the method actually charged is the
+    // selected one when the settings still offer it, else the first
+    // offered method — a method the owner disabled can never be
+    // charged by a stale selection.
+    final settings = ref.read(orgSettingsProvider);
+    final offeredMethods = posPaymentMethods(settings);
+    final effectiveMethod = offeredMethods.contains(_paymentMethod)
+        ? _paymentMethod
+        : (offeredMethods.isEmpty ? _paymentMethod : offeredMethods.first);
+    if (offeredMethods.isEmpty) {
+      errors.add(
+        'No payment method is enabled in Organization Settings — '
+        'enable one before completing a sale.',
+      );
+    }
     final billDiscountText = _billDiscountController.text.trim();
-    if (billDiscountText.isNotEmpty &&
-        int.tryParse(billDiscountText) == null) {
+    if (billDiscountText.isNotEmpty && int.tryParse(billDiscountText) == null) {
       errors.add('Bill discount must be a whole number of rupees.');
     }
     if (_splitPayment) {
@@ -358,7 +395,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           errors.add('${entry.key} amount must be a whole number of rupees.');
         }
       }
-    } else if (_paymentMethod == SalePaymentMethod.cash) {
+    } else if (effectiveMethod == SalePaymentMethod.cash) {
       final cashText = _cashReceivedController.text.trim();
       if (cashText.isNotEmpty && int.tryParse(cashText) == null) {
         errors.add('Cash received must be a whole number of rupees.');
@@ -374,19 +411,23 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     });
     final branch = ref.read(activeBranchProvider);
     final user = ref.read(authProvider);
-    final result = await ref.read(salesProvider.notifier).completeSale(
-      branchId: branch.id,
-      customerId: _customerId,
-      cashierName: user?.name ?? 'Counter Staff',
-      lines: _lines,
-      billDiscountMinor: _billDiscountMinor,
-      taxRatePercent: _taxRatePercent,
-      paymentMethod: _paymentMethod,
-      cashReceivedMinor: _splitPayment
-          ? _splitCashReceivedMinor
-          : _cashReceivedMinor,
-      splitPayments: _splitPayments,
-    );
+    final result = await ref
+        .read(salesProvider.notifier)
+        .completeSale(
+          branchId: branch.id,
+          customerId: _customerId,
+          cashierName: user?.name ?? 'Counter Staff',
+          lines: _lines,
+          billDiscountMinor: _billDiscountMinor,
+          taxRatePercent: _taxRatePercent,
+          paymentMethod: effectiveMethod,
+          cashReceivedMinor: _splitPayment
+              ? _splitCashReceivedMinor
+              : _cashReceivedMinor,
+          splitPayments: _splitPayments,
+          maxLineDiscountPercent: settings.maxLineDiscountPercent,
+          maxBillDiscountPercent: settings.maxBillDiscountPercent,
+        );
     if (!mounted) return;
     setState(() => _completing = false);
     final sale = result.sale;
@@ -417,10 +458,20 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     };
     final matching = filterMedicines(medicines, query: _query);
     final customerValue =
-        _customerId != null &&
-            customers.any((c) => c.id == _customerId)
+        _customerId != null && customers.any((c) => c.id == _customerId)
         ? _customerId
         : null;
+    // Week 5 Day 4 (D155): the payment methods offered at checkout
+    // come from Organization Settings — only the enabled POS methods
+    // (cash / card / credit) are offered, in that order. The
+    // effective method is the selected one when still offered, else
+    // the first offered method (a disabled method can never be
+    // charged by a stale selection).
+    final orgSettings = ref.watch(orgSettingsProvider);
+    final offeredMethods = posPaymentMethods(orgSettings);
+    final effectiveMethod = offeredMethods.contains(_paymentMethod)
+        ? _paymentMethod
+        : (offeredMethods.isEmpty ? _paymentMethod : offeredMethods.first);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -436,10 +487,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
           // Sync status (Week 3 Day 3, D108/D109): every completed
           // sale enqueues one sync op through the production data
           // layer — the chip shows the pending count live.
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: SyncStatusChip(),
-          ),
+          const Align(alignment: Alignment.centerLeft, child: SyncStatusChip()),
           const SizedBox(height: 12),
           Wrap(
             spacing: 8,
@@ -533,8 +581,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   for (final medicine in matching.take(8))
                     _MedicinePickRow(
                       medicine: medicine,
-                      batches:
-                          inventoryByMedicine[medicine.id] ?? const [],
+                      batches: inventoryByMedicine[medicine.id] ?? const [],
                       onAdd: () => _addMedicine(
                         medicine,
                         sellableStock: sellableStockFor(
@@ -561,12 +608,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   for (final line in _lines)
                     _CartLineRow(
                       line: line,
-                      sellableStock:
-                          sellableByMedicine[line.medicineId] ?? 0,
-                      onDecrease: () =>
-                          _changeQuantity(line.medicineId, -1),
-                      onIncrease: () =>
-                          _changeQuantity(line.medicineId, 1),
+                      sellableStock: sellableByMedicine[line.medicineId] ?? 0,
+                      onDecrease: () => _changeQuantity(line.medicineId, -1),
+                      onIncrease: () => _changeQuantity(line.medicineId, 1),
                       onDiscountChanged: (discountMinor) =>
                           _setLineDiscount(line.medicineId, discountMinor),
                       onRemove: () => _removeLine(line.medicineId),
@@ -590,7 +634,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   ),
                 _TotalRow(label: 'Total', valueMinor: _totalMinor, bold: true),
                 if (!_splitPayment &&
-                    _paymentMethod == SalePaymentMethod.cash &&
+                    effectiveMethod == SalePaymentMethod.cash &&
                     _totalMinor > 0) ...[
                   const SizedBox(height: 4),
                   _TotalRow(
@@ -650,13 +694,10 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                     for (final customer in customers)
                       DropdownMenuItem<String?>(
                         value: customer.id,
-                        child: Text(
-                          '${customer.name} • ${customer.phone}',
-                        ),
+                        child: Text('${customer.name} • ${customer.phone}'),
                       ),
                   ],
-                  onChanged: (value) =>
-                      setState(() => _customerId = value),
+                  onChanged: (value) => setState(() => _customerId = value),
                 ),
                 const SizedBox(height: 12),
                 const Text(
@@ -674,37 +715,46 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                     'Pay across methods — the parts must add up to the total.',
                   ),
                   value: _splitPayment,
-                  onChanged: (value) =>
-                      setState(() => _splitPayment = value),
+                  onChanged: (value) => setState(() => _splitPayment = value),
                 ),
                 if (_splitPayment) ...[
                   const SizedBox(height: 8),
-                  PharmaTextField(
-                    key: const ValueKey('pos-split-cash'),
-                    controller: _splitCashController,
-                    label: 'Cash (Rs)',
-                    hintText: '0',
-                    keyboardType: TextInputType.number,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  const SizedBox(height: 8),
-                  PharmaTextField(
-                    key: const ValueKey('pos-split-card'),
-                    controller: _splitCardController,
-                    label: 'Card (Rs)',
-                    hintText: '0',
-                    keyboardType: TextInputType.number,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  const SizedBox(height: 8),
-                  PharmaTextField(
-                    key: const ValueKey('pos-split-credit'),
-                    controller: _splitCreditController,
-                    label: 'Credit — khata (Rs)',
-                    hintText: '0',
-                    keyboardType: TextInputType.number,
-                    onChanged: (_) => setState(() {}),
-                  ),
+                  // Week 5 Day 4 (D155): a split leg is shown only
+                  // for a method Organization Settings enables.
+                  if (offeredMethods.contains(SalePaymentMethod.cash))
+                    PharmaTextField(
+                      key: const ValueKey('pos-split-cash'),
+                      controller: _splitCashController,
+                      label: 'Cash (Rs)',
+                      hintText: '0',
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  if (offeredMethods.contains(SalePaymentMethod.cash) &&
+                      offeredMethods.contains(SalePaymentMethod.card))
+                    const SizedBox(height: 8),
+                  if (offeredMethods.contains(SalePaymentMethod.card))
+                    PharmaTextField(
+                      key: const ValueKey('pos-split-card'),
+                      controller: _splitCardController,
+                      label: 'Card (Rs)',
+                      hintText: '0',
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  if ((offeredMethods.contains(SalePaymentMethod.cash) ||
+                          offeredMethods.contains(SalePaymentMethod.card)) &&
+                      offeredMethods.contains(SalePaymentMethod.credit))
+                    const SizedBox(height: 8),
+                  if (offeredMethods.contains(SalePaymentMethod.credit))
+                    PharmaTextField(
+                      key: const ValueKey('pos-split-credit'),
+                      controller: _splitCreditController,
+                      label: 'Credit — khata (Rs)',
+                      hintText: '0',
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) => setState(() {}),
+                    ),
                   const SizedBox(height: 8),
                   _SplitRemainingRow(
                     totalMinor: _totalMinor,
@@ -725,31 +775,38 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
-                ] else ...[
-                  SegmentedButton<SalePaymentMethod>(
-                    segments: const [
-                      ButtonSegment(
-                        value: SalePaymentMethod.cash,
-                        label: Text('Cash'),
-                        icon: Icon(Icons.money_outlined),
-                      ),
-                      ButtonSegment(
-                        value: SalePaymentMethod.card,
-                        label: Text('Card'),
-                        icon: Icon(Icons.credit_card_outlined),
-                      ),
-                      ButtonSegment(
-                        value: SalePaymentMethod.credit,
-                        label: Text('Credit (khata)'),
-                        icon: Icon(Icons.book_outlined),
-                      ),
-                    ],
-                    selected: {_paymentMethod},
-                    onSelectionChanged: (selection) => setState(
-                      () => _paymentMethod = selection.first,
-                    ),
+                ] else if (offeredMethods.isEmpty) ...[
+                  // Week 5 Day 4 (D155): every POS method disabled
+                  // in Organization Settings — no method can be
+                  // charged until an owner enables one. The sale
+                  // cannot complete (see `_completeSale`).
+                  const Text(
+                    'No payment method is enabled in Organization Settings — enable one before completing a sale.',
+                    style: TextStyle(fontWeight: FontWeight.w600),
                   ),
-                  if (_paymentMethod == SalePaymentMethod.credit) ...[
+                ] else ...[
+                  // Week 5 Day 4 (D155): the picker offers only the
+                  // methods Organization Settings enables.
+                  SegmentedButton<SalePaymentMethod>(
+                    key: const ValueKey('pos-payment-methods'),
+                    segments: [
+                      for (final method in offeredMethods)
+                        ButtonSegment(
+                          value: method,
+                          label: Text(salePaymentMethodLabel(method)),
+                          icon: Icon(switch (method) {
+                            SalePaymentMethod.cash => Icons.money_outlined,
+                            SalePaymentMethod.card =>
+                              Icons.credit_card_outlined,
+                            SalePaymentMethod.credit => Icons.book_outlined,
+                          }),
+                        ),
+                    ],
+                    selected: {effectiveMethod},
+                    onSelectionChanged: (selection) =>
+                        setState(() => _paymentMethod = selection.first),
+                  ),
+                  if (effectiveMethod == SalePaymentMethod.credit) ...[
                     const SizedBox(height: 8),
                     Text(
                       _customerId == null
@@ -792,9 +849,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                               DropdownMenuItem(value: 16, child: Text('16%')),
                               DropdownMenuItem(value: 18, child: Text('18%')),
                             ],
-                            onChanged: (value) => setState(
-                              () => _taxRatePercent = value ?? 0,
-                            ),
+                            onChanged: (value) =>
+                                setState(() => _taxRatePercent = value ?? 0),
                           ),
                         ],
                       ),
@@ -802,7 +858,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                   ],
                 ),
                 if (!_splitPayment &&
-                    _paymentMethod == SalePaymentMethod.cash) ...[
+                    effectiveMethod == SalePaymentMethod.cash) ...[
                   const SizedBox(height: 12),
                   PharmaTextField(
                     controller: _cashReceivedController,
@@ -841,7 +897,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                 icon: Icons.point_of_sale_outlined,
                 loading: _completing,
                 expand: true,
-                onPressed: _completing || _lines.isEmpty
+                onPressed:
+                    _completing || _lines.isEmpty || offeredMethods.isEmpty
                     ? null
                     : _completeSale,
               );
@@ -922,12 +979,10 @@ class _HeldSalesCard extends StatelessWidget {
                             [
                               if (parked.customerId != null)
                                 customers
-                                    .where(
-                                      (c) => c.id == parked.customerId,
-                                    )
-                                    .map((c) => c.name)
-                                    .firstOrNull ??
-                                'Walk-in',
+                                        .where((c) => c.id == parked.customerId)
+                                        .map((c) => c.name)
+                                        .firstOrNull ??
+                                    'Walk-in',
                               'Held ${parked.parkedAt.hour.toString().padLeft(2, '0')}:${parked.parkedAt.minute.toString().padLeft(2, '0')} • ${parked.cashierName}',
                               if (parked.notes.isNotEmpty) parked.notes,
                             ].join(' • '),
@@ -1012,9 +1067,7 @@ class _MedicinePickRow extends StatelessWidget {
                   style: theme.textTheme.bodySmall,
                 ),
                 Text(
-                  sellable
-                      ? '$batchLabel • $sellableQty in stock'
-                      : batchLabel,
+                  sellable ? '$batchLabel • $sellableQty in stock' : batchLabel,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: expiredOnly ? StatusKind.danger.color : null,
                     fontWeight: expiredOnly ? FontWeight.w700 : null,
@@ -1239,9 +1292,8 @@ class _TotalRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = Theme.of(context).textTheme.bodyMedium?.copyWith(
-      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
-    );
+    final style = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(fontWeight: bold ? FontWeight.w700 : FontWeight.w400);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(

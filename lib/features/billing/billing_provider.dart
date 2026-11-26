@@ -82,6 +82,8 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
     int cashReceivedMinor = 0,
     List<SalePayment>? splitPayments,
     String? idempotencyKey,
+    int? maxLineDiscountPercent,
+    int? maxBillDiscountPercent,
   }) async {
     if (_completing) {
       return (sale: null, error: 'Sale already in progress — please wait.');
@@ -127,6 +129,8 @@ class SaleNotifier extends AsyncNotifier<List<Sale>> {
         creditLimitMinor: creditLimit,
         sellableStockByMedicine: sellableByMedicine,
         splitPayments: splitPayments,
+        maxLineDiscountPercent: maxLineDiscountPercent,
+        maxBillDiscountPercent: maxBillDiscountPercent,
       );
       if (errors.isNotEmpty) {
         return (sale: null, error: errors.first);

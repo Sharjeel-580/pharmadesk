@@ -9,6 +9,7 @@ import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/sale.dart';
 import '../customers/customers_provider.dart';
+import '../settings/org_settings.dart';
 import 'billing_logic.dart';
 import 'billing_provider.dart';
 import 'receipt_print.dart';
@@ -52,12 +53,18 @@ class ReceiptScreen extends ConsumerWidget {
     final customer = sale.customerId == null
         ? null
         : ref.watch(customerByIdProvider(sale.customerId!));
+    // Week 5 Day 4 (D155): the receipt uses the Organization
+    // Settings format — paper width + footer. Defaults (80mm, no
+    // footer) render exactly as before.
+    final orgSettings = ref.watch(orgSettingsProvider);
     final text = receiptText(
       sale: sale,
       branchName: branch.name,
       branchAddress: branch.address,
       brandHeader: brand.receiptHeader,
       customerName: customer?.name,
+      receiptFooter: orgSettings.receiptFooter,
+      receiptPaperWidthMm: orgSettings.receiptPaperWidthMm,
     );
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -72,148 +79,191 @@ class ReceiptScreen extends ConsumerWidget {
             onAction: () => context.go('/billing/history'),
           ),
           const SizedBox(height: 16),
-          PharmaCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(
-                  child: Text(
-                    brand.receiptHeader,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Center(
-                  child: Text(
-                    '${branch.name} • ${branch.address}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-                Center(
-                  child: Text(
-                    'Phone: ${branch.phone}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Divider(),
-                _ReceiptRow(label: 'Invoice', value: sale.invoiceNumber),
-                _ReceiptRow(
-                  label: 'Date',
-                  value: formatReceiptDateTime(
-                    sale.createdAt ?? DateTime.now(),
-                  ),
-                ),
-                _ReceiptRow(label: 'Cashier', value: sale.cashierName),
-                if (customer != null)
-                  _ReceiptRow(label: 'Customer', value: customer.name),
-                const Divider(),
-                for (final item in sale.items) ...[
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${item.medicineName} × ${item.quantity}',
-                                style: Theme.of(context).textTheme.bodyMedium
-                                    ?.copyWith(fontWeight: FontWeight.w600),
-                              ),
-                              Text(
-                                item.batchNo == null
-                                    ? '${formatPkr(item.unitPriceMinor)} each'
-                                    : 'Batch ${item.batchNo}'
-                                          '${item.batchExpiryDate == null ? '' : ' • exp ${item.batchExpiryDate!.day}/${item.batchExpiryDate!.month}/${item.batchExpiryDate!.year}'}'
-                                          ' • ${formatPkr(item.unitPriceMinor)} each',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                              if (item.lineDiscountMinor > 0)
-                                Text(
-                                  'Discount: -${formatPkr(item.lineDiscountMinor)}',
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                            ],
-                          ),
-                        ),
-                        Text(
-                          formatPkr(item.lineTotalMinor),
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(fontWeight: FontWeight.w600),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                const Divider(),
-                _ReceiptRow(
-                  label: 'Subtotal',
-                  value: formatPkr(sale.subtotalMinor),
-                ),
-                if (sale.billDiscountMinor > 0)
-                  _ReceiptRow(
-                    label: 'Bill discount',
-                    value: '-${formatPkr(sale.billDiscountMinor)}',
-                  ),
-                if (sale.taxMinor > 0)
-                  _ReceiptRow(label: 'Tax', value: formatPkr(sale.taxMinor)),
-                _ReceiptRow(
-                  label: 'Total',
-                  value: formatPkr(sale.totalMinor),
-                  bold: true,
-                ),
-                _ReceiptRow(
-                  label: 'Payment',
-                  value: salePaymentSummary(sale),
-                ),
-                if (sale.isSplit)
-                  for (final leg in sale.payments)
-                    _ReceiptRow(
-                      label: '  ${salePaymentMethodLabel(leg.method)}',
-                      value: formatPkr(leg.amountMinor),
-                    ),
-                // The cash rows describe the cash actually handed
-                // over (`cashReceivedMinor`), not the cash leg: a
-                // Sale built by hand (or read from a legacy doc)
-                // can carry cash without a `payments` leg, and the
-                // rows must still render (D137 fix, Day 5).
-                if (sale.cashReceivedMinor > 0) ...[
-                  _ReceiptRow(
-                    label: 'Cash received',
-                    value: formatPkr(sale.cashReceivedMinor),
-                  ),
-                  _ReceiptRow(
-                    label: 'Change',
-                    value: formatPkr(sale.changeMinor),
-                  ),
-                ],
-                if (sale.hasCreditLeg)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      'On credit — ${formatPkr(sale.creditMinor)} added to the customer khata.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontWeight: FontWeight.w600,
+          // Week 5 Day 4 (D155): the preview is sized to the
+          // configured paper width — 80mm ≈ 320px, 58mm ≈ 240px at
+          // preview scale — so the printed receipt (the browser
+          // prints this card) matches the setting. Defaults render
+          // the same card as before, just centred.
+          Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: orgSettings.receiptPaperWidthMm == 58 ? 240 : 320,
+              ),
+              child: PharmaCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Center(
+                      child: Text(
+                        brand.receiptHeader,
+                        style: Theme.of(context).textTheme.titleLarge
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                        textAlign: TextAlign.center,
                       ),
                     ),
-                  ),
-                const SizedBox(height: 12),
-                Center(
-                  child: StatusBadge(
-                    label: 'DEMO — not a real receipt',
-                    kind: StatusKind.warning,
-                  ),
+                    const SizedBox(height: 4),
+                    Center(
+                      child: Text(
+                        '${branch.name} • ${branch.address}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    Center(
+                      child: Text(
+                        'Phone: ${branch.phone}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Divider(),
+                    _ReceiptRow(label: 'Invoice', value: sale.invoiceNumber),
+                    _ReceiptRow(
+                      label: 'Date',
+                      value: formatReceiptDateTime(
+                        sale.createdAt ?? DateTime.now(),
+                      ),
+                    ),
+                    _ReceiptRow(label: 'Cashier', value: sale.cashierName),
+                    if (customer != null)
+                      _ReceiptRow(label: 'Customer', value: customer.name),
+                    const Divider(),
+                    for (final item in sale.items) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '${item.medicineName} × ${item.quantity}',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(fontWeight: FontWeight.w600),
+                                  ),
+                                  Text(
+                                    item.batchNo == null
+                                        ? '${formatPkr(item.unitPriceMinor)} each'
+                                        : 'Batch ${item.batchNo}'
+                                              '${item.batchExpiryDate == null ? '' : ' • exp ${item.batchExpiryDate!.day}/${item.batchExpiryDate!.month}/${item.batchExpiryDate!.year}'}'
+                                              ' • ${formatPkr(item.unitPriceMinor)} each',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall,
+                                  ),
+                                  if (item.lineDiscountMinor > 0)
+                                    Text(
+                                      'Discount: -${formatPkr(item.lineDiscountMinor)}',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall,
+                                    ),
+                                ],
+                              ),
+                            ),
+                            Text(
+                              formatPkr(item.lineTotalMinor),
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    const Divider(),
+                    _ReceiptRow(
+                      label: 'Subtotal',
+                      value: formatPkr(sale.subtotalMinor),
+                    ),
+                    if (sale.billDiscountMinor > 0)
+                      _ReceiptRow(
+                        label: 'Bill discount',
+                        value: '-${formatPkr(sale.billDiscountMinor)}',
+                      ),
+                    if (sale.taxMinor > 0)
+                      _ReceiptRow(
+                        label: 'Tax',
+                        value: formatPkr(sale.taxMinor),
+                      ),
+                    _ReceiptRow(
+                      label: 'Total',
+                      value: formatPkr(sale.totalMinor),
+                      bold: true,
+                    ),
+                    _ReceiptRow(
+                      label: 'Payment',
+                      value: salePaymentSummary(sale),
+                    ),
+                    if (sale.isSplit)
+                      for (final leg in sale.payments)
+                        _ReceiptRow(
+                          label: '  ${salePaymentMethodLabel(leg.method)}',
+                          value: formatPkr(leg.amountMinor),
+                        ),
+                    // The cash rows describe the cash actually handed
+                    // over (`cashReceivedMinor`), not the cash leg: a
+                    // Sale built by hand (or read from a legacy doc)
+                    // can carry cash without a `payments` leg, and the
+                    // rows must still render (D137 fix, Day 5).
+                    if (sale.cashReceivedMinor > 0) ...[
+                      _ReceiptRow(
+                        label: 'Cash received',
+                        value: formatPkr(sale.cashReceivedMinor),
+                      ),
+                      _ReceiptRow(
+                        label: 'Change',
+                        value: formatPkr(sale.changeMinor),
+                      ),
+                    ],
+                    if (sale.hasCreditLeg)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'On credit — ${formatPkr(sale.creditMinor)} added to the customer khata.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Center(
+                      // The badge label is long; on the narrow preview
+                      // (58mm = 240px) it must shrink instead of
+                      // overflowing the card (D155 fix).
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: StatusBadge(
+                          label: 'DEMO — not a real receipt',
+                          kind: StatusKind.warning,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Center(
+                      child: Text('Thank you for shopping with us!'),
+                    ),
+                    if (orgSettings.receiptFooter.trim().isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Center(
+                        child: Text(
+                          orgSettings.receiptFooter,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Center(
+                      child: Text(
+                        'Receipt paper: ${orgSettings.receiptPaperWidthMm}mm',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                const Center(child: Text('Thank you for shopping with us!')),
-              ],
+              ),
             ),
           ),
           const SizedBox(height: 16),
@@ -295,9 +345,8 @@ class _ReceiptRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = Theme.of(context).textTheme.bodyMedium?.copyWith(
-      fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
-    );
+    final style = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(fontWeight: bold ? FontWeight.w700 : FontWeight.w400);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(

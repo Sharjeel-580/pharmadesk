@@ -2,6 +2,7 @@ import '../../core/utils/money.dart';
 import '../../models/inventory_item.dart';
 import '../../models/sale.dart';
 import '../inventory/inventory_logic.dart';
+import '../settings/org_settings.dart';
 
 /// Day 6 POS / billing logic — pure functions over plain values, so
 /// they are unit-testable without pumping anything.
@@ -73,6 +74,80 @@ int cartSubtotalMinor(Iterable<CartLine> lines) {
 int computeTaxMinor({required int taxableMinor, required int taxRatePercent}) {
   if (taxableMinor <= 0 || taxRatePercent <= 0) return 0;
   return taxableMinor * taxRatePercent ~/ 100;
+}
+
+// --- Organization Settings wiring (Week 5 Day 4, D155 — SRS D-34) ---
+//
+// The POS reads the Organization Settings tab (D134/D136) for
+// payment methods, discount caps and receipt format — the tax rate
+// was already wired (D136). Every default keeps today's behaviour:
+// the default settings enable cash / card / credit (the three
+// methods the POS offered before), set no discount caps, and use
+// 80mm paper with no footer — so with untouched settings the POS
+// behaves exactly as it did before this wiring.
+
+/// Payment methods the POS may offer at checkout, from the
+/// organization settings (D155).
+///
+/// Only the three methods the POS can settle are offered — cash,
+/// card, credit (khata) — in that order, and only when the
+/// organization has them enabled. Bank transfer / JazzCash /
+/// Easypaisa are recorded methods in the settings (FR-POS-04) but
+/// the POS has no settlement flow for them, so they never appear
+/// here — enabling one does not invent a checkout path for it. With
+/// default settings all three POS methods are enabled, so the
+/// picker is unchanged until an owner changes the setting.
+List<SalePaymentMethod> posPaymentMethods(OrgSettings settings) {
+  final offered = <SalePaymentMethod>[];
+  if (settings.paymentMethods.contains(OrgPaymentMethod.cash)) {
+    offered.add(SalePaymentMethod.cash);
+  }
+  if (settings.paymentMethods.contains(OrgPaymentMethod.card)) {
+    offered.add(SalePaymentMethod.card);
+  }
+  if (settings.paymentMethods.contains(OrgPaymentMethod.credit)) {
+    offered.add(SalePaymentMethod.credit);
+  }
+  return offered;
+}
+
+/// A line discount clamped to the configured maximum (D155, int
+/// paisa). [maxPercent] is the settings cap in whole percent;
+/// `null` means no cap — the discount passes through unchanged, so
+/// with default settings behaviour is identical to before. The
+/// clamp also never exceeds the line gross (a discount cannot make
+/// a line negative).
+int cappedLineDiscountMinor({
+  required int lineGrossMinor,
+  required int discountMinor,
+  int? maxPercent,
+}) {
+  var capped = discountMinor;
+  if (capped < 0) capped = 0;
+  if (capped > lineGrossMinor) capped = lineGrossMinor;
+  if (maxPercent != null) {
+    final maxMinor = lineGrossMinor * maxPercent ~/ 100;
+    if (capped > maxMinor) capped = maxMinor;
+  }
+  return capped;
+}
+
+/// A bill discount clamped to the configured maximum (D155, int
+/// paisa). Same rule as [cappedLineDiscountMinor]: `null` = no cap,
+/// never above the subtotal.
+int cappedBillDiscountMinor({
+  required int subtotalMinor,
+  required int discountMinor,
+  int? maxPercent,
+}) {
+  var capped = discountMinor;
+  if (capped < 0) capped = 0;
+  if (capped > subtotalMinor) capped = subtotalMinor;
+  if (maxPercent != null) {
+    final maxMinor = subtotalMinor * maxPercent ~/ 100;
+    if (capped > maxMinor) capped = maxMinor;
+  }
+  return capped;
 }
 
 /// Grand total: subtotal − bill discount + tax, never below zero.
@@ -151,6 +226,11 @@ List<String> validateSplitPayments({
 ///   batches don't count).
 /// - The bill discount may not exceed the subtotal; the tax rate must
 ///   be 0–100.
+/// - [maxLineDiscountPercent] / [maxBillDiscountPercent] (D155): the
+///   Organization Settings caps, in whole percent — `null` = no cap.
+///   A line discount above its cap (measured against the line gross)
+///   or a bill discount above its cap (against the subtotal) is
+///   refused. Cross-multiplication keeps the check in integers (D6).
 /// - Cash needs enough received to cover the total.
 /// - Credit needs a customer, and (when the customer has a limit) the
 ///   new outstanding must stay within it.
@@ -169,6 +249,8 @@ List<String> validateSale({
   int creditLimitMinor = 0,
   Map<String, int> sellableStockByMedicine = const {},
   List<SalePayment>? splitPayments,
+  int? maxLineDiscountPercent,
+  int? maxBillDiscountPercent,
 }) {
   final errors = <String>[];
   if (lines.isEmpty) {
@@ -187,6 +269,14 @@ List<String> validateSale({
         '${line.medicineName}: line discount cannot exceed the line total.',
       );
     }
+    if (maxLineDiscountPercent != null &&
+        line.lineDiscountMinor * 100 >
+            line.grossMinor * maxLineDiscountPercent) {
+      errors.add(
+        '${line.medicineName}: line discount is above the maximum '
+        '$maxLineDiscountPercent% set in Organization Settings.',
+      );
+    }
     final sellable = sellableStockByMedicine[line.medicineId];
     if (sellable != null && line.quantity > sellable) {
       errors.add(
@@ -200,6 +290,13 @@ List<String> validateSale({
   }
   if (billDiscountMinor > subtotal) {
     errors.add('Bill discount cannot exceed the subtotal.');
+  }
+  if (maxBillDiscountPercent != null &&
+      billDiscountMinor * 100 > subtotal * maxBillDiscountPercent) {
+    errors.add(
+      'Bill discount is above the maximum $maxBillDiscountPercent% set '
+      'in Organization Settings.',
+    );
   }
   if (taxRatePercent < 0 || taxRatePercent > 100) {
     errors.add('Tax rate must be between 0% and 100%.');
@@ -215,9 +312,7 @@ List<String> validateSale({
   );
   final splits = splitPayments;
   if (splits != null && splits.isNotEmpty) {
-    errors.addAll(
-      validateSplitPayments(totalMinor: total, splits: splits),
-    );
+    errors.addAll(validateSplitPayments(totalMinor: total, splits: splits));
     final cashLeg = splits
         .where((leg) => leg.method == SalePaymentMethod.cash)
         .fold(0, (sum, leg) => sum + leg.amountMinor);
@@ -361,8 +456,8 @@ Sale buildSale({
     billDiscountMinor: billDiscountMinor,
     taxMinor: tax,
   );
-  final payments = splitPayments ??
-      [SalePayment(method: paymentMethod, amountMinor: total)];
+  final payments =
+      splitPayments ?? [SalePayment(method: paymentMethod, amountMinor: total)];
   var primaryMethod = paymentMethod;
   var largestLeg = 0;
   for (final leg in payments) {
@@ -403,14 +498,25 @@ Sale buildSale({
 /// Plain-text receipt for the Share action (copied to the clipboard)
 /// and for the print preview. All money in int paisa, formatted with
 /// [formatPkr].
+///
+/// [receiptFooter] (D155) is the Organization Settings footer line,
+/// printed at the foot of the receipt when non-empty (default: no
+/// footer — the settings default is empty). [receiptPaperWidthMm]
+/// narrows the separator rule for the 58mm small-printer option
+/// (default 80mm).
 String receiptText({
   required Sale sale,
   required String branchName,
   required String branchAddress,
   required String brandHeader,
   String? customerName,
+  String receiptFooter = '',
+  int receiptPaperWidthMm = 80,
 }) {
   final buffer = StringBuffer();
+  final rule = receiptPaperWidthMm == 58
+      ? '------------------------'
+      : '--------------------------------';
   buffer.writeln(brandHeader);
   buffer.writeln(branchName);
   buffer.writeln(branchAddress);
@@ -420,7 +526,7 @@ String receiptText({
   );
   buffer.writeln('Cashier: ${sale.cashierName}');
   if (customerName != null) buffer.writeln('Customer: $customerName');
-  buffer.writeln('--------------------------------');
+  buffer.writeln(rule);
   for (final item in sale.items) {
     buffer.writeln(
       '${item.medicineName} x${item.quantity} — ${formatPkr(item.lineTotalMinor)}',
@@ -434,7 +540,7 @@ String receiptText({
       buffer.writeln('  Discount: -${formatPkr(item.lineDiscountMinor)}');
     }
   }
-  buffer.writeln('--------------------------------');
+  buffer.writeln(rule);
   buffer.writeln('Subtotal: ${formatPkr(sale.subtotalMinor)}');
   if (sale.billDiscountMinor > 0) {
     buffer.writeln('Bill discount: -${formatPkr(sale.billDiscountMinor)}');
@@ -461,6 +567,8 @@ String receiptText({
     );
   }
   buffer.writeln('Thank you for shopping with us!');
+  final footer = receiptFooter.trim();
+  if (footer.isNotEmpty) buffer.writeln(footer);
   buffer.writeln('DEMO — not a real receipt.');
   return buffer.toString();
 }
