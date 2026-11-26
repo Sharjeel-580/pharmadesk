@@ -6,19 +6,25 @@ import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../../models/stock_adjustment_request.dart';
 import 'inventory_logic.dart';
 import 'inventory_provider.dart';
+import 'stock_adjustment_logic.dart';
+import 'stock_adjustment_queue.dart';
 
 /// Stock-operation dialogs (Day 5), shared by the inventory screen and
 /// the medicine detail screen.
 ///
 /// - Receive: adds a batch (medicine, batch no., mfg/expiry, qty, cost).
-/// - Adjust: increases/decreases one batch with a required reason.
+/// - Adjust: files an adjustment *request* with a required reason —
+///   it no longer applies directly (Week 4 Day 5, D141 — the request
+///   is approved on `/inventory/adjustments`).
 /// - Count: records a physical count and reports the variance.
 ///
 /// Every dialog validates before saving and returns its result so the
 /// caller can confirm with a snackbar; nothing here writes to a
-/// repository directly — all writes go through [InventoryNotifier].
+/// repository directly — all writes go through [InventoryNotifier]
+/// (or, for adjustments, the approval queue).
 
 /// Opens the receive-stock dialog. [medicine] preselects the medicine
 /// (medicine detail passes it); otherwise the dialog offers the full
@@ -38,15 +44,23 @@ Future<InventoryItem?> showReceiveStockDialog(
   );
 }
 
-/// Opens the adjust-stock dialog for one batch. Returns the updated
-/// batch, or `null` on cancel / failed adjustment.
-Future<InventoryItem?> showAdjustStockDialog(
+/// Opens the adjust-stock dialog for one batch (Week 4 Day 5, D141
+/// — SRS D-14 / FR-INV-08).
+///
+/// The dialog no longer applies the adjustment directly: it files a
+/// [StockAdjustmentRequest] with a required reason, and an approver
+/// decides it on the queue screen (`/inventory/adjustments`).
+/// Returns the filed request, or `null` on cancel / invalid request.
+/// The old direct-apply path stays available programmatically
+/// ([InventoryNotifier.adjustStock]) for approvals and system-driven
+/// restocks (returns) — it is no longer reachable from this dialog.
+Future<StockAdjustmentRequest?> showAdjustStockDialog(
   BuildContext context,
   WidgetRef ref, {
   required InventoryItem batch,
   required String medicineName,
 }) {
-  return showDialog<InventoryItem>(
+  return showDialog<StockAdjustmentRequest>(
     context: context,
     builder: (dialogContext) => _AdjustStockDialog(
       batch: batch,
@@ -309,11 +323,6 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
   String? _error;
   bool _saving = false;
 
-  /// Dialog-held idempotency key (Week 3 Day 5, D115 — closes the
-  /// D54 UI gap for this dialog): minted once, reused on retry.
-  late final String _idempotencyKey =
-      newIdempotencyKey('stock-adjust-${widget.batch.id}');
-
   @override
   void initState() {
     super.initState();
@@ -331,48 +340,55 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
   Future<void> _save() async {
     final qty = int.tryParse(_qtyController.text.trim());
     final reason = _reasonController.text.trim();
-    String? error;
+    // Validation is the shared request validator (D141) — the
+    // dialog only files the request; the layer re-validates at
+    // approval time.
+    final error = validateAdjustmentRequest(
+      deltaQty: qty == null ? 0 : (_increase ? qty : -qty),
+      reason: reason,
+      onHandQty: widget.batch.quantity,
+    );
     if (qty == null || qty <= 0) {
-      error = 'Quantity must be a whole number above zero.';
-    } else if (reason.isEmpty) {
-      error = 'A reason is required (e.g. damaged, found, expired).';
-    } else if (!_increase && qty > widget.batch.quantity) {
-      error =
-          'Cannot remove $qty units — only ${widget.batch.quantity} on hand.';
+      setState(
+        () => _error = 'Quantity must be a whole number above zero.',
+      );
+      return;
     }
     if (error != null) {
       setState(() => _error = error);
       return;
     }
-    // qty is non-null here: every null/zero case sets error above.
-    final amount = qty!;
     setState(() {
       _error = null;
       _saving = true;
     });
-    final updated = await ref
-        .read(inventoryProvider.notifier)
-        .adjustStock(
+    final request = ref
+        .read(stockAdjustmentQueueProvider.notifier)
+        .requestAdjustment(
           batchId: widget.batch.id,
-          deltaQty: _increase ? amount : -amount,
+          batchNo: widget.batch.batchNo ?? '—',
+          medicineId: widget.batch.medicineId,
+          medicineName: widget.medicineName,
+          branchId: widget.batch.branchId,
+          deltaQty: _increase ? qty : -qty,
           reason: reason,
-          idempotencyKey: _idempotencyKey,
+          onHandQty: widget.batch.quantity,
         );
     if (!mounted) return;
-    if (updated == null) {
+    if (request == null) {
       setState(() {
         _saving = false;
-        _error = 'Adjustment failed — please try again.';
+        _error = 'Request failed — please try again.';
       });
       return;
     }
-    Navigator.of(context).pop(updated);
+    Navigator.of(context).pop(request);
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Adjust stock'),
+      title: const Text('Request adjustment'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -387,6 +403,10 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             Text(
               'On hand: ${widget.batch.quantity} units',
               style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'This files a request — an approver reviews it on the Adjustment Approvals screen before it applies.',
             ),
             const SizedBox(height: 12),
             SegmentedButton<bool>(
@@ -408,6 +428,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             ),
             const SizedBox(height: 12),
             PharmaTextField(
+              key: const ValueKey('adjust-qty-field'),
               controller: _qtyController,
               label: 'Quantity',
               hintText: 'e.g. 5',
@@ -415,6 +436,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             ),
             const SizedBox(height: 12),
             PharmaTextField(
+              key: const ValueKey('adjust-reason-field'),
               controller: _reasonController,
               label: 'Reason (required)',
               hintText: 'e.g. damaged in transit',
@@ -437,7 +459,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
           onPressed: () => Navigator.of(context).pop(),
         ),
         PharmaButton(
-          label: 'Save adjustment',
+          label: 'Submit request',
           size: PharmaButtonSize.small,
           loading: _saving,
           onPressed: _saving ? null : _save,
@@ -640,6 +662,176 @@ class _DateRow extends StatelessWidget {
                 ],
               ),
             ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Opens the quarantine / un-quarantine dialog (Week 4 Day 5, D140 —
+/// SRS D-11 / FR-INV-07).
+///
+/// Quarantine parks a batch out of the FEFO saleable pool — it is
+/// NOT a write-off (the quantity stays), and the batch can be
+/// restored with the same dialog (`quarantine: false`). A reason is
+/// required: it goes on the audit entry. Returns the updated batch,
+/// or `null` on cancel / failed transition.
+Future<InventoryItem?> showQuarantineBatchDialog(
+  BuildContext context,
+  WidgetRef ref, {
+  required InventoryItem batch,
+  required String medicineName,
+  required bool quarantine,
+}) {
+  return showDialog<InventoryItem>(
+    context: context,
+    builder: (dialogContext) => _QuarantineBatchDialog(
+      batch: batch,
+      medicineName: medicineName,
+      quarantine: quarantine,
+    ),
+  );
+}
+
+class _QuarantineBatchDialog extends ConsumerStatefulWidget {
+  const _QuarantineBatchDialog({
+    required this.batch,
+    required this.medicineName,
+    required this.quarantine,
+  });
+
+  final InventoryItem batch;
+  final String medicineName;
+  final bool quarantine;
+
+  @override
+  ConsumerState<_QuarantineBatchDialog> createState() =>
+      _QuarantineBatchDialogState();
+}
+
+class _QuarantineBatchDialogState
+    extends ConsumerState<_QuarantineBatchDialog> {
+  late final TextEditingController _reasonController;
+  String? _error;
+  bool _saving = false;
+
+  /// Dialog-held idempotency key (D115 pattern): minted once, reused
+  /// on retry, so a double-tap cannot quarantine twice.
+  late final String _idempotencyKey = newIdempotencyKey(
+    'batch-status-${widget.batch.id}-${widget.quarantine ? 'quarantine' : 'restore'}',
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _reasonController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final reason = _reasonController.text.trim();
+    if (reason.isEmpty) {
+      setState(() => _error = 'A reason is required for the audit trail.');
+      return;
+    }
+    setState(() {
+      _error = null;
+      _saving = true;
+    });
+    final notifier = ref.read(inventoryProvider.notifier);
+    final updated = widget.quarantine
+        ? await notifier.quarantineBatch(
+            batchId: widget.batch.id,
+            reason: reason,
+            idempotencyKey: _idempotencyKey,
+          )
+        : await notifier.unquarantineBatch(
+            batchId: widget.batch.id,
+            reason: reason,
+            idempotencyKey: _idempotencyKey,
+          );
+    if (!mounted) return;
+    if (updated == null) {
+      setState(() {
+        _saving = false;
+        _error = widget.quarantine
+            ? 'Could not quarantine — the batch may already be quarantined or expired.'
+            : 'Could not restore — the batch is not quarantined.';
+      });
+      return;
+    }
+    Navigator.of(context).pop(updated);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final quarantine = widget.quarantine;
+    return AlertDialog(
+      title: Text(quarantine ? 'Quarantine batch' : 'Restore batch'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${widget.medicineName} • Batch ${widget.batch.batchNo ?? '—'}',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            Text(
+              'On hand: ${widget.batch.quantity} units',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              quarantine
+                  ? 'The batch leaves the saleable pool (FEFO) until it is restored. '
+                        'It is not written off — the quantity stays ${widget.batch.quantity} units.'
+                  : 'The batch returns to the saleable pool (FEFO) and can be sold again.',
+            ),
+            const SizedBox(height: 12),
+            PharmaTextField(
+              key: const ValueKey('quarantine-reason-field'),
+              controller: _reasonController,
+              label: 'Reason (required)',
+              hintText: quarantine
+                  ? 'e.g. suspected damage, recall notice'
+                  : 'e.g. checked — safe to sell',
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.error,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('quarantine-confirm'),
+          onPressed: _saving ? null : _save,
+          child: Text(
+            _saving
+                ? 'Saving…'
+                : quarantine
+                ? 'Quarantine batch'
+                : 'Restore batch',
           ),
         ),
       ],

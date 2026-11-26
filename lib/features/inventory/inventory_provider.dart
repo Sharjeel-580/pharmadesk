@@ -36,6 +36,55 @@ class InventoryNotifier extends AsyncNotifier<List<InventoryItem>> {
     return repo.getInventory();
   }
 
+  /// Quarantines one batch through the layer (status + audit +
+  /// sync). Returns `null` when the transition is not allowed
+  /// (e.g. the batch is already quarantined or expired).
+  Future<InventoryItem?> quarantineBatch({
+    required String batchId,
+    required String reason,
+    String? idempotencyKey,
+  }) async {
+    try {
+      final updated = await ref
+          .read(productionDataLayerProvider)
+          .quarantineBatch(
+            batchId: batchId,
+            reason: reason,
+            idempotencyKey: idempotencyKey,
+          );
+      await refresh();
+      _invalidateDependents();
+      ref.invalidate(syncStatusProvider);
+      return updated;
+    } on ArgumentError {
+      return null;
+    }
+  }
+
+  /// Restores a quarantined batch to `available` through the layer.
+  /// Returns `null` when the batch is not quarantined.
+  Future<InventoryItem?> unquarantineBatch({
+    required String batchId,
+    required String reason,
+    String? idempotencyKey,
+  }) async {
+    try {
+      final updated = await ref
+          .read(productionDataLayerProvider)
+          .unquarantineBatch(
+            batchId: batchId,
+            reason: reason,
+            idempotencyKey: idempotencyKey,
+          );
+      await refresh();
+      _invalidateDependents();
+      ref.invalidate(syncStatusProvider);
+      return updated;
+    } on ArgumentError {
+      return null;
+    }
+  }
+
   Future<void> refresh() async {
     state = const AsyncValue.loading();
     state = await AsyncValue.guard(

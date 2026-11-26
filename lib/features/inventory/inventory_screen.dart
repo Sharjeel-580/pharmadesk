@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/data/permission_service.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../core/widgets/sync_status_widget.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../authentication/auth_state.dart';
 import 'inventory_logic.dart';
 import 'inventory_provider.dart';
 import 'stock_operation_dialogs.dart';
@@ -365,27 +367,42 @@ class _MedicineStockGroup extends StatelessWidget {
         children: [
           InkWell(
             onTap: () => context.go('/medicines/${medicine.id}'),
-            child: Row(
+            // Week 4 Day 5 (D142): the old header Row — name column
+            // + sellable/total + badges + chevron on one line —
+            // overflowed 24–56px at 390px. Name + chevron stay on
+            // the first line; figures + badges move to a second line
+            // where the badges wrap instead of overflowing.
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${medicine.name} ${medicine.strength}',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${medicine.name} ${medicine.strength}',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Text(
+                            '${medicine.brand} • ${medicine.packSize} • ${formatPkr(medicine.priceMinor)}',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
                       ),
-                      Text(
-                        '${medicine.brand} • ${medicine.packSize} • ${formatPkr(medicine.priceMinor)}',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
+                    ),
+                    const Icon(Icons.chevron_right),
+                  ],
                 ),
+                const SizedBox(height: 6),
+                // Figures on their own line, badges on the next:
+                // the old Row left the badges a ~82px run, and a
+                // badge wider than its Wrap run overflows (40px).
                 Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       '$sellable sellable / $total total',
@@ -393,27 +410,27 @@ class _MedicineStockGroup extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (hasExpired)
-                          const StatusBadge(
-                            label: 'Has expired',
-                            kind: StatusKind.danger,
-                          ),
-                        if (lowStock) ...[
-                          const SizedBox(width: 4),
-                          const StatusBadge(
-                            label: 'Low stock',
-                            kind: StatusKind.warning,
-                          ),
+                    if (hasExpired || lowStock) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          if (hasExpired)
+                            const StatusBadge(
+                              label: 'Has expired',
+                              kind: StatusKind.danger,
+                            ),
+                          if (lowStock)
+                            const StatusBadge(
+                              label: 'Low stock',
+                              kind: StatusKind.warning,
+                            ),
                         ],
-                      ],
-                    ),
+                      ),
+                    ],
                   ],
                 ),
-                const Icon(Icons.chevron_right),
               ],
             ),
           ),
@@ -451,6 +468,31 @@ class _InventoryBatchRow extends ConsumerWidget {
   final InventoryItem batch;
   final String medicineName;
 
+  Future<void> _toggleQuarantine(
+    BuildContext context,
+    WidgetRef ref, {
+    required bool quarantine,
+  }) async {
+    final updated = await showQuarantineBatchDialog(
+      context,
+      ref,
+      batch: batch,
+      medicineName: medicineName,
+      quarantine: quarantine,
+    );
+    if (updated != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            quarantine
+                ? 'Batch ${updated.batchNo} quarantined — out of saleable stock.'
+                : 'Batch ${updated.batchNo} restored to saleable stock.',
+          ),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
@@ -459,89 +501,137 @@ class _InventoryBatchRow extends ConsumerWidget {
     final daysLeft = daysToExpiry(batch.expiryDate);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
+      // Week 4 Day 5 (D142): the old one-line Row — text + badge +
+      // two icon buttons — overflowed 24–56px at 390px (the badge
+      // alone is ~170px in the test font). Text + badge stay on the
+      // first line; the actions move to a second, right-aligned row.
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Batch ${batch.batchNo ?? '—'} • ${batch.quantity} units',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Batch ${batch.batchNo ?? '—'} • ${batch.quantity} units',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      'Mfg ${batch.mfgDate == null ? '—' : formatShortDate(batch.mfgDate!)}'
+                      ' • Exp ${batch.expiryDate == null ? '—' : formatShortDate(batch.expiryDate!)}'
+                      '${daysLeft == null ? '' : bucket == ExpiryBucket.expired ? ' • expired ${-daysLeft}d ago' : ' • $daysLeft day(s) left'}'
+                      ' • cost ${formatPkr(batch.costMinor)}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: bucket == ExpiryBucket.expired
+                            ? StatusKind.danger.color
+                            : null,
+                        fontWeight: bucket == ExpiryBucket.expired
+                            ? FontWeight.w700
+                            : null,
+                      ),
+                    ),
+                  ],
                 ),
-                Text(
-                  'Mfg ${batch.mfgDate == null ? '—' : formatShortDate(batch.mfgDate!)}'
-                  ' • Exp ${batch.expiryDate == null ? '—' : formatShortDate(batch.expiryDate!)}'
-                  '${daysLeft == null ? '' : bucket == ExpiryBucket.expired ? ' • expired ${-daysLeft}d ago' : ' • $daysLeft day(s) left'}'
-                  ' • cost ${formatPkr(batch.costMinor)}',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: bucket == ExpiryBucket.expired
-                        ? StatusKind.danger.color
-                        : null,
-                    fontWeight: bucket == ExpiryBucket.expired
-                        ? FontWeight.w700
-                        : null,
+              ),
+              StatusBadge(
+                label: batch.isQuarantined
+                    ? 'Quarantined'
+                    : sellable
+                    ? expiryBucketLabel(bucket)
+                    : bucket == ExpiryBucket.expired
+                    ? 'Expired'
+                    : 'Out of stock',
+                kind: batch.isQuarantined
+                    ? StatusKind.warning
+                    : sellable
+                    ? expiryBucketKind(bucket)
+                    : StatusKind.danger,
+              ),
+            ],
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (permissionService.canWrite(
+                ref.watch(authProvider),
+                'stockReceive',
+                batch.branchId,
+              )) ...[
+                if (batch.status == BatchStatus.available)
+                  IconButton(
+                    key: ValueKey('inv-quarantine-${batch.id}'),
+                    tooltip: 'Quarantine batch',
+                    icon: const Icon(Icons.block_outlined),
+                    onPressed: () => _toggleQuarantine(
+                      context,
+                      ref,
+                      quarantine: true,
+                    ),
+                  )
+                else if (batch.isQuarantined)
+                  IconButton(
+                    key: ValueKey('inv-unquarantine-${batch.id}'),
+                    tooltip: 'Restore batch',
+                    icon: const Icon(Icons.undo_outlined),
+                    onPressed: () => _toggleQuarantine(
+                      context,
+                      ref,
+                      quarantine: false,
+                    ),
                   ),
-                ),
               ],
-            ),
-          ),
-          StatusBadge(
-            label: sellable
-                ? expiryBucketLabel(bucket)
-                : bucket == ExpiryBucket.expired
-                ? 'Expired'
-                : 'Out of stock',
-            kind: sellable ? expiryBucketKind(bucket) : StatusKind.danger,
-          ),
-          IconButton(
-            key: ValueKey('inv-adjust-${batch.id}'),
-            tooltip: 'Adjust stock',
-            icon: const Icon(Icons.tune_outlined),
-            onPressed: () async {
-              final updated = await showAdjustStockDialog(
-                context,
-                ref,
-                batch: batch,
-                medicineName: medicineName,
-              );
-              if (updated != null && context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'Batch ${updated.batchNo} now has ${updated.quantity} units.',
-                    ),
-                  ),
-                );
-              }
-            },
-          ),
-          IconButton(
-            key: ValueKey('inv-count-${batch.id}'),
-            tooltip: 'Stock count',
-            icon: const Icon(Icons.fact_check_outlined),
-            onPressed: () async {
-              final result = await showStockCountDialog(
-                context,
-                ref,
-                batch: batch,
-                medicineName: medicineName,
-              );
-              if (result != null && context.mounted) {
-                final variance = result.variance;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      variance == 0
-                          ? 'Count matches the system (${result.item.quantity} units).'
-                          : 'Count saved — variance ${variance > 0 ? '+' : ''}$variance units.',
-                    ),
-                  ),
-                );
-              }
-            },
+              IconButton(
+                key: ValueKey('inv-adjust-${batch.id}'),
+                tooltip: 'Adjust stock',
+                icon: const Icon(Icons.tune_outlined),
+                onPressed: () async {
+                  final request = await showAdjustStockDialog(
+                    context,
+                    ref,
+                    batch: batch,
+                    medicineName: medicineName,
+                  );
+                  if (request != null && context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Adjustment requested — pending approval on the Adjustment Approvals screen.',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+              IconButton(
+                key: ValueKey('inv-count-${batch.id}'),
+                tooltip: 'Stock count',
+                icon: const Icon(Icons.fact_check_outlined),
+                onPressed: () async {
+                  final result = await showStockCountDialog(
+                    context,
+                    ref,
+                    batch: batch,
+                    medicineName: medicineName,
+                  );
+                  if (result != null && context.mounted) {
+                    final variance = result.variance;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          variance == 0
+                              ? 'Count matches the system (${result.item.quantity} units).'
+                              : 'Count saved — variance ${variance > 0 ? '+' : ''}$variance units.',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+            ],
           ),
         ],
       ),
