@@ -101,6 +101,26 @@ service cloud.firestore {
       return request.resource.data.get(field, 0) is int;
     }
 
+    // Branch doc shape (Week 5 Day 2, D148 — SRS §3.1, D130): the
+    // type is own / franchise, `active` is a bool, and the
+    // franchise / royalty rates — when present at all — are ints in
+    // 0..10000 basis points (0–100%). A missing rate means "not
+    // configured", never 0%.
+    function validBranchDoc() {
+      return request.resource.data.get('type', 'own')
+          in ['own', 'franchise']
+        && request.resource.data.get('active', true) is bool
+        && (request.resource.data.get('franchiseFeeRateBps', null) == null
+            || (request.resource.data.get('franchiseFeeRateBps', 0) is int
+                && request.resource.data.get('franchiseFeeRateBps', 0) >= 0
+                && request.resource.data.get('franchiseFeeRateBps', 0)
+                    <= 10000))
+        && (request.resource.data.get('royaltyRateBps', null) == null
+            || (request.resource.data.get('royaltyRateBps', 0) is int
+                && request.resource.data.get('royaltyRateBps', 0) >= 0
+                && request.resource.data.get('royaltyRateBps', 0) <= 10000));
+    }
+
     // ---------- root collections ----------
 
     match /organizations/{orgId} {
@@ -142,7 +162,9 @@ service cloud.firestore {
       allow read: if isSignedIn() && orgId() == resource.data.organizationId
         && (branchId in branchIds() || isHeadOffice());
       allow create, update: if role() in ['super_admin', 'owner', 'ho_admin']
-        && request.resource.data.organizationId == orgId();
+        && request.resource.data.organizationId == orgId()
+        && hasCommonFields()
+        && validBranchDoc();
       allow delete: if false;
     }
 
@@ -291,6 +313,28 @@ service cloud.firestore {
           request.resource.data.organizationId) && hasCommonFields();
         allow delete: if false;
       }
+    }
+
+    // Adjustment approval queue (Week 5 Day 1, D146 — SRS D-14 /
+    // FR-INV-08, §5.2.4): one doc per request, created pending and
+    // updated in place when decided. Writers are the requester roles
+    // (stockAdjustReq: Owner / HO Admin / Branch Mgr / Inventory
+    // Mgr) and the approver roles (stockAdjustApprove: Owner / HO
+    // Admin / Branch Mgr) — the union, like the batch rule; the
+    // not-the-requester check (§5.2.4) is enforced in the app, the
+    // rules enforce branch isolation + shape. Never deleted.
+    match /branches/{branchId}/stockAdjustments/{requestId} {
+      allow read: if inBranch(branchId, resource.data.organizationId);
+      allow create, update: if inBranchForWrite(branchId,
+            request.resource.data.organizationId)
+        && role() in ['super_admin', 'owner', 'ho_admin',
+          'branch_manager', 'inventory_manager']
+        && hasCommonFields()
+        && request.resource.data.deltaQty is int
+        && request.resource.data.deltaQty != 0
+        && request.resource.data.status in ['pending', 'approved',
+          'rejected'];
+      allow delete: if false;
     }
 
     match /branches/{branchId}/customers/{customerId} {
