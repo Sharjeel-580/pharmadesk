@@ -35,13 +35,27 @@ bool canWriteBranches(AppUser? user, String branchId) =>
 /// Validation for the add/edit branch form. Returns the problems
 /// found; empty = the form is valid. A rate is valid when it is
 /// absent (not configured) or 0–10000 basis points (0–100%).
+/// A branch code is valid when it is blank (the derived default
+/// from the branch id is used, D164) or — after trimming and
+/// uppercasing — 2–8 uppercase letters/digits (Week 6 Day 4, D168:
+/// the same rule the mapper enforces, so a form-built branch can
+/// never carry a code the mapper would replace).
 List<String> validateBranchForm({
   required String name,
+  String? code,
   int? franchiseFeeRateBps,
   int? royaltyRateBps,
 }) {
   final errors = <String>[];
   if (name.trim().isEmpty) errors.add('Branch name is required.');
+  final codeText = (code ?? '').trim();
+  if (codeText.isNotEmpty &&
+      !isValidBranchCode(codeText.toUpperCase())) {
+    errors.add(
+      'Branch code must be 2–8 uppercase letters or digits '
+      '(e.g. DHA). Leave it blank to use the default.',
+    );
+  }
   for (final (label, rate) in [
     ('Franchise fee rate', franchiseFeeRateBps),
     ('Royalty rate', royaltyRateBps),
@@ -101,6 +115,7 @@ class BranchDirectoryNotifier extends Notifier<List<Branch>> {
     await _ensureLoaded();
     final errors = validateBranchForm(
       name: branch.name,
+      code: branch.code,
       franchiseFeeRateBps: branch.franchiseFeeRateBps,
       royaltyRateBps: branch.royaltyRateBps,
     );
@@ -123,6 +138,7 @@ class BranchDirectoryNotifier extends Notifier<List<Branch>> {
     await _ensureLoaded();
     final errors = validateBranchForm(
       name: updated.name,
+      code: updated.code,
       franchiseFeeRateBps: updated.franchiseFeeRateBps,
       royaltyRateBps: updated.royaltyRateBps,
     );

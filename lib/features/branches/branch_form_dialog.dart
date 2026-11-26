@@ -23,6 +23,7 @@ class BranchFormDialog extends StatefulWidget {
 
 class _BranchFormDialogState extends State<BranchFormDialog> {
   late final TextEditingController _nameController;
+  late final TextEditingController _codeController;
   late final TextEditingController _addressController;
   late final TextEditingController _phoneController;
   late final TextEditingController _areasController;
@@ -37,6 +38,10 @@ class _BranchFormDialogState extends State<BranchFormDialog> {
     super.initState();
     final existing = widget.existing;
     _nameController = TextEditingController(text: existing?.name ?? '');
+    // Week 6 Day 4 (D168): the branch code — blank means "use the
+    // derived default from the branch id" (D164); an edit prefills
+    // the stored code.
+    _codeController = TextEditingController(text: existing?.code ?? '');
     _addressController = TextEditingController(
       text: existing?.address ?? '',
     );
@@ -66,6 +71,7 @@ class _BranchFormDialogState extends State<BranchFormDialog> {
   @override
   void dispose() {
     _nameController.dispose();
+    _codeController.dispose();
     _addressController.dispose();
     _phoneController.dispose();
     _areasController.dispose();
@@ -92,6 +98,7 @@ class _BranchFormDialogState extends State<BranchFormDialog> {
     errors.addAll(
       validateBranchForm(
         name: _nameController.text,
+        code: _codeController.text,
         franchiseFeeRateBps: feeBps == -1 ? null : feeBps,
         royaltyRateBps: royaltyBps == -1 ? null : royaltyBps,
       ),
@@ -107,14 +114,23 @@ class _BranchFormDialogState extends State<BranchFormDialog> {
         .where((area) => area.isNotEmpty)
         .toList();
     final managerId = _managerController.text.trim();
+    final id = existing?.id ?? _slugId(_nameController.text);
+    final codeText = _codeController.text.trim();
     final branch = Branch(
-      id: existing?.id ?? _slugId(_nameController.text),
+      id: id,
       name: _nameController.text.trim(),
       address: _addressController.text.trim(),
       phone: _phoneController.text.trim(),
       deliveryAreas: areas,
       active: existing?.active ?? true,
       createdAt: existing?.createdAt,
+      // Week 6 Day 4 (D168): blank stays '' — the repository
+      // derives the default from the id (D164); a typed code is
+      // normalized (lowercase → uppercase) — validation above
+      // already rejected anything that is not 2–8 letters/digits.
+      code: codeText.isEmpty
+          ? ''
+          : normalizeBranchCode(codeText, branchId: id),
       type: _type,
       managerId: managerId.isEmpty ? null : managerId,
       franchiseFeeRateBps: feeBps,
@@ -153,6 +169,13 @@ class _BranchFormDialogState extends State<BranchFormDialog> {
                 controller: _nameController,
                 label: 'Branch name',
                 hintText: 'e.g. Demo Branch — Model Town',
+              ),
+              const SizedBox(height: 12),
+              PharmaTextField(
+                key: const ValueKey('branch-code-field'),
+                controller: _codeController,
+                label: 'Branch code (optional)',
+                hintText: 'e.g. DHA — blank uses the default',
               ),
               const SizedBox(height: 12),
               PharmaTextField(

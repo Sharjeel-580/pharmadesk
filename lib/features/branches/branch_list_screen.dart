@@ -98,22 +98,31 @@ class BranchListScreen extends ConsumerWidget {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Row(
+                                  // Week 6 Day 5 (D170): a Wrap, not a
+                                  // Row — at 390px the name + two chips
+                                  // overflowed by 4.4px in the test font
+                                  // (the name's longest word is wider
+                                  // than the space the chips leave). The
+                                  // chips flow below the name when they
+                                  // do not fit beside it; the name is
+                                  // never ellipsized.
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 4,
+                                    crossAxisAlignment:
+                                        WrapCrossAlignment.center,
                                     children: [
-                                      Expanded(
-                                        child: Text(
-                                          branch.name,
-                                          style: theme.textTheme.titleMedium
-                                              ?.copyWith(
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                        ),
+                                      Text(
+                                        branch.name,
+                                        style: theme.textTheme.titleMedium
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                            ),
                                       ),
                                       if (branch.isFranchise)
                                         _BranchChip(label: 'Franchise')
                                       else
                                         _BranchChip(label: 'Own branch'),
-                                      const SizedBox(width: 8),
                                       _BranchChip(
                                         label: branch.active
                                             ? 'Active'
