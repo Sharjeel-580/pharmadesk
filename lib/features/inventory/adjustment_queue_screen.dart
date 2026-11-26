@@ -22,8 +22,10 @@ import 'stock_adjustment_queue.dart';
 /// rejects a pending request. Approval applies the adjustment
 /// through the layer (ledger + audit + sync, exactly like the old
 /// direct adjust); rejection records the decision and applies
-/// nothing. The queue is session-only (D131): requests filed this
-/// session only — persistence is a follow-up, recorded in D141.
+/// nothing. The queue is persisted through the production data layer
+/// (Week 5 Day 1, D146): requests filed in earlier sessions are
+/// re-read on start, so the list below is the durable queue, not
+/// just this session's filings.
 class AdjustmentQueueScreen extends ConsumerStatefulWidget {
   const AdjustmentQueueScreen({super.key});
 
@@ -166,7 +168,7 @@ class _AdjustmentQueueScreenState
     );
     controller.dispose();
     if (note == null) return;
-    final rejected = ref
+    final rejected = await ref
         .read(stockAdjustmentQueueProvider.notifier)
         .rejectAdjustment(requestId: request.id, note: note);
     if (!context.mounted) return;

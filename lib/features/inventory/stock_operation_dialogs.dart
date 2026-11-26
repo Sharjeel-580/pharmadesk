@@ -6,9 +6,12 @@ import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../../models/stock_adjustment_request.dart';
 import 'inventory_logic.dart';
 import 'inventory_provider.dart';
+import 'quarantine_outcome_logic.dart';
+import 'quarantine_outcome_queue.dart';
 import 'stock_adjustment_logic.dart';
 import 'stock_adjustment_queue.dart';
 
@@ -37,10 +40,8 @@ Future<InventoryItem?> showReceiveStockDialog(
 }) {
   return showDialog<InventoryItem>(
     context: context,
-    builder: (dialogContext) => _ReceiveStockDialog(
-      branchId: branchId,
-      preselectedMedicine: medicine,
-    ),
+    builder: (dialogContext) =>
+        _ReceiveStockDialog(branchId: branchId, preselectedMedicine: medicine),
   );
 }
 
@@ -62,10 +63,8 @@ Future<StockAdjustmentRequest?> showAdjustStockDialog(
 }) {
   return showDialog<StockAdjustmentRequest>(
     context: context,
-    builder: (dialogContext) => _AdjustStockDialog(
-      batch: batch,
-      medicineName: medicineName,
-    ),
+    builder: (dialogContext) =>
+        _AdjustStockDialog(batch: batch, medicineName: medicineName),
   );
 }
 
@@ -80,18 +79,13 @@ Future<({InventoryItem item, int variance})?> showStockCountDialog(
 }) {
   return showDialog<({InventoryItem item, int variance})>(
     context: context,
-    builder: (dialogContext) => _StockCountDialog(
-      batch: batch,
-      medicineName: medicineName,
-    ),
+    builder: (dialogContext) =>
+        _StockCountDialog(batch: batch, medicineName: medicineName),
   );
 }
 
 class _ReceiveStockDialog extends ConsumerStatefulWidget {
-  const _ReceiveStockDialog({
-    required this.branchId,
-    this.preselectedMedicine,
-  });
+  const _ReceiveStockDialog({required this.branchId, this.preselectedMedicine});
 
   final String branchId;
   final Medicine? preselectedMedicine;
@@ -116,8 +110,9 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
   /// lifetime and reused on a retried submit, so a retry after a
   /// failed submit dedupes in the layer instead of creating a
   /// second batch. Same pattern as the PO receiving dialog (D103).
-  late final String _idempotencyKey =
-      newIdempotencyKey('stock-receive-${widget.branchId}');
+  late final String _idempotencyKey = newIdempotencyKey(
+    'stock-receive-${widget.branchId}',
+  );
 
   @override
   void initState() {
@@ -223,9 +218,8 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
             if (widget.preselectedMedicine != null)
               Text(
                 '${widget.preselectedMedicine!.name} ${widget.preselectedMedicine!.strength}',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                style: Theme.of(context).textTheme.bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
               )
             else
               DropdownButton<String>(
@@ -243,8 +237,7 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
                       ),
                     ),
                 ],
-                onChanged: (value) =>
-                    setState(() => _medicineId = value),
+                onChanged: (value) => setState(() => _medicineId = value),
               ),
             const SizedBox(height: 12),
             PharmaTextField(
@@ -280,10 +273,7 @@ class _ReceiveStockDialogState extends ConsumerState<_ReceiveStockDialog> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(
-                _error!,
-                style: TextStyle(color: StatusKind.danger.color),
-              ),
+              Text(_error!, style: TextStyle(color: StatusKind.danger.color)),
             ],
           ],
         ),
@@ -349,9 +339,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
       onHandQty: widget.batch.quantity,
     );
     if (qty == null || qty <= 0) {
-      setState(
-        () => _error = 'Quantity must be a whole number above zero.',
-      );
+      setState(() => _error = 'Quantity must be a whole number above zero.');
       return;
     }
     if (error != null) {
@@ -362,7 +350,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
       _error = null;
       _saving = true;
     });
-    final request = ref
+    final request = await ref
         .read(stockAdjustmentQueueProvider.notifier)
         .requestAdjustment(
           batchId: widget.batch.id,
@@ -396,9 +384,8 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
           children: [
             Text(
               '${widget.medicineName} • Batch ${widget.batch.batchNo ?? '—'}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
             ),
             Text(
               'On hand: ${widget.batch.quantity} units',
@@ -443,10 +430,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(
-                _error!,
-                style: TextStyle(color: StatusKind.danger.color),
-              ),
+              Text(_error!, style: TextStyle(color: StatusKind.danger.color)),
             ],
           ],
         ),
@@ -470,10 +454,7 @@ class _AdjustStockDialogState extends ConsumerState<_AdjustStockDialog> {
 }
 
 class _StockCountDialog extends ConsumerStatefulWidget {
-  const _StockCountDialog({
-    required this.batch,
-    required this.medicineName,
-  });
+  const _StockCountDialog({required this.batch, required this.medicineName});
 
   final InventoryItem batch;
   final String medicineName;
@@ -490,8 +471,9 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
 
   /// Dialog-held idempotency key (Week 3 Day 5, D115 — closes the
   /// D54 UI gap for this dialog): minted once, reused on retry.
-  late final String _idempotencyKey =
-      newIdempotencyKey('stock-count-${widget.batch.id}');
+  late final String _idempotencyKey = newIdempotencyKey(
+    'stock-count-${widget.batch.id}',
+  );
 
   @override
   void initState() {
@@ -545,9 +527,7 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
   @override
   Widget build(BuildContext context) {
     final counted = _counted;
-    final variance = counted == null
-        ? null
-        : counted - widget.batch.quantity;
+    final variance = counted == null ? null : counted - widget.batch.quantity;
     return AlertDialog(
       title: const Text('Stock count'),
       content: SingleChildScrollView(
@@ -557,9 +537,8 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
           children: [
             Text(
               '${widget.medicineName} • Batch ${widget.batch.batchNo ?? '—'}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
             ),
             Text(
               'System quantity: ${widget.batch.quantity} units',
@@ -595,10 +574,7 @@ class _StockCountDialogState extends ConsumerState<_StockCountDialog> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 12),
-              Text(
-                _error!,
-                style: TextStyle(color: StatusKind.danger.color),
-              ),
+              Text(_error!, style: TextStyle(color: StatusKind.danger.color)),
             ],
           ],
         ),
@@ -645,14 +621,9 @@ class _DateRow extends StatelessWidget {
             onTap: onTap,
             borderRadius: BorderRadius.circular(8),
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
-                border: Border.all(
-                  color: Theme.of(context).dividerColor,
-                ),
+                border: Border.all(color: Theme.of(context).dividerColor),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Row(
@@ -781,9 +752,8 @@ class _QuarantineBatchDialogState
           children: [
             Text(
               '${widget.medicineName} • Batch ${widget.batch.batchNo ?? '—'}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
             ),
             Text(
               'On hand: ${widget.batch.quantity} units',
@@ -833,6 +803,150 @@ class _QuarantineBatchDialogState
                 ? 'Quarantine batch'
                 : 'Restore batch',
           ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Opens the quarantine return / disposal dialog (Week 5 Day 4,
+/// D154 — SRS D-11 / FR-INV-07).
+///
+/// Filing a request does NOT move the batch: the batch stays
+/// quarantined until an approver (other than the requester, §5.2.4)
+/// approves it on the Quarantine Outcomes screen. A reason is
+/// required: it goes on the audit entry when the outcome is
+/// applied. Returns the filed request, or `null` on cancel / a
+/// failed filing.
+Future<QuarantineOutcomeRequest?> showQuarantineOutcomeDialog(
+  BuildContext context,
+  WidgetRef ref, {
+  required InventoryItem batch,
+  required String medicineName,
+  required QuarantineOutcome outcome,
+}) {
+  return showDialog<QuarantineOutcomeRequest>(
+    context: context,
+    builder: (dialogContext) => _QuarantineOutcomeDialog(
+      batch: batch,
+      medicineName: medicineName,
+      outcome: outcome,
+    ),
+  );
+}
+
+class _QuarantineOutcomeDialog extends ConsumerStatefulWidget {
+  const _QuarantineOutcomeDialog({
+    required this.batch,
+    required this.medicineName,
+    required this.outcome,
+  });
+
+  final InventoryItem batch;
+  final String medicineName;
+  final QuarantineOutcome outcome;
+
+  @override
+  ConsumerState<_QuarantineOutcomeDialog> createState() =>
+      _QuarantineOutcomeDialogState();
+}
+
+class _QuarantineOutcomeDialogState
+    extends ConsumerState<_QuarantineOutcomeDialog> {
+  late final TextEditingController _reasonController;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _reasonController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final reason = _reasonController.text.trim();
+    final error = validateQuarantineOutcomeRequest(reason: reason);
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    final request = ref
+        .read(quarantineOutcomeQueueProvider.notifier)
+        .requestOutcome(
+          batch: widget.batch,
+          medicineName: widget.medicineName,
+          outcome: widget.outcome,
+          reason: reason,
+        );
+    if (request == null) {
+      setState(() => _error = 'Could not file the request — please try again.');
+      return;
+    }
+    Navigator.of(context).pop(request);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final outcome = widget.outcome;
+    final isReturn = outcome == QuarantineOutcome.returnToSupplier;
+    return AlertDialog(
+      title: Text(isReturn ? 'Return batch to supplier' : 'Dispose batch'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${widget.medicineName} • Batch ${widget.batch.batchNo ?? '—'}',
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            Text(
+              'On hand: ${widget.batch.quantity} units (quarantined)',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              isReturn
+                  ? 'The batch goes back to the supplier. On approval it leaves stock — its quantity becomes 0 — and it can never be sold again. Nothing moves until an approver (not you) approves it.'
+                  : 'The batch is destroyed. On approval it stays unsellable with its quantity kept as the destroyed count. Nothing moves until an approver (not you) approves it.',
+            ),
+            const SizedBox(height: 12),
+            PharmaTextField(
+              key: const ValueKey('quarantine-outcome-reason-field'),
+              controller: _reasonController,
+              label: 'Reason (required)',
+              hintText: isReturn
+                  ? 'e.g. supplier agreed to take the damaged batch back'
+                  : 'e.g. damaged beyond use, destroyed per policy',
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _error!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.error,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('quarantine-outcome-confirm'),
+          onPressed: _save,
+          child: Text(isReturn ? 'Request return' : 'Request disposal'),
         ),
       ],
     );

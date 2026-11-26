@@ -7,8 +7,10 @@ import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
 import '../../core/widgets/sync_status_widget.dart';
+import '../../models/branch_inventory_location.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../authentication/auth_state.dart';
 import 'inventory_logic.dart';
 import 'inventory_provider.dart';
@@ -37,8 +39,12 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
   ExpiryBucket? _bucketFilter;
   String _query = '';
 
-  void _openReceive(BuildContext context, WidgetRef ref, String branchId,
-      {Medicine? medicine}) async {
+  void _openReceive(
+    BuildContext context,
+    WidgetRef ref,
+    String branchId, {
+    Medicine? medicine,
+  }) async {
     final created = await showReceiveStockDialog(
       context,
       ref,
@@ -63,19 +69,26 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
     final byId = {for (final m in medicines) m.id: m};
     final branchInventory = ref.watch(branchInventoryProvider(branch.id));
     final grouped = groupBatchesByMedicine(branchInventory);
+    // Per-branch rack/shelf overrides (Week 5 Day 3, D152): the
+    // stock tab shows the override when set, else the master
+    // location — same `effectiveLocation` rule as the detail screen.
+    final locations =
+        ref.watch(branchLocationsProvider(branch.id)).asData?.value ?? const [];
+    final locationsByMedicine = <String, BranchInventoryLocation>{
+      for (final location in locations) location.medicineId: location,
+    };
     final bucketCounts = expiryBucketCounts(branchInventory);
-    final lowStockRows =
-        branchInventory.where((item) => item.isLowStock).toList();
+    final lowStockRows = branchInventory
+        .where((item) => item.isLowStock)
+        .toList();
     final expiredRows = branchInventory
         .where(
-          (item) =>
-              expiryBucketFor(item.expiryDate) == ExpiryBucket.expired,
+          (item) => expiryBucketFor(item.expiryDate) == ExpiryBucket.expired,
         )
         .toList();
     final nearExpiryRows = branchInventory
         .where(
-          (item) =>
-              expiryBucketFor(item.expiryDate) == ExpiryBucket.within30,
+          (item) => expiryBucketFor(item.expiryDate) == ExpiryBucket.within30,
         )
         .toList();
 
@@ -98,10 +111,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
           // the production data layer and enqueue one sync payload
           // each, so this chip shows a live pending count for stock
           // work.
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: SyncStatusChip(),
-          ),
+          const Align(alignment: Alignment.centerLeft, child: SyncStatusChip()),
           const SizedBox(height: 16),
           SegmentedButton<bool>(
             segments: const [
@@ -132,6 +142,7 @@ class _InventoryScreenState extends ConsumerState<InventoryScreen> {
             _StockTab(
               byId: byId,
               grouped: grouped,
+              locationsByMedicine: locationsByMedicine,
               bucketCounts: bucketCounts,
               bucketFilter: _bucketFilter,
               query: _query,
@@ -156,6 +167,7 @@ class _StockTab extends StatelessWidget {
   const _StockTab({
     required this.byId,
     required this.grouped,
+    required this.locationsByMedicine,
     required this.bucketCounts,
     required this.bucketFilter,
     required this.query,
@@ -168,6 +180,7 @@ class _StockTab extends StatelessWidget {
 
   final Map<String, Medicine> byId;
   final Map<String, List<InventoryItem>> grouped;
+  final Map<String, BranchInventoryLocation> locationsByMedicine;
   final Map<ExpiryBucket, int> bucketCounts;
   final ExpiryBucket? bucketFilter;
   final String query;
@@ -192,8 +205,7 @@ class _StockTab extends StatelessWidget {
       if (bucketFilter != null) {
         final batches = grouped[medicineId]!;
         final hasBucket = batches.any(
-          (batch) =>
-              expiryBucketFor(batch.expiryDate) == bucketFilter,
+          (batch) => expiryBucketFor(batch.expiryDate) == bucketFilter,
         );
         if (!hasBucket) return false;
       }
@@ -222,9 +234,7 @@ class _StockTab extends StatelessWidget {
             _SummaryChip(
               label: '$lowStockCount low stock',
               icon: Icons.inventory_2_outlined,
-              kind: lowStockCount > 0
-                  ? StatusKind.warning
-                  : StatusKind.success,
+              kind: lowStockCount > 0 ? StatusKind.warning : StatusKind.success,
             ),
             _SummaryChip(
               label:
@@ -272,14 +282,17 @@ class _StockTab extends StatelessWidget {
           const PharmaEmptyState(
             icon: Icons.search_off_outlined,
             title: 'Nothing in this view',
-            message:
-                'No batches match the selected bucket or search — try a different filter.',
+            message: 'No batches match the selected bucket or search — try a different filter.',
           )
         else
           for (final medicineId in visible)
             _MedicineStockGroup(
               medicine: byId[medicineId]!,
               batches: grouped[medicineId]!,
+              location: effectiveLocation(
+                masterLocation: byId[medicineId]!.location,
+                override: locationsByMedicine[medicineId],
+              ),
               bucketFilter: bucketFilter,
               onReceive: () => onReceive(byId[medicineId]!),
             ),
@@ -335,12 +348,17 @@ class _MedicineStockGroup extends StatelessWidget {
   const _MedicineStockGroup({
     required this.medicine,
     required this.batches,
+    required this.location,
     required this.bucketFilter,
     required this.onReceive,
   });
 
   final Medicine medicine;
   final List<InventoryItem> batches;
+
+  /// Effective location for this branch (D152) — override when set,
+  /// else the master location, else null (no line is shown).
+  final String? location;
   final ExpiryBucket? bucketFilter;
   final VoidCallback onReceive;
 
@@ -351,8 +369,7 @@ class _MedicineStockGroup extends StatelessWidget {
         ? batches
         : batches
               .where(
-                (batch) =>
-                    expiryBucketFor(batch.expiryDate) == bucketFilter,
+                (batch) => expiryBucketFor(batch.expiryDate) == bucketFilter,
               )
               .toList();
     final sellable = sellableStockFor(batches);
@@ -391,6 +408,11 @@ class _MedicineStockGroup extends StatelessWidget {
                             '${medicine.brand} • ${medicine.packSize} • ${formatPkr(medicine.priceMinor)}',
                             style: theme.textTheme.bodySmall,
                           ),
+                          if (location != null)
+                            Text(
+                              'Location: $location',
+                              style: theme.textTheme.bodySmall,
+                            ),
                         ],
                       ),
                     ),
@@ -436,10 +458,7 @@ class _MedicineStockGroup extends StatelessWidget {
           ),
           const Divider(),
           for (final batch in shown)
-            _InventoryBatchRow(
-              batch: batch,
-              medicineName: medicine.name,
-            ),
+            _InventoryBatchRow(batch: batch, medicineName: medicine.name),
           const SizedBox(height: 4),
           Align(
             alignment: Alignment.centerLeft,
@@ -460,10 +479,7 @@ class _MedicineStockGroup extends StatelessWidget {
 /// One batch row inside a medicine group: batch, mfg/expiry, qty, cost,
 /// FEFO position and status, with adjust / count actions.
 class _InventoryBatchRow extends ConsumerWidget {
-  const _InventoryBatchRow({
-    required this.batch,
-    required this.medicineName,
-  });
+  const _InventoryBatchRow({required this.batch, required this.medicineName});
 
   final InventoryItem batch;
   final String medicineName;
@@ -487,6 +503,34 @@ class _InventoryBatchRow extends ConsumerWidget {
             quarantine
                 ? 'Batch ${updated.batchNo} quarantined — out of saleable stock.'
                 : 'Batch ${updated.batchNo} restored to saleable stock.',
+          ),
+        ),
+      );
+    }
+  }
+
+  /// Files a return / disposal request for a quarantined batch
+  /// (Week 5 Day 4, D154 — FR-INV-07). The batch does not move
+  /// until an approver decides it on the Quarantine Outcomes
+  /// screen; the snackbar says so.
+  Future<void> _requestOutcome(
+    BuildContext context,
+    WidgetRef ref, {
+    required QuarantineOutcome outcome,
+  }) async {
+    final request = await showQuarantineOutcomeDialog(
+      context,
+      ref,
+      batch: batch,
+      medicineName: medicineName,
+      outcome: outcome,
+    );
+    if (request != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${quarantineOutcomeLabel(outcome)} requested for batch '
+            '${request.batchNo} — pending approval on the Quarantine Outcomes screen.',
           ),
         ),
       );
@@ -523,7 +567,11 @@ class _InventoryBatchRow extends ConsumerWidget {
                     Text(
                       'Mfg ${batch.mfgDate == null ? '—' : formatShortDate(batch.mfgDate!)}'
                       ' • Exp ${batch.expiryDate == null ? '—' : formatShortDate(batch.expiryDate!)}'
-                      '${daysLeft == null ? '' : bucket == ExpiryBucket.expired ? ' • expired ${-daysLeft}d ago' : ' • $daysLeft day(s) left'}'
+                      '${daysLeft == null
+                          ? ''
+                          : bucket == ExpiryBucket.expired
+                          ? ' • expired ${-daysLeft}d ago'
+                          : ' • $daysLeft day(s) left'}'
                       ' • cost ${formatPkr(batch.costMinor)}',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: bucket == ExpiryBucket.expired
@@ -540,6 +588,10 @@ class _InventoryBatchRow extends ConsumerWidget {
               StatusBadge(
                 label: batch.isQuarantined
                     ? 'Quarantined'
+                    : batch.isDisposed
+                    ? 'Disposed'
+                    : batch.isReturned
+                    ? 'Returned'
                     : sellable
                     ? expiryBucketLabel(bucket)
                     : bucket == ExpiryBucket.expired
@@ -547,6 +599,10 @@ class _InventoryBatchRow extends ConsumerWidget {
                     : 'Out of stock',
                 kind: batch.isQuarantined
                     ? StatusKind.warning
+                    : batch.isDisposed
+                    ? StatusKind.danger
+                    : batch.isReturned
+                    ? StatusKind.info
                     : sellable
                     ? expiryBucketKind(bucket)
                     : StatusKind.danger,
@@ -566,23 +622,42 @@ class _InventoryBatchRow extends ConsumerWidget {
                     key: ValueKey('inv-quarantine-${batch.id}'),
                     tooltip: 'Quarantine batch',
                     icon: const Icon(Icons.block_outlined),
-                    onPressed: () => _toggleQuarantine(
-                      context,
-                      ref,
-                      quarantine: true,
-                    ),
+                    onPressed: () =>
+                        _toggleQuarantine(context, ref, quarantine: true),
                   )
                 else if (batch.isQuarantined)
                   IconButton(
                     key: ValueKey('inv-unquarantine-${batch.id}'),
                     tooltip: 'Restore batch',
                     icon: const Icon(Icons.undo_outlined),
-                    onPressed: () => _toggleQuarantine(
+                    onPressed: () =>
+                        _toggleQuarantine(context, ref, quarantine: false),
+                  ),
+                // Week 5 Day 4 (D154): a quarantined batch can be
+                // returned to the supplier or disposed of — both
+                // file an approval request, nothing moves here.
+                if (batch.isQuarantined) ...[
+                  IconButton(
+                    key: ValueKey('inv-return-${batch.id}'),
+                    tooltip: 'Return to supplier',
+                    icon: const Icon(Icons.assignment_return_outlined),
+                    onPressed: () => _requestOutcome(
                       context,
                       ref,
-                      quarantine: false,
+                      outcome: QuarantineOutcome.returnToSupplier,
                     ),
                   ),
+                  IconButton(
+                    key: ValueKey('inv-dispose-${batch.id}'),
+                    tooltip: 'Dispose batch',
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _requestOutcome(
+                      context,
+                      ref,
+                      outcome: QuarantineOutcome.dispose,
+                    ),
+                  ),
+                ],
               ],
               IconButton(
                 key: ValueKey('inv-adjust-${batch.id}'),
@@ -736,7 +811,8 @@ class _AlertRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final daysLeft = daysToExpiry(item.expiryDate);
-    final detail = kind == StatusKind.danger &&
+    final detail =
+        kind == StatusKind.danger &&
             expiryBucketFor(item.expiryDate) == ExpiryBucket.expired
         ? 'Batch ${item.batchNo ?? '—'} expired ${daysLeft == null ? '' : '${-daysLeft} day(s) ago'} • ${item.quantity} units'
         : daysLeft != null && daysLeft <= 30

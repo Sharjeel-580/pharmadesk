@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/data/production_data_layer.dart';
 import '../../core/services/repositories.dart';
 import '../../core/widgets/sync_status_widget.dart';
+import '../../models/branch_inventory_location.dart';
 import '../../models/inventory_item.dart';
 import '../../models/medicine.dart';
 import '../authentication/auth_state.dart';
@@ -90,6 +91,21 @@ class InventoryNotifier extends AsyncNotifier<List<InventoryItem>> {
     state = await AsyncValue.guard(
       () => ref.read(inventoryRepositoryProvider).getInventory(),
     );
+  }
+
+  /// Saves a per-branch rack / shelf override (Week 5 Day 3, D152)
+  /// and refreshes the locations provider, so the detail screen and
+  /// the inventory screen show the new shelf at once. Saving with
+  /// both fields empty clears the override (the repo returns the
+  /// empty record).
+  Future<BranchInventoryLocation> saveBranchLocation(
+    BranchInventoryLocation location,
+  ) async {
+    final saved = await ref
+        .read(inventoryRepositoryProvider)
+        .saveBranchLocation(location);
+    ref.invalidate(branchLocationsProvider(location.branchId));
+    return saved;
   }
 
   /// Dashboard figures and the order form read the same inventory
@@ -233,6 +249,19 @@ final branchInventoryProvider =
     Provider.family<List<InventoryItem>, String>((ref, branchId) {
       final items = ref.watch(inventoryProvider).asData?.value ?? const [];
       return items.where((item) => item.branchId == branchId).toList();
+    });
+
+/// Per-branch rack / shelf overrides for one branch (Week 5 Day 3,
+/// D152). Screens read the override through this and fall back to
+/// the master medicine location when it is absent.
+final branchLocationsProvider =
+    FutureProvider.family<List<BranchInventoryLocation>, String>((
+      ref,
+      branchId,
+    ) async {
+      return ref
+          .read(inventoryRepositoryProvider)
+          .getBranchLocations(branchId: branchId);
     });
 
 /// Full medicine catalogue (180 medicines, Day 5).

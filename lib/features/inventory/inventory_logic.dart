@@ -1,4 +1,5 @@
 import '../../core/widgets/badges.dart';
+import '../../models/branch_inventory_location.dart';
 import '../../models/inventory_item.dart';
 
 /// Day 5 inventory logic — pure functions, no widgets, no providers, so
@@ -160,4 +161,38 @@ Map<ExpiryBucket, int> expiryBucketCounts(
     counts[bucket] = counts[bucket]! + 1;
   }
   return counts;
+}
+
+/// Effective storage location for a medicine at one branch (Week 5
+/// Day 3, D152 — SRS §3.3 / FR-INV-10).
+///
+/// The per-branch rack/shelf override wins when it carries a value;
+/// otherwise the master [Medicine.location] is the default shelf.
+/// Returns `null` when neither is set — the screens show "Not set".
+String? effectiveLocation({
+  required String? masterLocation,
+  BranchInventoryLocation? override,
+}) {
+  final overrideLabel = override?.displayLabel;
+  if (overrideLabel != null) return overrideLabel;
+  final master = masterLocation?.trim();
+  if (master == null || master.isEmpty) return null;
+  return master;
+}
+
+/// Finds the override for one (branch, medicine) in a locations list,
+/// or `null` when the branch keeps the medicine at the default shelf.
+BranchInventoryLocation? branchLocationFor(
+  Iterable<BranchInventoryLocation> locations, {
+  required String branchId,
+  required String medicineId,
+}) {
+  for (final location in locations) {
+    if (location.branchId == branchId &&
+        location.medicineId == medicineId &&
+        !location.isEmpty) {
+      return location;
+    }
+  }
+  return null;
 }
