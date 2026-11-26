@@ -82,6 +82,7 @@ class Branch {
   }
 
   Branch copyWith({
+    String? id,
     String? name,
     String? address,
     String? phone,
@@ -96,7 +97,7 @@ class Branch {
     bool clearRoyaltyRateBps = false,
   }) {
     return Branch(
-      id: id,
+      id: id ?? this.id,
       name: name ?? this.name,
       address: address ?? this.address,
       phone: phone ?? this.phone,

@@ -11,9 +11,16 @@ import 'model_utils.dart';
 /// from usable stock everywhere — POS, orders and the Day 2 auto
 /// purchase list all read the same guard, so the rule cannot drift.
 ///
+/// [disposed] (Week 5 Day 4, D154 — FR-INV-07): a quarantined batch
+/// destroyed with approval. Like [expired], the row keeps its
+/// quantity as the destroyed count — the guard excludes it from
+/// saleable stock, so the count is a record, never sellable stock.
+/// A [returned] batch leaves stock instead: approval sets its
+/// quantity to 0 (the units went back to the supplier).
+///
 /// Legacy rows without a status (demo seed, pre-Day 3 maps) parse as
 /// [available].
-enum BatchStatus { available, quarantined, expired, returned }
+enum BatchStatus { available, quarantined, expired, returned, disposed }
 
 BatchStatus batchStatusFromString(String? value) {
   switch (value) {
@@ -23,6 +30,8 @@ BatchStatus batchStatusFromString(String? value) {
       return BatchStatus.expired;
     case 'returned':
       return BatchStatus.returned;
+    case 'disposed':
+      return BatchStatus.disposed;
     case 'available':
     default:
       return BatchStatus.available;
@@ -138,6 +147,15 @@ class InventoryItem {
   /// True when the batch is held for inspection / damaged — never
   /// sellable, never counted as usable stock (D68).
   bool get isQuarantined => status == BatchStatus.quarantined;
+
+  /// True when the batch was destroyed with approval (Week 5 Day 4,
+  /// D154 — FR-INV-07). Never sellable; the quantity stays as the
+  /// destroyed count, like an expired batch's quantity.
+  bool get isDisposed => status == BatchStatus.disposed;
+
+  /// True when the batch went back to the supplier with approval
+  /// (D154). Its quantity is 0 — the units left the branch.
+  bool get isReturned => status == BatchStatus.returned;
 
   /// True when the batch is expired (or expires today).
   bool get isExpired {
