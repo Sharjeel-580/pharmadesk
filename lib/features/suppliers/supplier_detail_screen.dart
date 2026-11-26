@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/data/permission_service.dart';
+import '../../core/data/sync_queue.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/file_download.dart';
 import '../../core/utils/money.dart';
@@ -225,14 +226,22 @@ class SupplierDetailScreen extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
+          // Week 6 Day 5 (D170): the button is Expanded so it takes
+          // the card width instead of its intrinsic width — at 390px
+          // the label + icon measured 0.2px wider than the line in
+          // the test font and the Row overflowed. The label itself
+          // is Flexible (buttons.dart), so it ellipsizes rather than
+          // overflowing if it ever runs out of room.
           Row(
             children: [
-              PharmaButton(
-                label: 'Export statement (CSV)',
-                variant: PharmaButtonVariant.secondary,
-                size: PharmaButtonSize.small,
-                icon: Icons.download_outlined,
-                onPressed: () => _exportStatement(context, ref, supplier),
+              Expanded(
+                child: PharmaButton(
+                  label: 'Export statement (CSV)',
+                  variant: PharmaButtonVariant.secondary,
+                  size: PharmaButtonSize.small,
+                  icon: Icons.download_outlined,
+                  onPressed: () => _exportStatement(context, ref, supplier),
+                ),
               ),
             ],
           ),
@@ -711,6 +720,19 @@ class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 6 Day 2, D115 / D162 — the
+  /// D115 stock-dialog pattern): minted once for this dialog's
+  /// lifetime and reused on every payment submit, so a double-submit
+  /// (double-tap / retry after a failed submit) returns the original
+  /// payment instead of paying twice. Only the payment branch of
+  /// this dialog uses it — the purchase / purchase-return /
+  /// adjustment branches write ledger-only entries through a
+  /// different notifier and are out of scope. A fresh dialog mints
+  /// a fresh key.
+  late final String _idempotencyKey = newIdempotencyKey(
+    'supplier-payment-${widget.supplierId}',
+  );
+
   String get _title => switch (widget.kind) {
     SupplierLedgerEntryKind.payment => 'Record payment',
     SupplierLedgerEntryKind.purchase => 'Add purchase',
@@ -743,6 +765,7 @@ class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
             method: _method,
             reference: _reference.text,
             reason: _reason.text,
+            idempotencyKey: _idempotencyKey,
           );
       if (!mounted) return;
       setState(() => _saving = false);
@@ -815,6 +838,10 @@ class _LedgerEntryDialogState extends ConsumerState<_LedgerEntryDialog> {
               const SizedBox(height: 12),
               DropdownButtonFormField<SupplierPaymentMethod>(
                 initialValue: _method,
+                // Week 6 Day 5 (D170): the longest method label made
+                // this 5.9px wider than the dialog at 390px in the
+                // test font (the D153/D162 `isExpanded` trap).
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Method'),
                 items: [
                   for (final method in SupplierPaymentMethod.values)
