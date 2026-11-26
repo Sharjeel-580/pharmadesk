@@ -5,10 +5,12 @@
 //   Windows; the sync store falls back to memory when SQLite cannot
 //   open (the pre-ffi safety net); the `DesktopApp` shell renders at
 //   1920×1080 and the desktop routes resolve.
-// - D-01–D-35 audit: every desktop-present screen resolves to its
-//   screen at desktop size, and the seven missing screens have no
-//   route (the router's "Page not found" — they are documented
-//   follow-ups, not half-built screens).
+// - D-01–D-35 audit: every desktop screen resolves to its
+//   screen at desktop size. Week 4 Day 2 closed D-16 + D-21, Week 4
+//   Day 3 closed D-24 + D-25 + D-26, and Week 4 Day 4 closed the
+//   last three — D-28 branch management (`/branches`), D-33 audit
+//   log (`/audit-log`) and D-35 backup & restore (`/backup`) — so
+//   the missing list is now empty: all 35 desktop screens resolve.
 // - Layer receive/adjust (D111, closes D109): `receiveStock` /
 //   `adjustStock` enqueue one sync payload each, dedupe on a retried
 //   key, never double-apply, and the engine counter counts the
@@ -306,6 +308,18 @@ void main() {
         ('/suppliers', 'Profiles, contacts, purchase history'),
         ('/notifications', 'Alerts computed from live demo data'),
         ('/settings', 'Roles & Permissions'),
+        // Week 4 Day 4 (D130–D135) closed the last three missing
+        // screens: D-28 branch management, D-33 audit log, D-35
+        // backup & restore. Markers are body-only text (the
+        // sidebar/top bar also name these screens): 'Add branch'
+        // is the list's write-gated action, 'Franchise settings'
+        // is the detail card, the audit empty message only the
+        // audit screen shows, 'Backup status' only the backup
+        // screen shows.
+        ('/branches', 'Add branch'),
+        ('/branches/branch-dha-main', 'Franchise settings'),
+        ('/audit-log', 'No audit entries match these filters.'),
+        ('/backup', 'Backup status'),
       ];
       for (final (route, marker) in present) {
         router.go(route);
@@ -314,39 +328,6 @@ void main() {
           find.textContaining(marker),
           findsWidgets,
           reason: '$route should render its screen ($marker)',
-        );
-      }
-    });
-
-    testWidgets('the seven missing desktop screens have no route',
-        (WidgetTester tester) async {
-      final (container, router) = await pumpRouterApp(tester);
-      await container
-          .read(authProvider.notifier)
-          .signInAsDemo(DemoRole.owner);
-      await tester.pumpAndSettle();
-
-      // D-16 stock transfer, D-21 riders, D-24 finance cashbook,
-      // D-28 branch management, D-33 audit log, D-35 backup &
-      // restore (+ the finance hub D-25/D-26 has no dedicated
-      // route — its P&L lives inside Reports). None of these is
-      // half-built: the router answers "Page not found" and the
-      // tracker records each as a follow-up.
-      const missing = <String>[
-        '/stock-transfers',
-        '/riders',
-        '/finance',
-        '/branches',
-        '/audit-log',
-        '/backup',
-      ];
-      for (final route in missing) {
-        router.go(route);
-        await tester.pumpAndSettle();
-        expect(
-          find.text('Page not found'),
-          findsOneWidget,
-          reason: '$route must not resolve yet',
         );
       }
     });

@@ -662,7 +662,7 @@ void main() {
       expect(find.text('Batch DHA-TEST-001'), findsOneWidget);
     });
 
-    testWidgets('adjust stock from medicine detail updates quantity',
+    testWidgets('adjust stock from medicine detail files a request',
         (WidgetTester tester) async {
       final repo = MockInventoryRepository();
       final rows = await repo.getInventory(branchId: 'branch-dha-main');
@@ -680,11 +680,19 @@ void main() {
         find.byType(TextField).at(1),
         'damaged in transit',
       );
-      await tester.tap(find.text('Save adjustment'));
+      // Week 4 Day 5 (D141): the dialog no longer applies the
+      // adjustment directly — it files a request for approval, so
+      // the quantity does NOT change here. The old expectation
+      // ("now has N units") belonged to the direct-apply flow.
+      await tester.tap(find.text('Submit request'));
       await tester.pumpAndSettle();
       expect(
-        find.textContaining('now has ${batch.quantity - 2} units'),
+        find.textContaining('Adjustment requested — pending approval'),
         findsOneWidget,
+      );
+      expect(
+        find.textContaining('now has ${batch.quantity - 2} units'),
+        findsNothing,
       );
     });
 
@@ -960,5 +968,12 @@ class _FakeInventoryRepository implements InventoryRepository {
     required String batchId,
     required int countedQty,
     String? note,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
   }) async => throw UnimplementedError();
 }

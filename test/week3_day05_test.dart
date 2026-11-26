@@ -205,6 +205,18 @@ class _FailingReceiveInventoryRepository implements InventoryRepository {
         countedQty: countedQty,
         note: note,
       );
+
+  @override
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
+  }) =>
+      _inner.updateBatchStatus(
+        batchId: batchId,
+        status: status,
+        reason: reason,
+      );
 }
 
 void main() {

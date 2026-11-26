@@ -793,4 +793,11 @@ class _WellStockedInventoryRepository implements InventoryRepository {
     required int countedQty,
     String? note,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<InventoryItem> updateBatchStatus({
+    required String batchId,
+    required BatchStatus status,
+    String? reason,
+  }) async => throw UnimplementedError();
 }

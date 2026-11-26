@@ -787,14 +787,16 @@ void main() {
       expect(featureModuleForRoute('/dashboard'), isNull);
       expect(featureModuleForRoute('/settings'), isNull);
       notifier.enableAll();
-      expect(container.read(featureConfigProvider).length, 11);
+      // Week 4 Day 3 (D124): the Finance module joins the toggleable
+      // modules — 12, not 11.
+      expect(container.read(featureConfigProvider).length, 12);
     });
 
-    test('roles matrix: 10 roles, 23 capabilities, pharmacist reviews', () {
+    test('roles matrix: 10 roles, 24 capabilities, pharmacist reviews', () {
       expect(demoRoles.length, 10);
-      expect(roleCapabilities.length, 23);
+      expect(roleCapabilities.length, 24);
       final pharmacist = permissionsForRole('Pharmacist');
-      expect(pharmacist.length, 23);
+      expect(pharmacist.length, 24);
       final rxIndex = roleCapabilities.indexWhere(
         (c) => c.key == 'rxReview',
       );
@@ -935,6 +937,11 @@ void main() {
       );
       router.go('/settings');
       await tester.pumpAndSettle();
+      // Week 4 Day 4 (D134): the Settings TabBar grew to six tabs,
+      // so at 1280px it scrolls — bring the last tab into view
+      // before tapping it (D24 pattern).
+      await tester.ensureVisible(find.text('Features'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Features'));
       await tester.pumpAndSettle();
       final tile = find.ancestor(
@@ -952,6 +959,8 @@ void main() {
       // Re-enable from the disabled screen's action.
       await tester.tap(find.text('Open Feature Settings'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Features'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Features'));
       await tester.pumpAndSettle();
       final reenableTile = find.ancestor(
@@ -967,7 +976,7 @@ void main() {
       expect(find.text('Daily sales'), findsOneWidget);
     });
 
-    testWidgets('full route walk: all 15 modules load, no placeholders left',
+    testWidgets('full route walk: all 16 modules load, no placeholders left',
         (WidgetTester tester) async {
       final (_, router) = await pumpRouterApp(
         tester,
@@ -986,6 +995,14 @@ void main() {
         '/staff',
         '/staff/salary',
         '/reports',
+        '/finance',
+        '/finance/cashbook',
+        '/finance/aging',
+        '/finance/statements',
+        '/branches',
+        '/branches/branch-dha-main',
+        '/audit-log',
+        '/backup',
         '/notifications',
         '/settings',
         '/profile',

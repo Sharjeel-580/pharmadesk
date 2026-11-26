@@ -277,7 +277,7 @@ void main() {
       await signInAsDemoRole(tester, 'Owner');
     }
 
-    testWidgets('desktop sidebar lists all 15 modules and navigates',
+    testWidgets('desktop sidebar lists all 16 modules and navigates',
         (WidgetTester tester) async {
       await pumpWideApp(tester);
       // The sidebar is a lazy ListView: scroll each item into view
@@ -296,6 +296,7 @@ void main() {
         'Prescriptions',
         'Staff & HR',
         'Reports',
+        'Finance',
         'Notifications',
         'Settings',
         'Profile',
