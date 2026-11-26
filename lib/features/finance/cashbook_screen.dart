@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/data/permission_service.dart';
+import '../../core/data/sync_queue.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/money.dart';
 import '../../core/widgets/design_system.dart';
@@ -700,6 +701,18 @@ class _CashbookEntryDialogState extends ConsumerState<_CashbookEntryDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 6 Day 2, D115 / D162 — the
+  /// D115 stock-dialog pattern): minted once for this dialog's
+  /// lifetime and reused on every submit, so a double-submit
+  /// (double-tap / retry after a failed submit) returns the original
+  /// entry instead of recording a second one. One key serves both
+  /// sides of this dialog — the layer keeps separate registries for
+  /// income and expense keys, so the shared key can never dedupe an
+  /// income against an expense. A fresh dialog mints a fresh key.
+  late final String _idempotencyKey = newIdempotencyKey(
+    'finance-entry-${widget.branchId}',
+  );
+
   @override
   void dispose() {
     _amount.dispose();
@@ -727,6 +740,7 @@ class _CashbookEntryDialogState extends ConsumerState<_CashbookEntryDialog> {
             category: _category,
             amountMinor: amountMinor,
             date: _date,
+            idempotencyKey: _idempotencyKey,
           );
       error = result.error;
     } else {
@@ -738,6 +752,7 @@ class _CashbookEntryDialogState extends ConsumerState<_CashbookEntryDialog> {
             amountMinor: amountMinor,
             description: _note.text,
             expenseDate: _date,
+            idempotencyKey: _idempotencyKey,
           );
       error = result.error;
     }
@@ -788,6 +803,7 @@ class _CashbookEntryDialogState extends ConsumerState<_CashbookEntryDialog> {
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
               initialValue: _category,
+              isExpanded: true,
               decoration: const InputDecoration(labelText: 'Category'),
               items: [
                 for (final category in _categories)

@@ -55,12 +55,20 @@ class ExpensesNotifier extends AsyncNotifier<List<Expense>> {
   /// creates the expense + mirror and enqueues one sync payload, so
   /// the sync-status chip moves for cashbook work. Returns the saved
   /// expense, or `null` + an error message.
+  ///
+  /// [idempotencyKey] is the dialog-held key (Week 6 Day 2, D115 /
+  /// D162): the cashbook entry dialog mints one key for its whole
+  /// lifetime and passes it on every submit, so a double-submit
+  /// returns the original expense instead of recording a second
+  /// one. Omitted, the layer mints a fresh key per call (the
+  /// pre-D162 behaviour — each call is a new expense).
   Future<({Expense? expense, String? error})> recordExpense({
     required String branchId,
     required String category,
     required int amountMinor,
     String description = '',
     required DateTime expenseDate,
+    String? idempotencyKey,
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
@@ -77,21 +85,30 @@ class ExpensesNotifier extends AsyncNotifier<List<Expense>> {
     if (errors.isNotEmpty) {
       return (expense: null, error: errors.first);
     }
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordExpense(
-          branchId: branchId,
-          category: category,
-          amountMinor: amountMinor,
-          description: description,
-          expenseDate: expenseDate,
-          createdBy: user?.uid,
-        );
-    await refresh();
-    ref.invalidate(financialTransactionsProvider);
-    ref.invalidate(advancedReportDataProvider);
-    ref.invalidate(syncStatusProvider);
-    return (expense: created, error: null);
+    // FR-HO-08 (D161): the layer refuses finance writes on a
+    // deactivated branch with an ArgumentError — caught here and
+    // returned as an error string, so the dialog shows the refusal
+    // (PharmaErrorBox) instead of crashing.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordExpense(
+            branchId: branchId,
+            category: category,
+            amountMinor: amountMinor,
+            description: description,
+            expenseDate: expenseDate,
+            createdBy: user?.uid,
+            idempotencyKey: idempotencyKey,
+          );
+      await refresh();
+      ref.invalidate(financialTransactionsProvider);
+      ref.invalidate(advancedReportDataProvider);
+      ref.invalidate(syncStatusProvider);
+      return (expense: created, error: null);
+    } on ArgumentError catch (error) {
+      return (expense: null, error: error.message?.toString());
+    }
   }
 }
 
@@ -125,11 +142,15 @@ class FinancialTransactionsNotifier
   /// — closes D129): one sync payload is enqueued, so the
   /// sync-status chip moves for cashbook work.
   /// Returns the saved transaction, or `null` + an error message.
+  ///
+  /// [idempotencyKey] is the dialog-held key (Week 6 Day 2, D115 /
+  /// D162 — same contract as [ExpensesNotifier.recordExpense]).
   Future<({FinancialTransaction? transaction, String? error})> recordIncome({
     required String branchId,
     required String category,
     required int amountMinor,
     required DateTime date,
+    String? idempotencyKey,
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'financeEntry', branchId)) {
@@ -147,19 +168,26 @@ class FinancialTransactionsNotifier
     if (errors.isNotEmpty) {
       return (transaction: null, error: errors.first);
     }
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordIncome(
-          branchId: branchId,
-          category: category,
-          amountMinor: amountMinor,
-          date: date,
-          createdBy: user?.uid,
-        );
-    await refresh();
-    ref.invalidate(advancedReportDataProvider);
-    ref.invalidate(syncStatusProvider);
-    return (transaction: created, error: null);
+    // FR-HO-08 (D161): see recordExpense — the layer's
+    // deactivation refusal is returned as an error string, not thrown.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordIncome(
+            branchId: branchId,
+            category: category,
+            amountMinor: amountMinor,
+            date: date,
+            createdBy: user?.uid,
+            idempotencyKey: idempotencyKey,
+          );
+      await refresh();
+      ref.invalidate(advancedReportDataProvider);
+      ref.invalidate(syncStatusProvider);
+      return (transaction: created, error: null);
+    } on ArgumentError catch (error) {
+      return (transaction: null, error: error.message?.toString());
+    }
   }
 }
 
@@ -170,6 +198,22 @@ final financialTransactionsProvider =
     >(FinancialTransactionsNotifier.new);
 
 class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
+  /// Payments already created under a dialog-held idempotency key,
+  /// this session (Week 6 Day 2, D162 — the D65 auto-PO pattern).
+  ///
+  /// The layer's registry would dedupe a same-key retry on its own,
+  /// but this notifier re-validates against the LIVE outstanding
+  /// before calling the layer — and the first submit already reduced
+  /// that outstanding, so a same-key double-submit of a full
+  /// settlement would fail validation ("cannot exceed the
+  /// outstanding payable") instead of returning the original. The
+  /// remembered key short-circuits the retry after the permission
+  /// check and before any live-state validation, so a double-submit
+  /// returns the original payment. A call with no key never consults
+  /// this map — the pre-D162 behaviour (a fresh key per call, a new
+  /// payment per call) is unchanged.
+  final Map<String, SupplierPayment> _completedPaymentsByKey = {};
+
   @override
   Future<List<SupplierPayment>> build() async {
     final repo = ref.read(supplierPaymentRepositoryProvider);
@@ -192,6 +236,12 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
   /// sync payload, so the sync-status chip moves for supplier
   /// payments. Returns the saved payment, or `null` + an error
   /// message (no permission, overpayment, or an allocation shortfall).
+  ///
+  /// [idempotencyKey] is the dialog-held key (Week 6 Day 2, D115 /
+  /// D162): the supplier-payment dialog mints one key for its whole
+  /// lifetime and passes it on every submit, so a double-submit
+  /// returns the original payment instead of paying twice. Omitted,
+  /// the layer mints a fresh key per call (the pre-D162 behaviour).
   Future<({SupplierPayment? payment, String? error})> recordPayment({
     required String supplierId,
     required String branchId,
@@ -199,6 +249,7 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
     SupplierPaymentMethod method = SupplierPaymentMethod.cash,
     String reference = '',
     String reason = '',
+    String? idempotencyKey,
   }) async {
     final user = ref.read(authProvider);
     if (!permissionService.canWrite(user, 'supplierPay', branchId)) {
@@ -206,6 +257,16 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
         payment: null,
         error: 'Only the Owner, HO Admin or Accountant may pay a supplier (SRS §5.1: supplier payment).',
       );
+    }
+    // D162: a repeated submit from the same dialog carries the
+    // dialog-held key — return the payment it already created
+    // instead of re-validating against an outstanding the first
+    // submit already reduced (see [_completedPaymentsByKey]).
+    if (idempotencyKey != null) {
+      final completed = _completedPaymentsByKey[idempotencyKey];
+      if (completed != null) {
+        return (payment: completed, error: null);
+      }
     }
     final ledger = await ref
         .read(supplierRepositoryProvider)
@@ -227,25 +288,35 @@ class SupplierPaymentsNotifier extends AsyncNotifier<List<SupplierPayment>> {
     if (errors.isNotEmpty) {
       return (payment: null, error: errors.first);
     }
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordSupplierPayment(
-          supplierId: supplierId,
-          branchId: branchId,
-          amountMinor: amountMinor,
-          method: method,
-          reference: reference,
-          reason: reason,
-          paidBy: user?.uid,
-          allocations: allocations,
-        );
-    await refresh();
-    ref.invalidate(supplierLedgerProvider(supplierId));
-    ref.invalidate(supplierOutstandingProvider(supplierId));
-    ref.invalidate(financialTransactionsProvider);
-    ref.invalidate(advancedReportDataProvider);
-    ref.invalidate(syncStatusProvider);
-    return (payment: created.payment, error: null);
+    // FR-HO-08 (D161): see recordExpense — the layer's
+    // deactivation refusal is returned as an error string, not thrown.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordSupplierPayment(
+            supplierId: supplierId,
+            branchId: branchId,
+            amountMinor: amountMinor,
+            method: method,
+            reference: reference,
+            reason: reason,
+            paidBy: user?.uid,
+            allocations: allocations,
+            idempotencyKey: idempotencyKey,
+          );
+      if (idempotencyKey != null) {
+        _completedPaymentsByKey[idempotencyKey] = created.payment;
+      }
+      await refresh();
+      ref.invalidate(supplierLedgerProvider(supplierId));
+      ref.invalidate(supplierOutstandingProvider(supplierId));
+      ref.invalidate(financialTransactionsProvider);
+      ref.invalidate(advancedReportDataProvider);
+      ref.invalidate(syncStatusProvider);
+      return (payment: created.payment, error: null);
+    } on ArgumentError catch (error) {
+      return (payment: null, error: error.message?.toString());
+    }
   }
 }
 
@@ -378,25 +449,31 @@ class DailyClosingsNotifier extends AsyncNotifier<List<DailyClosing>> {
       date: day,
       openingBalanceMinor: opening,
     );
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordDailyClosing(
-          closing: DailyClosing(
-            id: '',
-            branchId: branchId,
-            date: day,
-            totalIncomeMinor: totals.incomeMinor,
-            totalExpenseMinor: totals.expenseMinor,
-            openingBalanceMinor: totals.openingBalanceMinor,
-            closingBalanceMinor: totals.closingBalanceMinor,
-            closedBy: user?.uid,
-            closedAt: DateTime.now(),
-            note: note.trim(),
-          ),
-        );
-    await refresh();
-    ref.invalidate(syncStatusProvider);
-    return (closing: created, error: null);
+    // FR-HO-08 (D161): see recordExpense — the layer's
+    // deactivation refusal is returned as an error string, not thrown.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordDailyClosing(
+            closing: DailyClosing(
+              id: '',
+              branchId: branchId,
+              date: day,
+              totalIncomeMinor: totals.incomeMinor,
+              totalExpenseMinor: totals.expenseMinor,
+              openingBalanceMinor: totals.openingBalanceMinor,
+              closingBalanceMinor: totals.closingBalanceMinor,
+              closedBy: user?.uid,
+              closedAt: DateTime.now(),
+              note: note.trim(),
+            ),
+          );
+      await refresh();
+      ref.invalidate(syncStatusProvider);
+      return (closing: created, error: null);
+    } on ArgumentError catch (error) {
+      return (closing: null, error: error.message?.toString());
+    }
   }
 }
 
@@ -466,31 +543,37 @@ class ClosingCorrectionsNotifier
       original.date.month,
       original.date.day,
     );
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordClosingCorrection(
-          correction: ClosingCorrection(
-            id: '',
-            branchId: original.branchId,
-            originalClosingId: original.id,
-            date: day,
-            correctedIncomeMinor: correctedIncomeMinor,
-            correctedExpenseMinor: correctedExpenseMinor,
-            correctedClosingBalanceMinor:
-                original.openingBalanceMinor +
-                correctedIncomeMinor -
-                correctedExpenseMinor,
-            reason: reason.trim(),
-            correctedBy: user?.uid,
-            correctedAt: DateTime.now(),
-            note: note.trim(),
-          ),
-          actorId: user?.uid ?? demoActorId,
-          actorName: user?.name ?? demoActorName,
-        );
-    await refresh();
-    ref.invalidate(syncStatusProvider);
-    return (correction: created, error: null);
+    // FR-HO-08 (D161): see recordExpense — the layer's
+    // deactivation refusal is returned as an error string, not thrown.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordClosingCorrection(
+            correction: ClosingCorrection(
+              id: '',
+              branchId: original.branchId,
+              originalClosingId: original.id,
+              date: day,
+              correctedIncomeMinor: correctedIncomeMinor,
+              correctedExpenseMinor: correctedExpenseMinor,
+              correctedClosingBalanceMinor:
+                  original.openingBalanceMinor +
+                  correctedIncomeMinor -
+                  correctedExpenseMinor,
+              reason: reason.trim(),
+              correctedBy: user?.uid,
+              correctedAt: DateTime.now(),
+              note: note.trim(),
+            ),
+            actorId: user?.uid ?? demoActorId,
+            actorName: user?.name ?? demoActorName,
+          );
+      await refresh();
+      ref.invalidate(syncStatusProvider);
+      return (correction: created, error: null);
+    } on ArgumentError catch (error) {
+      return (correction: null, error: error.message?.toString());
+    }
   }
 }
 
@@ -579,29 +662,35 @@ class CashReconciliationsNotifier
       openingBalanceMinor: opening,
       date: day,
     );
-    final created = await ref
-        .read(productionDataLayerProvider)
-        .recordCashReconciliation(
-          reconciliation: CashReconciliation(
-            id: '',
-            branchId: branchId,
-            date: day,
-            expectedMinor: expected,
-            countedMinor: countedMinor,
-            differenceMinor: cashReconciliationDifference(
+    // FR-HO-08 (D161): see recordExpense — the layer's
+    // deactivation refusal is returned as an error string, not thrown.
+    try {
+      final created = await ref
+          .read(productionDataLayerProvider)
+          .recordCashReconciliation(
+            reconciliation: CashReconciliation(
+              id: '',
+              branchId: branchId,
+              date: day,
               expectedMinor: expected,
               countedMinor: countedMinor,
+              differenceMinor: cashReconciliationDifference(
+                expectedMinor: expected,
+                countedMinor: countedMinor,
+              ),
+              note: note.trim(),
+              countedBy: user?.uid,
+              countedAt: DateTime.now(),
             ),
-            note: note.trim(),
-            countedBy: user?.uid,
-            countedAt: DateTime.now(),
-          ),
-          actorId: user?.uid ?? demoActorId,
-          actorName: user?.name ?? demoActorName,
-        );
-    await refresh();
-    ref.invalidate(syncStatusProvider);
-    return (reconciliation: created, error: null);
+            actorId: user?.uid ?? demoActorId,
+            actorName: user?.name ?? demoActorName,
+          );
+      await refresh();
+      ref.invalidate(syncStatusProvider);
+      return (reconciliation: created, error: null);
+    } on ArgumentError catch (error) {
+      return (reconciliation: null, error: error.message?.toString());
+    }
   }
 }
 
