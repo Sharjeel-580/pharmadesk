@@ -29,12 +29,12 @@ import 'backup_provider.dart';
 /// - **Restore (admin only):** paste a backup JSON document, it is
 ///   validated first (`DataImporter.validateBackup`), then an
 ///   explicit confirmation step states that it replaces the current
-///   restored data, and only then is it imported (overwrite policy)
-///   into the layer's restore sink, with the import report shown.
-///   The restore target is the in-memory restore sink — the live
-///   demo repositories have no upsert-by-id, so a restore does NOT
-///   overwrite live repo data yet (documented limitation, D133);
-///   the confirmation copy says exactly what it replaces.
+///   live data, and only then is it imported (overwrite policy)
+///   into the live repositories by upsert-by-id (Week 5 Day 2,
+///   D150 — the D133 follow-up is closed), with the import report
+///   shown. Audit history and the pending sync queue are local
+///   state, not repo data: they land in the layer's restore sink
+///   only, never rewriting live history.
 ///
 /// There is no scheduled backup to report yet: the Cloud Function
 /// export (SRS §2.6) needs the Firebase project, so the screen says
@@ -129,15 +129,15 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Restore this backup?'),
         content: Text(
-          'This will replace the current restored data with the '
+          'This will replace the current live data with the '
           'contents of this backup ($totalDocs documents, overwrite '
           'policy — a document with the same id is replaced, never '
           'duplicated). The backup was exported at '
           '${json['exportedAt'] ?? 'an unknown time'} for organization '
           '${json['organizationId'] ?? 'unknown'}. '
-          'This does NOT overwrite the live demo data: the restore '
-          'target is the local restore store (the live repositories '
-          'have no upsert-by-id yet).',
+          'Audit history and the pending sync queue are restored '
+          'into the local restore record only — they never rewrite '
+          'live history.',
         ),
         actions: [
           TextButton(
@@ -154,7 +154,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     );
     if (confirmed != true || !mounted) return;
     final layer = ref.read(productionDataLayerProvider);
-    final report = layer.importBackup(json, policy: ImportPolicy.overwrite);
+    final report = await layer.importBackup(json, policy: ImportPolicy.overwrite);
     ref
         .read(backupStatusProvider.notifier)
         .recordRestore(
