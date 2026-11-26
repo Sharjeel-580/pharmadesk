@@ -1,6 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 
 import '../../models/attendance.dart';
+import '../../models/branch.dart';
+import '../../models/branch_inventory_location.dart';
+import '../../models/cash_reconciliation.dart';
+import '../../models/closing_correction.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/daily_closing.dart';
@@ -16,6 +20,7 @@ import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
+import '../../models/stock_adjustment_request.dart';
 import '../../models/stock_transfer.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
@@ -111,6 +116,72 @@ void validateOrThrow(String collectionPattern, Map<String, dynamic> doc) {
       'Invalid $collectionPattern document: ${errors.join(' ')}',
     );
   }
+}
+
+// -- Branches (Week 5 Day 2, D148) --------------------------------------
+//
+// Branch doc (§3 `branches`, SRS §3.1). The local model differs from
+// the §3 field list in three documented ways (same lossy-mapping
+// posture as the staff mapper, D99) — the model is never changed to
+// fit Firestore silently:
+// - §3 names the lifecycle field `status` (`active` / `closed`); the
+//   model carries an `active` bool. The mapper writes BOTH, and the
+//   read side accepts either (`active` wins when present).
+// - §3 lists a `code` (used for sequential numbers); the model has
+//   none — the repository helper derives `branchCode` from the doc
+//   when present, else from the branch id. The mapper writes no
+//   `code`, never an invented one. (That is also why this mapper does
+//   NOT `validateOrThrow` against the §3 `branches` list: the list
+//   marks `code` required and this mapper cannot supply it.)
+// - Rates are basis points (`franchiseFeeRateBps` / `royaltyRateBps`,
+//   D130); §3 names them `franchiseFeeRate` / `royaltyRate`. The
+//   mapper writes both names so a doc written by either side reads
+//   back with the same rates.
+Map<String, dynamic> branchToFirestore(
+  Branch branch, {
+  required String orgId,
+  DateTime? now,
+}) {
+  return stampNewDocument(
+    {
+      'name': branch.name,
+      'type': branch.type,
+      'address': branch.address,
+      'phone': branch.phone,
+      'deliveryAreas': branch.deliveryAreas,
+      'managerId': branch.managerId,
+      'active': branch.active,
+      'status': branch.active ? 'active' : 'closed',
+      'franchiseFeeRateBps': branch.franchiseFeeRateBps,
+      'royaltyRateBps': branch.royaltyRateBps,
+      'franchiseFeeRate': branch.franchiseFeeRateBps,
+      'royaltyRate': branch.royaltyRateBps,
+    },
+    orgId: orgId,
+    now: now,
+  );
+}
+
+Branch branchFromFirestore(String id, Map<String, dynamic> doc) {
+  return Branch(
+    id: id,
+    name: doc['name'] as String? ?? '',
+    address: doc['address'] as String? ?? '',
+    phone: doc['phone'] as String? ?? '',
+    deliveryAreas: (doc['deliveryAreas'] as List<dynamic>? ?? [])
+        .map((area) => area.toString())
+        .toList(),
+    active: doc['active'] as bool? ?? (doc['status'] as String?) != 'closed',
+    createdAt: _parseDate(doc['createdAt']),
+    type: doc['type'] as String? ?? 'own',
+    managerId: doc['managerId'] as String?,
+    franchiseFeeRateBps:
+        (doc['franchiseFeeRateBps'] as num?)?.toInt() ??
+        (doc['franchiseFeeRate'] as num?)?.toInt(),
+    royaltyRateBps:
+        (doc['royaltyRateBps'] as num?)?.toInt() ??
+        (doc['royaltyRate'] as num?)?.toInt(),
+  );
 }
 
 // -- Sales --------------------------------------------------------------
@@ -569,6 +640,47 @@ InventoryItem batchFromFirestore(String id, Map<String, dynamic> doc) {
   );
 }
 
+/// Per-branch rack / shelf override (Week 5 Day 3, D152 — §3
+/// `branches/{branchId}/inventory/{medicineId}`).
+///
+/// Only the location fields are written: the same doc carries the
+/// quantity counters, which the repository merge-sets around, so
+/// this map carries no quantities and is NOT passed through
+/// `validateOrThrow` — the §3 contract requires `quantityOnHand` /
+/// `quantityReserved` on the doc, and a location-only write does not
+/// own them (same reason `inventoryCounterToFirestore` skips
+/// validation). Clearing writes explicit nulls, so a cleared
+/// override reads back as "no override".
+Map<String, dynamic> branchInventoryLocationToFirestore(
+  BranchInventoryLocation location, {
+  required String orgId,
+}) {
+  return {
+    'organizationId': orgId,
+    'medicineId': location.medicineId,
+    'rack': location.rack?.trim().isEmpty ?? true
+        ? null
+        : location.rack!.trim(),
+    'shelf': location.shelf?.trim().isEmpty ?? true
+        ? null
+        : location.shelf!.trim(),
+    'updatedAt': Timestamp.fromDate(DateTime.now()),
+  };
+}
+
+BranchInventoryLocation branchInventoryLocationFromFirestore(
+  String branchId,
+  String medicineId,
+  Map<String, dynamic> doc,
+) {
+  return BranchInventoryLocation(
+    branchId: branchId,
+    medicineId: medicineId,
+    rack: doc['rack'] as String?,
+    shelf: doc['shelf'] as String?,
+  );
+}
+
 /// Inventory counter doc (§3 `branches/{branchId}/counters`): one doc
 /// per (branch, medicine) with on-hand + reserved quantities.
 Map<String, dynamic> inventoryCounterToFirestore({
@@ -622,10 +734,7 @@ Map<String, dynamic> dailyCounterToFirestore(
     branchId: counter.branchId,
     now: now,
   );
-  validateOrThrow(
-    'branches/{branchId}/counters/daily-{date}',
-    doc,
-  );
+  validateOrThrow('branches/{branchId}/counters/daily-{date}', doc);
   return doc;
 }
 
@@ -635,8 +744,7 @@ DailyCounter dailyCounterFromFirestore(String id, Map<String, dynamic> doc) {
   final salesTotal = intField('salesTotalMinor');
   final cogs = intField('cogsMinor');
   final dateKey = doc['date'] as String? ?? id.replaceFirst('daily-', '');
-  final date =
-      DailyCounter.dateFromKey(dateKey) ?? DateTime(1970, 1, 1);
+  final date = DailyCounter.dateFromKey(dateKey) ?? DateTime(1970, 1, 1);
   return DailyCounter(
     branchId: doc['branchId'] as String? ?? '',
     date: date,
@@ -920,11 +1028,37 @@ Map<String, dynamic> stockTransferToFirestore(
   return doc;
 }
 
-StockTransfer stockTransferFromFirestore(
+StockTransfer stockTransferFromFirestore(String id, Map<String, dynamic> doc) {
+  return StockTransfer.fromMap(id, doc);
+}
+
+// -- Adjustment approval queue ------------------------------------------
+
+/// Adjustment request doc (Week 5 Day 1, D146 —
+/// `branches/{branchId}/stockAdjustments`): the model map verbatim
+/// (`status` is the enum name, dates are [Timestamp]s); the doc id
+/// is the request id, so a re-filed request overwrites the same doc
+/// instead of duplicating it.
+Map<String, dynamic> stockAdjustmentRequestToFirestore(
+  StockAdjustmentRequest request, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    request.toMap(),
+    orgId: orgId,
+    branchId: request.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/stockAdjustments', doc);
+  return doc;
+}
+
+StockAdjustmentRequest stockAdjustmentRequestFromFirestore(
   String id,
   Map<String, dynamic> doc,
 ) {
-  return StockTransfer.fromMap(id, doc);
+  return StockAdjustmentRequest.fromMap(id, doc);
 }
 
 // -- Prescriptions --------------------------------------------------------
@@ -1219,9 +1353,7 @@ Shift shiftFromFirestore(String id, Map<String, dynamic> doc) {
     startTime: doc['startTime'] as String? ?? '',
     endTime: doc['endTime'] as String? ?? '',
     employeeIds:
-        (doc['employeeIds'] as List?)
-            ?.map((e) => e.toString())
-            .toList() ??
+        (doc['employeeIds'] as List?)?.map((e) => e.toString()).toList() ??
         const [],
     createdAt: _parseDate(doc['createdAt']),
   );
@@ -1270,9 +1402,7 @@ Expense expenseFromFirestore(String id, Map<String, dynamic> doc) {
     id: id,
     branchId: doc['branchId'] as String? ?? '',
     category:
-        doc['category'] as String? ??
-        doc['categoryId'] as String? ??
-        'Other',
+        doc['category'] as String? ?? doc['categoryId'] as String? ?? 'Other',
     amountMinor: (doc['amount'] as num?)?.toInt() ?? 0,
     description: doc['description'] as String? ?? '',
     expenseDate: _parseDate(doc['expenseDate']) ?? DateTime.now(),
@@ -1301,11 +1431,59 @@ Map<String, dynamic> dailyClosingToFirestore(
   return doc;
 }
 
-DailyClosing dailyClosingFromFirestore(
+DailyClosing dailyClosingFromFirestore(String id, Map<String, dynamic> doc) {
+  return DailyClosing.fromMap(id, doc);
+}
+
+/// Closing correction doc (Week 5 Day 4, D156 — §3
+/// `branches/{branchId}/closingCorrections`). The model's `toMap`
+/// already uses the contract field names, so the mapper only stamps
+/// the document and validates it.
+Map<String, dynamic> closingCorrectionToFirestore(
+  ClosingCorrection correction, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    correction.toMap(),
+    orgId: orgId,
+    branchId: correction.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/closingCorrections', doc);
+  return doc;
+}
+
+ClosingCorrection closingCorrectionFromFirestore(
   String id,
   Map<String, dynamic> doc,
 ) {
-  return DailyClosing.fromMap(id, doc);
+  return ClosingCorrection.fromMap(id, doc);
+}
+
+/// Cash reconciliation doc (Week 5 Day 4, D157 — §3
+/// `branches/{branchId}/cashReconciliations`). Same shape as the
+/// closing mapper: stamp + validate.
+Map<String, dynamic> cashReconciliationToFirestore(
+  CashReconciliation reconciliation, {
+  required String orgId,
+  DateTime? now,
+}) {
+  final doc = stampNewDocument(
+    reconciliation.toMap(),
+    orgId: orgId,
+    branchId: reconciliation.branchId,
+    now: now,
+  );
+  validateOrThrow('branches/{branchId}/cashReconciliations', doc);
+  return doc;
+}
+
+CashReconciliation cashReconciliationFromFirestore(
+  String id,
+  Map<String, dynamic> doc,
+) {
+  return CashReconciliation.fromMap(id, doc);
 }
 
 /// Local transaction type → §3 snake_case.
@@ -1476,10 +1654,7 @@ Map<String, dynamic> goodsReceiptItemToFirestore(
     branchId: branchId,
     now: now,
   );
-  validateOrThrow(
-    'branches/{branchId}/goodsReceipts/{receiptId}/items',
-    doc,
-  );
+  validateOrThrow('branches/{branchId}/goodsReceipts/{receiptId}/items', doc);
   return doc;
 }
 
@@ -1497,10 +1672,7 @@ GoodsReceipt goodsReceiptFromFirestore(
     receivedBy: doc['receivedBy'] as String?,
     receivedAt: _parseDate(doc['receivedAt']),
     status: doc['status'] as String? ?? 'received',
-    items: [
-      for (final itemDoc in itemDocs)
-        GoodsReceiptItem.fromMap(itemDoc),
-    ],
+    items: [for (final itemDoc in itemDocs) GoodsReceiptItem.fromMap(itemDoc)],
     createdAt: _parseDate(doc['createdAt']),
     updatedAt: _parseDate(doc['updatedAt']),
   );

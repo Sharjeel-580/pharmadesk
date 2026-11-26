@@ -1,6 +1,10 @@
 import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 
 import '../../models/attendance.dart';
+import '../../models/branch.dart';
+import '../../models/branch_inventory_location.dart';
+import '../../models/cash_reconciliation.dart';
+import '../../models/closing_correction.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/daily_closing.dart';
@@ -18,6 +22,7 @@ import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
+import '../../models/stock_adjustment_request.dart';
 import '../../models/stock_transfer.dart';
 import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
@@ -169,6 +174,18 @@ mixin _FirestoreRepositoryHelper {
   /// derived from the branch id.
   final Map<String, String> _branchCodes = {};
 
+  /// First branch id in the org (name order) — the fallback branch
+  /// for restore upserts of records that carry no branch of their
+  /// own (customers are org-wide in the demo model, D150). Throws
+  /// [ArgumentError] when the org has no branches at all.
+  Future<String> firstBranchId() async {
+    final ids = await branchIds();
+    if (ids.isEmpty) {
+      throw ArgumentError('No branches exist in this organization yet.');
+    }
+    return ids.first;
+  }
+
   Future<String> branchCode(String branchId) async {
     final cached = _branchCodes[branchId];
     if (cached != null) return cached;
@@ -267,6 +284,21 @@ class FirestoreMedicineRepository
     doc['createdAt'] = existing['createdAt'];
     await transport.setDocument(path, doc);
     return medicine.copyWith(updatedAt: DateTime.now());
+  }
+
+  @override
+  Future<Medicine> upsertMedicine(Medicine medicine) async {
+    final id = medicine.id.isNotEmpty
+        ? medicine.id
+        : transport.newDocumentId(FirestoreSchema.medicines);
+    final path = '${FirestoreSchema.medicines}/$id';
+    final existing = await transport.getDocument(path);
+    final doc = medicineToFirestore(medicine, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return medicineFromFirestore(id, doc);
   }
 }
 
@@ -435,6 +467,61 @@ class FirestoreOrderRepository
         ),
     ];
     await transport.runBatchedWrites(operations);
+  }
+
+  @override
+  Future<Order> upsertOrder(Order order) async {
+    // A restore replays the order as given: the doc id is the
+    // order's id (never re-minted), the number comes from the
+    // per-branch counter only for a genuinely new doc, and the
+    // items subcollection is rewritten by index like `updateOrder`
+    // (a shrunk list drops its trailing stale item docs).
+    final docId = order.id.isNotEmpty
+        ? order.id
+        : transport.newDocumentId(FirestoreSchema.ordersPath(order.branchId));
+    final existing = await transport.getDocument(
+      FirestoreSchema.orderDocPath(order.branchId, docId),
+    );
+    final orderNumber = existing == null
+        ? 'ORD-${await branchCode(order.branchId)}-'
+              '${await nextCounterValue(order.branchId, _ordersCounterId)}'
+        : existing['orderNumber'] as String? ?? docId;
+    final doc = orderToFirestore(
+      order,
+      orgId: organizationId,
+      orderNumber: orderNumber,
+      idempotencyKey: existing?['idempotencyKey'] as String? ?? docId,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    final itemsPath = FirestoreSchema.nestedCollection(
+      order.branchId,
+      FirestoreSchema.orders,
+      docId,
+      FirestoreSchema.orderItems,
+    );
+    final existingItems = await fetchAll(itemsPath);
+    final operations = <WriteOperation>[
+      WriteOperation(
+        path: FirestoreSchema.orderDocPath(order.branchId, docId),
+        kind: WriteOperationKind.set,
+        data: doc,
+      ),
+      for (var i = 0; i < order.items.length; i++)
+        WriteOperation(
+          path: '$itemsPath/item-$i',
+          kind: WriteOperationKind.set,
+          data: orderItemToFirestore(order.items[i]),
+        ),
+      for (var i = order.items.length; i < existingItems.length; i++)
+        WriteOperation(
+          path: '$itemsPath/${existingItems[i].id}',
+          kind: WriteOperationKind.delete,
+        ),
+    ];
+    await transport.runBatchedWrites(operations);
+    return order.copyWith(id: docId);
   }
 }
 
@@ -645,10 +732,86 @@ class FirestoreInventoryRepository
       'status': status.name,
       'updatedAt': Timestamp.fromDate(DateTime.now()),
     });
-    return batchFromFirestore(found.doc.id, found.doc.data).copyWith(
-      status: status,
-      updatedAt: DateTime.now(),
+    return batchFromFirestore(
+      found.doc.id,
+      found.doc.data,
+    ).copyWith(status: status, updatedAt: DateTime.now());
+  }
+
+  @override
+  Future<InventoryItem> upsertInventoryItem(InventoryItem item) async {
+    // A restore replays the batch row as given (quantity, status
+    // and dates) — no stock transaction is written and the
+    // per-(branch, medicine) on-hand counter is NOT recomputed:
+    // counters are rollup state and are not part of a backup.
+    final batchId = item.id.isNotEmpty
+        ? item.id
+        : transport.newDocumentId(FirestoreSchema.batchesPath(item.branchId));
+    final batchPath = FirestoreSchema.branchDocPath(
+      item.branchId,
+      FirestoreSchema.batches,
+      batchId,
     );
+    final existing = await transport.getDocument(batchPath);
+    final doc = batchToFirestore(item, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(batchPath, doc);
+    return batchFromFirestore(batchId, doc);
+  }
+
+  /// Per-branch rack / shelf override (Week 5 Day 3, D152): the doc
+  /// id is the medicine id under `branches/{branchId}/inventory`.
+  /// A doc whose rack/shelf are both empty is no override (the
+  /// branch falls back to the master location).
+  @override
+  Future<BranchInventoryLocation?> getBranchLocation({
+    required String branchId,
+    required String medicineId,
+  }) async {
+    final data = await transport.getDocument(
+      FirestoreSchema.inventoryDocPath(branchId, medicineId),
+    );
+    if (data == null) return null;
+    final location = branchInventoryLocationFromFirestore(
+      branchId,
+      medicineId,
+      data,
+    );
+    return location.isEmpty ? null : location;
+  }
+
+  @override
+  Future<List<BranchInventoryLocation>> getBranchLocations({
+    String? branchId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final locations = <BranchInventoryLocation>[];
+    for (final id in branches) {
+      final docs = await fetchAll(FirestoreSchema.inventoryPath(id));
+      locations.addAll([
+        for (final doc in docs)
+          branchInventoryLocationFromFirestore(id, doc.id, doc.data),
+      ]);
+    }
+    return locations.where((location) => !location.isEmpty).toList();
+  }
+
+  @override
+  Future<BranchInventoryLocation> saveBranchLocation(
+    BranchInventoryLocation location,
+  ) async {
+    // Merge-set: the inventory doc also carries the quantity
+    // counters, which this write must never drop — only rack/shelf
+    // (and the stamp) change. Clearing writes nulls, so the doc
+    // keeps its counters and the override reads back as "none".
+    await transport.setDocument(
+      FirestoreSchema.inventoryDocPath(location.branchId, location.medicineId),
+      branchInventoryLocationToFirestore(location, orgId: organizationId),
+      merge: true,
+    );
+    return location;
   }
 
   /// Reads a batch, recomputes its quantity, writes the batch +
@@ -839,6 +1002,71 @@ class FirestoreCustomerRepository
     return withBalance.copyWith(id: id);
   }
 
+  @override
+  Future<Customer> upsertCustomer(Customer customer, {String? branchId}) async {
+    // Customers carry no branch on the model (org-wide in the
+    // demo) — the restore files the doc under the given branch, or
+    // the first branch when none is given. No phone-uniqueness
+    // check: a restore replays data that was valid when exported.
+    final branch = branchId ?? await firstBranchId();
+    final id = customer.id.isNotEmpty
+        ? customer.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(branch, FirestoreSchema.customers),
+          );
+    final path = FirestoreSchema.branchDocPath(
+      branch,
+      FirestoreSchema.customers,
+      id,
+    );
+    final existing = await transport.getDocument(path);
+    final doc = customerToFirestore(
+      customer,
+      orgId: organizationId,
+      branchId: branch,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return customerFromFirestore(id, doc);
+  }
+
+  @override
+  Future<LedgerEntry> upsertLedgerEntry(
+    LedgerEntry entry, {
+    String? branchId,
+  }) async {
+    // Unlike `addLedgerEntry` the balance is kept exactly as given
+    // — a restore replays history, it does not recompute it. The
+    // branch is the customer's branch when the entry's customer is
+    // on file, else the given branch, else the first branch.
+    final found = await findInBranches(
+      FirestoreSchema.customers,
+      entry.customerId,
+    );
+    final branch = found?.branchId ?? branchId ?? await firstBranchId();
+    final ledgerPath = FirestoreSchema.customerLedgerPath(
+      branch,
+      entry.customerId,
+    );
+    final id = entry.id.isNotEmpty
+        ? entry.id
+        : transport.newDocumentId(ledgerPath);
+    final path = '$ledgerPath/$id';
+    final existing = await transport.getDocument(path);
+    final doc = customerLedgerEntryToFirestore(
+      entry,
+      orgId: organizationId,
+      branchId: branch,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return customerLedgerEntryFromFirestore(id, doc);
+  }
+
   static String _phoneDigits(String phone) =>
       phone.replaceAll(RegExp(r'[^0-9]'), '');
 }
@@ -978,6 +1206,48 @@ class FirestoreSaleRepository
       {'status': saleStatusToFirestore(sale.status)},
     );
   }
+
+  @override
+  Future<Sale> upsertSale(Sale sale) async {
+    // A restore replays the sale as given (status, totals, items,
+    // invoice number and idempotency key) under the exported id as
+    // the doc id. The payments subcollection is NOT restored — it
+    // is not part of the backup (the sale doc carries the payment
+    // method and cash received, which is what the screens read).
+    // Items are rewritten by index like `updateOrder` (a shrunk
+    // list drops its trailing stale item docs).
+    final docId = sale.id.isNotEmpty
+        ? sale.id
+        : transport.newDocumentId(FirestoreSchema.salesPath(sale.branchId));
+    final docPath = FirestoreSchema.saleDocPath(sale.branchId, docId);
+    final existing = await transport.getDocument(docPath);
+    final stamped = sale.copyWith(
+      id: docId,
+      createdAt: sale.createdAt ?? DateTime.now(),
+    );
+    final doc = saleToFirestore(stamped, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    final itemsPath = FirestoreSchema.saleItemsPath(sale.branchId, docId);
+    final existingItems = await fetchAll(itemsPath);
+    final operations = <WriteOperation>[
+      WriteOperation(path: docPath, kind: WriteOperationKind.set, data: doc),
+      for (var i = 0; i < stamped.items.length; i++)
+        WriteOperation(
+          path: '$itemsPath/item-$i',
+          kind: WriteOperationKind.set,
+          data: saleItemToFirestore(stamped.items[i]),
+        ),
+      for (var i = stamped.items.length; i < existingItems.length; i++)
+        WriteOperation(
+          path: '$itemsPath/${existingItems[i].id}',
+          kind: WriteOperationKind.delete,
+        ),
+    ];
+    await transport.runBatchedWrites(operations);
+    return stamped;
+  }
 }
 
 // -- Sale returns ---------------------------------------------------------
@@ -995,10 +1265,7 @@ class FirestoreSaleReturnRepository
   @override
   final String organizationId;
 
-  Future<SaleReturn> _withItems(
-    String branchId,
-    FirestoreDocument doc,
-  ) async {
+  Future<SaleReturn> _withItems(String branchId, FirestoreDocument doc) async {
     final itemDocs = await fetchAll(
       FirestoreSchema.saleReturnItemsPath(branchId, doc.id),
     );
@@ -1039,10 +1306,7 @@ class FirestoreSaleReturnRepository
     );
     final operations = <WriteOperation>[
       WriteOperation(
-        path: FirestoreSchema.saleReturnDocPath(
-          saleReturn.branchId,
-          returnId,
-        ),
+        path: FirestoreSchema.saleReturnDocPath(saleReturn.branchId, returnId),
         kind: WriteOperationKind.set,
         data: saleReturnToFirestore(stamped, orgId: organizationId),
       ),
@@ -1156,6 +1420,43 @@ class FirestoreSupplierRepository
       supplierLedgerEntryToFirestore(withBalance, orgId: organizationId),
     );
     return withBalance.copyWith(id: id);
+  }
+
+  @override
+  Future<Supplier> upsertSupplier(Supplier supplier) async {
+    // No phone-uniqueness check: a restore replays data that was
+    // valid when exported.
+    final id = supplier.id.isNotEmpty
+        ? supplier.id
+        : transport.newDocumentId(FirestoreSchema.suppliers);
+    final path = '${FirestoreSchema.suppliers}/$id';
+    final existing = await transport.getDocument(path);
+    final doc = supplierToFirestore(supplier, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return supplierFromFirestore(id, doc);
+  }
+
+  @override
+  Future<SupplierLedgerEntry> upsertLedgerEntry(
+    SupplierLedgerEntry entry,
+  ) async {
+    // Unlike `addLedgerEntry` the balance is kept exactly as given
+    // — a restore replays history, it does not recompute it.
+    final ledgerPath = FirestoreSchema.supplierLedgerPath(entry.supplierId);
+    final id = entry.id.isNotEmpty
+        ? entry.id
+        : transport.newDocumentId(ledgerPath);
+    final path = '$ledgerPath/$id';
+    final existing = await transport.getDocument(path);
+    final doc = supplierLedgerEntryToFirestore(entry, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return supplierLedgerEntryFromFirestore(id, doc);
   }
 
   static String _phoneDigits(String phone) =>
@@ -1301,6 +1602,52 @@ class FirestorePrescriptionRepository
       prescriptionToFirestore(record, orgId: organizationId, branchId: branch),
     );
     return record;
+  }
+
+  @override
+  Future<Prescription> upsertPrescription(
+    Prescription prescription, {
+    String? branchId,
+  }) async {
+    // Unlike `createPrescription` the status is kept as given — a
+    // restore replays the review state, it does not reset it to
+    // Pending. The branch falls back to the id prefix, then to the
+    // first branch (a restored record always has a branch on file
+    // or in its id; the fallback only covers hand-built docs).
+    final docId = prescription.id.isNotEmpty
+        ? prescription.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              branchId ?? prescription.branchId ?? await firstBranchId(),
+              FirestoreSchema.prescriptions,
+            ),
+          );
+    final branch =
+        branchId ??
+        prescription.branchId ??
+        _branchFromIdPrefix(docId) ??
+        await firstBranchId();
+    final path = FirestoreSchema.branchDocPath(
+      branch,
+      FirestoreSchema.prescriptions,
+      docId,
+    );
+    final existing = await transport.getDocument(path);
+    final record = prescription.copyWith(
+      id: docId,
+      branchId: branch,
+      createdAt: prescription.createdAt ?? DateTime.now(),
+    );
+    final doc = prescriptionToFirestore(
+      record,
+      orgId: organizationId,
+      branchId: branch,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return prescriptionFromFirestore(docId, doc);
   }
 
   /// Legacy branch inference from the demo id prefix (`rx-dha-…` /
@@ -1487,6 +1834,74 @@ class FirestorePurchaseOrderRepository
     ];
     await transport.runBatchedWrites(operations);
   }
+
+  @override
+  Future<PurchaseOrder> upsertPurchaseOrder(PurchaseOrder order) async {
+    // A restore replays the PO as given: the status is kept (unlike
+    // `createPurchaseOrder`, which resets it to Draft) and the PO
+    // number is kept when given — a new doc without one gets a fresh
+    // counter number, like a create. Items are rewritten by index
+    // like `updatePurchaseOrder`.
+    final docId = order.id.isNotEmpty
+        ? order.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              order.branchId,
+              FirestoreSchema.purchaseOrders,
+            ),
+          );
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDocPath(
+        order.branchId,
+        FirestoreSchema.purchaseOrders,
+        docId,
+      ),
+    );
+    final poNumber = order.poNumber.isNotEmpty
+        ? order.poNumber
+        : existing?['poNumber'] as String? ??
+              'PO-${await branchCode(order.branchId)}-'
+                  '${await nextCounterValue(order.branchId, _purchaseOrdersCounterId)}';
+    final doc = purchaseOrderToFirestore(
+      order,
+      orgId: organizationId,
+      poNumber: poNumber,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    final itemsPath = FirestoreSchema.nestedCollection(
+      order.branchId,
+      FirestoreSchema.purchaseOrders,
+      docId,
+      FirestoreSchema.purchaseOrderItems,
+    );
+    final existingItems = await fetchAll(itemsPath);
+    final operations = <WriteOperation>[
+      WriteOperation(
+        path: FirestoreSchema.branchDocPath(
+          order.branchId,
+          FirestoreSchema.purchaseOrders,
+          docId,
+        ),
+        kind: WriteOperationKind.set,
+        data: doc,
+      ),
+      for (var i = 0; i < order.items.length; i++)
+        WriteOperation(
+          path: '$itemsPath/item-$i',
+          kind: WriteOperationKind.set,
+          data: purchaseOrderItemToFirestore(order.items[i]),
+        ),
+      for (var i = order.items.length; i < existingItems.length; i++)
+        WriteOperation(
+          path: '$itemsPath/${existingItems[i].id}',
+          kind: WriteOperationKind.delete,
+        ),
+    ];
+    await transport.runBatchedWrites(operations);
+    return order.copyWith(id: docId, poNumber: poNumber);
+  }
 }
 
 // -- Riders ---------------------------------------------------------------
@@ -1545,6 +1960,38 @@ class FirestoreRiderRepository
       doc,
     );
   }
+
+  @override
+  Future<Rider> upsertRider(Rider rider, {String? branchId}) async {
+    // The branch is the given one, the record's own, the branch of
+    // the stored doc on a replace, else the first branch.
+    final found = rider.id.isEmpty
+        ? null
+        : await findInBranches(FirestoreSchema.riders, rider.id);
+    final branch =
+        branchId ?? rider.branchId ?? found?.branchId ?? await firstBranchId();
+    final id = rider.id.isNotEmpty
+        ? rider.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(branch, FirestoreSchema.riders),
+          );
+    final path = FirestoreSchema.branchDocPath(
+      branch,
+      FirestoreSchema.riders,
+      id,
+    );
+    final existing = await transport.getDocument(path);
+    final doc = riderToFirestore(
+      rider,
+      orgId: organizationId,
+      branchId: branch,
+    );
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(path, doc);
+    return riderFromFirestore(id, doc);
+  }
 }
 
 // -- Stock transfers (Week 4 Day 2, D118) ---------------------------------
@@ -1571,16 +2018,11 @@ class FirestoreStockTransferRepository
   @override
   Future<List<StockTransfer>> getTransfers({String? branchId}) async {
     final transfers = <StockTransfer>[];
-    final branches = branchId == null
-        ? await branchIds()
-        : [branchId];
+    final branches = branchId == null ? await branchIds() : [branchId];
     for (final id in branches) {
-      final docs = await fetchAll(
-        FirestoreSchema.stockTransfersPath(id),
-      );
+      final docs = await fetchAll(FirestoreSchema.stockTransfersPath(id));
       transfers.addAll([
-        for (final doc in docs)
-          stockTransferFromFirestore(doc.id, doc.data),
+        for (final doc in docs) stockTransferFromFirestore(doc.id, doc.data),
       ]);
     }
     if (branchId != null) {
@@ -1591,9 +2033,7 @@ class FirestoreStockTransferRepository
       final seen = {for (final t in transfers) t.id};
       for (final id in await branchIds()) {
         if (id == branchId) continue;
-        final docs = await fetchAll(
-          FirestoreSchema.stockTransfersPath(id),
-        );
+        final docs = await fetchAll(FirestoreSchema.stockTransfersPath(id));
         for (final doc in docs) {
           final transfer = stockTransferFromFirestore(doc.id, doc.data);
           if (transfer.toBranchId == branchId && !seen.contains(transfer.id)) {
@@ -1664,6 +2104,167 @@ class FirestoreStockTransferRepository
       FirestoreSchema.stockTransferDocPath(found.branchId, transfer.id),
       doc,
     );
+  }
+}
+
+/// Adjustment approval queue (Week 5 Day 1, D146 —
+/// `branches/{branchId}/stockAdjustments/{id}`), one doc per
+/// request, doc id = request id. Same conventions as the transfer
+/// repo (D73/D118): a caller-supplied non-empty id is the doc id
+/// (D65 pattern — filing and deciding share one upsert, so a retry
+/// overwrites the same document instead of writing a second one),
+/// and a rewrite keeps the original `createdAt`.
+class FirestoreStockAdjustmentRequestRepository
+    with _FirestoreRepositoryHelper
+    implements StockAdjustmentRequestRepository {
+  FirestoreStockAdjustmentRequestRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<StockAdjustmentRequest>> getRequests({String? branchId}) async {
+    final requests = <StockAdjustmentRequest>[];
+    final branches = branchId == null ? await branchIds() : [branchId];
+    for (final id in branches) {
+      final docs = await fetchAll(FirestoreSchema.stockAdjustmentsPath(id));
+      requests.addAll([
+        for (final doc in docs)
+          stockAdjustmentRequestFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return requests;
+  }
+
+  @override
+  Future<StockAdjustmentRequest?> getById(String id) async {
+    final found = await findInBranches(FirestoreSchema.stockAdjustments, id);
+    if (found == null) return null;
+    return stockAdjustmentRequestFromFirestore(found.doc.id, found.doc.data);
+  }
+
+  @override
+  Future<StockAdjustmentRequest> saveRequest(
+    StockAdjustmentRequest request,
+  ) async {
+    if (request.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to save a stock adjustment request '
+        'in Firestore.',
+      );
+    }
+    final docId = request.id.isNotEmpty
+        ? request.id
+        : transport.newDocumentId(
+            FirestoreSchema.stockAdjustmentsPath(request.branchId),
+          );
+    final saved = request.id.isEmpty
+        ? StockAdjustmentRequest.fromMap(docId, request.toMap())
+        : request;
+    final existing = await transport.getDocument(
+      FirestoreSchema.stockAdjustmentDocPath(request.branchId, docId),
+    );
+    final doc = stockAdjustmentRequestToFirestore(saved, orgId: organizationId);
+    if (existing != null) {
+      // A rewrite keeps the original `createdAt` (the mapper stamps
+      // "now" — that is only correct for creates).
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(
+      FirestoreSchema.stockAdjustmentDocPath(request.branchId, docId),
+      doc,
+    );
+    return saved;
+  }
+}
+
+// -- Branches (Week 5 Day 2, D148 — SRS §3.1 `branches`) -----------------
+//
+// One doc per branch under the root `branches` collection (branches
+// are org-wide, not branch-scoped — a branch cannot live under
+// itself). Same conventions as the Day 3 repos (D73): a
+// caller-supplied non-empty id is the doc id (D65 pattern — the
+// directory mints `branch-<slug>`, so a retry returns the existing
+// document instead of writing a second one), an empty id gets a
+// Firestore auto-id, and a rewrite keeps the original `createdAt`.
+// The mock is seeded from the same two demo branches, so the
+// directory reads identically on either backend.
+class FirestoreBranchRepository
+    with _FirestoreRepositoryHelper
+    implements BranchRepository {
+  FirestoreBranchRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<Branch>> getBranches() async {
+    final docs = await transport.queryCollection(
+      FirestoreSchema.branches,
+      orderBy: 'name',
+    );
+    return [for (final doc in docs) branchFromFirestore(doc.id, doc.data)];
+  }
+
+  @override
+  Future<Branch?> getById(String id) async {
+    final data = await transport.getDocument(FirestoreSchema.branchDoc(id));
+    if (data == null) return null;
+    return branchFromFirestore(id, data);
+  }
+
+  @override
+  Future<Branch> createBranch(Branch branch) async {
+    final id = branch.id.isNotEmpty
+        ? branch.id
+        : transport.newDocumentId(FirestoreSchema.branches);
+    final existing = await transport.getDocument(FirestoreSchema.branchDoc(id));
+    if (existing != null) {
+      throw ArgumentError('A branch with id "$id" already exists.');
+    }
+    final doc = branchToFirestore(branch, orgId: organizationId);
+    await transport.setDocument(FirestoreSchema.branchDoc(id), doc);
+    return branchFromFirestore(id, doc);
+  }
+
+  @override
+  Future<Branch> updateBranch(Branch branch) async {
+    final existing = await transport.getDocument(
+      FirestoreSchema.branchDoc(branch.id),
+    );
+    if (existing == null) {
+      throw ArgumentError('No branch with id "${branch.id}".');
+    }
+    final doc = branchToFirestore(branch, orgId: organizationId);
+    // A rewrite keeps the original `createdAt` (the mapper stamps
+    // "now" — that is only correct for creates).
+    doc['createdAt'] = existing['createdAt'];
+    await transport.setDocument(FirestoreSchema.branchDoc(branch.id), doc);
+    return branchFromFirestore(branch.id, doc);
+  }
+
+  @override
+  Future<Branch> saveBranch(Branch branch) async {
+    final id = branch.id.isNotEmpty
+        ? branch.id
+        : transport.newDocumentId(FirestoreSchema.branches);
+    final existing = await transport.getDocument(FirestoreSchema.branchDoc(id));
+    final doc = branchToFirestore(branch, orgId: organizationId);
+    if (existing != null) {
+      doc['createdAt'] = existing['createdAt'];
+    }
+    await transport.setDocument(FirestoreSchema.branchDoc(id), doc);
+    return branchFromFirestore(id, doc);
   }
 }
 
@@ -1880,10 +2481,7 @@ class FirestoreAttendanceRepository
     if (attendance.id.isEmpty) {
       final id = await transport.addDocument(
         path,
-        attendanceToFirestore(
-          attendance,
-          orgId: organizationId,
-        ),
+        attendanceToFirestore(attendance, orgId: organizationId),
       );
       return attendance.copyWith(id: id, createdAt: DateTime.now());
     }
@@ -2044,9 +2642,7 @@ class FirestoreExpenseRepository
       throw ArgumentError('Expense amount must be more than zero.');
     }
     if (!expenseCategories.contains(expense.category)) {
-      throw ArgumentError(
-        'Unknown expense category "${expense.category}".',
-      );
+      throw ArgumentError('Unknown expense category "${expense.category}".');
     }
     if (expense.branchId.isEmpty) {
       throw ArgumentError(
@@ -2099,9 +2695,7 @@ class FirestoreFinancialTransactionRepository
   final String organizationId;
 
   @override
-  Future<List<FinancialTransaction>> getTransactions({
-    String? branchId,
-  }) async {
+  Future<List<FinancialTransaction>> getTransactions({String? branchId}) async {
     final branches = branchId == null ? await branchIds() : [branchId];
     final txns = <FinancialTransaction>[];
     for (final id in branches) {
@@ -2120,9 +2714,7 @@ class FirestoreFinancialTransactionRepository
   }
 
   @override
-  Future<FinancialTransaction> addTransaction(
-    FinancialTransaction txn,
-  ) async {
+  Future<FinancialTransaction> addTransaction(FinancialTransaction txn) async {
     // Amounts are signed (money in / out) — but a zero-amount
     // transaction records nothing, so it is refused.
     if (txn.amountMinor == 0) {
@@ -2199,8 +2791,7 @@ class FirestoreDailyClosingRepository
         FirestoreSchema.branchCollection(id, FirestoreSchema.dailyClosings),
       );
       closings.addAll([
-        for (final doc in docs)
-          dailyClosingFromFirestore(doc.id, doc.data),
+        for (final doc in docs) dailyClosingFromFirestore(doc.id, doc.data),
       ]);
     }
     return closings;
@@ -2225,14 +2816,9 @@ class FirestoreDailyClosingRepository
         'A branchId is required to create a daily closing in Firestore.',
       );
     }
-    if (await getClosing(
-          branchId: closing.branchId,
-          date: closing.date,
-        ) !=
+    if (await getClosing(branchId: closing.branchId, date: closing.date) !=
         null) {
-      throw ArgumentError(
-        'A closing already exists for this branch and day.',
-      );
+      throw ArgumentError('A closing already exists for this branch and day.');
     }
     final docId = closing.id.isNotEmpty
         ? closing.id
@@ -2253,6 +2839,173 @@ class FirestoreDailyClosingRepository
         docId,
       ),
       dailyClosingToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+/// Firestore implementation of [ClosingCorrectionRepository]
+/// (Week 5 Day 4, D156 — D101 pattern).
+class FirestoreClosingCorrectionRepository
+    with _FirestoreRepositoryHelper
+    implements ClosingCorrectionRepository {
+  FirestoreClosingCorrectionRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  @override
+  Future<List<ClosingCorrection>> getCorrections({String? branchId}) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final corrections = <ClosingCorrection>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(
+          id,
+          FirestoreSchema.closingCorrections,
+        ),
+      );
+      corrections.addAll([
+        for (final doc in docs)
+          closingCorrectionFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return corrections;
+  }
+
+  @override
+  Future<List<ClosingCorrection>> getCorrectionsForClosing(
+    String originalClosingId,
+  ) async {
+    final all = await getCorrections();
+    final scoped = all
+        .where((c) => c.originalClosingId == originalClosingId)
+        .toList();
+    scoped.sort((a, b) {
+      final aAt = a.correctedAt;
+      final bAt = b.correctedAt;
+      if (aAt == null && bAt == null) return 0;
+      if (aAt == null) return 1;
+      if (bAt == null) return -1;
+      return aAt.compareTo(bAt);
+    });
+    return scoped;
+  }
+
+  @override
+  Future<ClosingCorrection> createCorrection(
+    ClosingCorrection correction,
+  ) async {
+    if (correction.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a closing correction in Firestore.',
+      );
+    }
+    final docId = correction.id.isNotEmpty
+        ? correction.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              correction.branchId,
+              FirestoreSchema.closingCorrections,
+            ),
+          );
+    final created = correction.copyWith(
+      id: docId,
+      correctedAt: correction.correctedAt ?? DateTime.now(),
+    );
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        correction.branchId,
+        FirestoreSchema.closingCorrections,
+        docId,
+      ),
+      closingCorrectionToFirestore(created, orgId: organizationId),
+    );
+    return created;
+  }
+}
+
+/// Firestore implementation of [CashReconciliationRepository]
+/// (Week 5 Day 4, D157 — D101 pattern).
+class FirestoreCashReconciliationRepository
+    with _FirestoreRepositoryHelper
+    implements CashReconciliationRepository {
+  FirestoreCashReconciliationRepository({
+    required this.transport,
+    required this.organizationId,
+  });
+
+  @override
+  final FirestoreTransport transport;
+  @override
+  final String organizationId;
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  @override
+  Future<List<CashReconciliation>> getReconciliations({
+    String? branchId,
+  }) async {
+    final branches = branchId == null ? await branchIds() : [branchId];
+    final reconciliations = <CashReconciliation>[];
+    for (final id in branches) {
+      final docs = await fetchAll(
+        FirestoreSchema.branchCollection(
+          id,
+          FirestoreSchema.cashReconciliations,
+        ),
+      );
+      reconciliations.addAll([
+        for (final doc in docs)
+          cashReconciliationFromFirestore(doc.id, doc.data),
+      ]);
+    }
+    return reconciliations;
+  }
+
+  @override
+  Future<List<CashReconciliation>> getReconciliationsForDay({
+    required String branchId,
+    required DateTime date,
+  }) async {
+    final all = await getReconciliations(branchId: branchId);
+    return all.where((r) => _sameDay(r.date, date)).toList();
+  }
+
+  @override
+  Future<CashReconciliation> createReconciliation(
+    CashReconciliation reconciliation,
+  ) async {
+    if (reconciliation.branchId.isEmpty) {
+      throw ArgumentError(
+        'A branchId is required to create a cash reconciliation in Firestore.',
+      );
+    }
+    final docId = reconciliation.id.isNotEmpty
+        ? reconciliation.id
+        : transport.newDocumentId(
+            FirestoreSchema.branchCollection(
+              reconciliation.branchId,
+              FirestoreSchema.cashReconciliations,
+            ),
+          );
+    final created = reconciliation.copyWith(
+      id: docId,
+      countedAt: reconciliation.countedAt ?? DateTime.now(),
+    );
+    await transport.setDocument(
+      FirestoreSchema.branchDocPath(
+        reconciliation.branchId,
+        FirestoreSchema.cashReconciliations,
+        docId,
+      ),
+      cashReconciliationToFirestore(created, orgId: organizationId),
     );
     return created;
   }
@@ -2283,14 +3036,12 @@ class FirestoreSupplierPaymentRepository
         FirestoreSchema.branchCollection(id, FirestoreSchema.supplierPayments),
       );
       payments.addAll([
-        for (final doc in docs)
-          supplierPaymentFromFirestore(doc.id, doc.data),
+        for (final doc in docs) supplierPaymentFromFirestore(doc.id, doc.data),
       ]);
     }
     return payments
         .where(
-          (payment) =>
-              supplierId == null || payment.supplierId == supplierId,
+          (payment) => supplierId == null || payment.supplierId == supplierId,
         )
         .toList();
   }
@@ -2312,8 +3063,7 @@ class FirestoreSupplierPaymentRepository
       0,
       (total, allocation) => total + allocation.amountMinor,
     );
-    if (payment.allocations.isNotEmpty &&
-        allocated != payment.amountMinor) {
+    if (payment.allocations.isNotEmpty && allocated != payment.amountMinor) {
       throw ArgumentError(
         'Payment allocations ($allocated paisa) do not sum to the '
         'payment amount (${payment.amountMinor} paisa).',
@@ -2378,7 +3128,10 @@ class FirestoreGoodsReceiptRepository
   @override
   final String organizationId;
 
-  Future<GoodsReceipt> _withItems(String branchId, FirestoreDocument doc) async {
+  Future<GoodsReceipt> _withItems(
+    String branchId,
+    FirestoreDocument doc,
+  ) async {
     final itemDocs = await fetchAll(
       FirestoreSchema.goodsReceiptItemsPath(branchId, doc.id),
     );
@@ -2397,9 +3150,7 @@ class FirestoreGoodsReceiptRepository
     final branches = branchId == null ? await branchIds() : [branchId];
     final receipts = <GoodsReceipt>[];
     for (final id in branches) {
-      final docs = await fetchAll(
-        FirestoreSchema.goodsReceiptsPath(id),
-      );
+      final docs = await fetchAll(FirestoreSchema.goodsReceiptsPath(id));
       for (final doc in docs) {
         final receipt = await _withItems(id, doc);
         if (poId == null || receipt.poId == poId) {
@@ -2497,9 +3248,7 @@ class FirestoreSalaryRepository
     final branches = branchId == null ? await branchIds() : [branchId];
     final records = <SalaryRecord>[];
     for (final id in branches) {
-      final docs = await fetchAll(
-        FirestoreSchema.salariesPath(id),
-      );
+      final docs = await fetchAll(FirestoreSchema.salariesPath(id));
       for (final doc in docs) {
         final record = salaryRecordFromFirestore(doc.id, doc.data);
         if (month == null || record.month == month) {
@@ -2523,9 +3272,7 @@ class FirestoreSalaryRepository
     // `validateSalaryRecord` in salary_logic.dart): negative
     // amounts, a bad month, or a negative net never reach the store.
     if (record.employeeId.isEmpty || record.branchId.isEmpty) {
-      throw ArgumentError(
-        'A salary record needs an employee and a branch.',
-      );
+      throw ArgumentError('A salary record needs an employee and a branch.');
     }
     if (!RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(record.month)) {
       throw ArgumentError('Month must look like YYYY-MM (e.g. 2026-11).');
@@ -2641,9 +3388,11 @@ class FirestoreReportCounterRepository
     final counters = <DailyCounter>[];
     var cursor = startAfterId;
     var hasMore = false;
-    for (var attempt = 0;
-        attempt < 10 && counters.length < pageSize;
-        attempt++) {
+    for (
+      var attempt = 0;
+      attempt < 10 && counters.length < pageSize;
+      attempt++
+    ) {
       final page = await transport.queryCollection(
         FirestoreSchema.countersPath(branchId),
         limit: pageSize,

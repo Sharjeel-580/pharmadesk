@@ -89,6 +89,7 @@ class FirestoreSchema {
   static const String inventory = 'inventory';
   static const String stockTransactions = 'stockTransactions';
   static const String stockTransfers = 'stockTransfers';
+  static const String stockAdjustments = 'stockAdjustments';
   static const String stockCounts = 'stockCounts';
   static const String customers = 'customers';
   static const String customerLedger = 'ledger';
@@ -116,6 +117,8 @@ class FirestoreSchema {
   static const String notifications = 'notifications';
   static const String cashDrawers = 'cashDrawers';
   static const String dailyClosings = 'dailyClosings';
+  static const String closingCorrections = 'closingCorrections';
+  static const String cashReconciliations = 'cashReconciliations';
   static const String counters = 'counters';
 
   // -- Organization subcollections ------------------------------------
@@ -216,6 +219,13 @@ class FirestoreSchema {
   /// `branches/{branchId}/stockTransfers` (Week 4 Day 2, D118).
   static String stockTransfersPath(String branchId) =>
       branchCollection(branchId, stockTransfers);
+
+  /// `branches/{branchId}/stockAdjustments` (Week 5 Day 1, D146).
+  static String stockAdjustmentsPath(String branchId) =>
+      branchCollection(branchId, stockAdjustments);
+
+  static String stockAdjustmentDocPath(String branchId, String requestId) =>
+      branchDocPath(branchId, stockAdjustments, requestId);
 
   static String stockTransferDocPath(String branchId, String transferId) =>
       branchDocPath(branchId, stockTransfers, transferId);
@@ -416,8 +426,19 @@ class FirestoreSchema {
       FirestoreField('warehouseId', 'string'),
       FirestoreField('quantityOnHand', 'int', required: true),
       FirestoreField('quantityReserved', 'int', required: true),
-      FirestoreField('rack', 'string'),
-      FirestoreField('shelf', 'string'),
+      FirestoreField(
+        'rack',
+        'string',
+        notes:
+            'Per-branch override (D152): when set, stock views show '
+            'rack/shelf instead of the master medicine location; '
+            'empty = fall back to the master location.',
+      ),
+      FirestoreField(
+        'shelf',
+        'string',
+        notes: 'Per-branch override (D152) — see `rack`.',
+      ),
     ],
     'branches/{branchId}/stockTransactions': [
       FirestoreField('medicineId', 'string', required: true),
@@ -503,6 +524,40 @@ class FirestoreSchema {
       FirestoreField('status', 'string', notes: 'open / submitted / approved'),
       FirestoreField('countedBy', 'string'),
       FirestoreField('approvedBy', 'string'),
+    ],
+    // Adjustment approval queue (Week 5 Day 1, D146 — SRS D-14 /
+    // FR-INV-08, §5.2.4): one doc per request, doc id = the request
+    // id (`adj-N`, also the idempotency key for the approval apply).
+    // Not in the SRS §3 list — the SRS names the approval flow but
+    // gives it no collection; the queue needs a durable home now
+    // that it is persisted. The doc is created pending and updated
+    // in place when decided (never deleted); the stock movement it
+    // applies lives in `stockTransactions`, not here.
+    'branches/{branchId}/stockAdjustments': [
+      FirestoreField('batchId', 'string', required: true),
+      FirestoreField('batchNo', 'string', required: true),
+      FirestoreField('medicineId', 'string', required: true),
+      FirestoreField('medicineName', 'string', required: true),
+      FirestoreField('deltaQty', 'int', required: true, notes: 'Signed'),
+      FirestoreField('reason', 'string', required: true),
+      FirestoreField('requesterId', 'string', required: true),
+      FirestoreField('requesterName', 'string', required: true),
+      FirestoreField('requestedAt', 'timestamp', required: true),
+      FirestoreField(
+        'status',
+        'string',
+        required: true,
+        notes: 'pending / approved / rejected',
+      ),
+      FirestoreField('decidedById', 'string'),
+      FirestoreField('decidedByName', 'string'),
+      FirestoreField('decidedAt', 'timestamp'),
+      FirestoreField('decisionNote', 'string'),
+      FirestoreField(
+        'movementId',
+        'string',
+        notes: 'Ledger movement id once approved',
+      ),
     ],
     'branches/{branchId}/customers': [
       FirestoreField('name', 'string', required: true),
@@ -923,6 +978,37 @@ class FirestoreSchema {
       FirestoreField('closedBy', 'string'),
       FirestoreField('closedAt', 'timestamp'),
       FirestoreField('note', 'string'),
+      FirestoreField('isDemo', 'bool'),
+    ],
+    // Closing corrections (Week 5 Day 4, D156 — FR-FIN-06): the
+    // reversing entry for a wrong closing. A correction never edits
+    // its original — it is a new doc linked by `originalClosingId`
+    // that re-states the day's totals in full. Append-only: a wrong
+    // correction is fixed by a newer correction, never an edit.
+    'branches/{branchId}/closingCorrections': [
+      FirestoreField('originalClosingId', 'string', required: true),
+      FirestoreField('date', 'timestamp', required: true),
+      FirestoreField('correctedIncome', 'int (paisa)', required: true),
+      FirestoreField('correctedExpense', 'int (paisa)', required: true),
+      FirestoreField('correctedClosingBalance', 'int (paisa)', required: true),
+      FirestoreField('reason', 'string', required: true),
+      FirestoreField('correctedBy', 'string'),
+      FirestoreField('correctedAt', 'timestamp'),
+      FirestoreField('note', 'string'),
+      FirestoreField('isDemo', 'bool'),
+    ],
+    // Cash reconciliations (Week 5 Day 4, D157 — FR-FIN-02): one
+    // doc per drawer count — expected drawer vs counted cash and
+    // the recorded difference. Append-only: a recount is a new doc,
+    // never an edit of the previous count.
+    'branches/{branchId}/cashReconciliations': [
+      FirestoreField('date', 'timestamp', required: true),
+      FirestoreField('expected', 'int (paisa)', required: true),
+      FirestoreField('counted', 'int (paisa)', required: true),
+      FirestoreField('difference', 'int (paisa)', required: true),
+      FirestoreField('note', 'string'),
+      FirestoreField('countedBy', 'string'),
+      FirestoreField('countedAt', 'timestamp'),
       FirestoreField('isDemo', 'bool'),
     ],
     'branches/{branchId}/counters': [

@@ -63,6 +63,8 @@ class RepositoryBundle {
     required this.purchaseOrders,
     required this.riders,
     required this.stockTransfers,
+    required this.stockAdjustments,
+    required this.branches,
     required this.staff,
     required this.attendance,
     required this.shifts,
@@ -73,6 +75,8 @@ class RepositoryBundle {
     required this.salary,
     required this.reportCounters,
     required this.dailyClosings,
+    required this.closingCorrections,
+    required this.cashReconciliations,
     required this.auth,
     required this.photoUploader,
   });
@@ -92,6 +96,15 @@ class RepositoryBundle {
   /// Week 4 Day 2 (D118): stock transfers join the bundle the same
   /// way as the Day 3 repos (D101 pattern).
   final StockTransferRepository stockTransfers;
+
+  /// Week 5 Day 1 (D146): the adjustment approval queue joins the
+  /// bundle the same way.
+  final StockAdjustmentRequestRepository stockAdjustments;
+
+  /// Week 5 Day 2 (D148): the branch directory joins the bundle the
+  /// same way — the mock is seeded from the demo branches, the
+  /// Firestore implementation reads `branches/{id}`.
+  final BranchRepository branches;
 
   /// Week 3 Day 1 (D101): the six Day 5 repos join the bundle —
   /// Firestore implementations behind the same interfaces, mock
@@ -117,6 +130,11 @@ class RepositoryBundle {
   /// Week 4 Day 3 (D126): daily cashbook closings join the bundle
   /// the same way.
   final DailyClosingRepository dailyClosings;
+
+  /// Week 5 Day 4 (D156/D157): closing corrections + cash
+  /// reconciliations join the bundle the same way.
+  final ClosingCorrectionRepository closingCorrections;
+  final CashReconciliationRepository cashReconciliations;
 
   final AuthRepository auth;
   final PrescriptionPhotoUploader photoUploader;
@@ -193,6 +211,14 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      stockAdjustments: FirestoreStockAdjustmentRequestRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      branches: FirestoreBranchRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       staff: FirestoreStaffRepository(
         transport: firestoreTransport,
         organizationId: organizationId,
@@ -233,6 +259,14 @@ RepositoryBundle createRepositoryBundle({
         transport: firestoreTransport,
         organizationId: organizationId,
       ),
+      closingCorrections: FirestoreClosingCorrectionRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
+      cashReconciliations: FirestoreCashReconciliationRepository(
+        transport: firestoreTransport,
+        organizationId: organizationId,
+      ),
       auth: firebaseAuth == null
           ? MockAuthRepository()
           : FirebaseAuthRepository(firebaseAuth: firebaseAuth),
@@ -263,6 +297,8 @@ RepositoryBundle createRepositoryBundle({
     purchaseOrders: MockPurchaseOrderRepository(),
     riders: MockRiderRepository(),
     stockTransfers: MockStockTransferRepository(),
+    stockAdjustments: MockStockAdjustmentRequestRepository(),
+    branches: MockBranchRepository(),
     staff: MockStaffRepository(),
     attendance: MockAttendanceRepository(),
     shifts: MockShiftRepository(),
@@ -279,6 +315,8 @@ RepositoryBundle createRepositoryBundle({
       medicines: mockMedicines,
     ),
     dailyClosings: MockDailyClosingRepository(),
+    closingCorrections: MockClosingCorrectionRepository(),
+    cashReconciliations: MockCashReconciliationRepository(),
     auth: MockAuthRepository(),
     photoUploader: LocalPrescriptionPhotoUploader(),
   );

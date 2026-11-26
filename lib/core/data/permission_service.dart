@@ -137,6 +137,13 @@ const _routeCapabilities = <String, String>{
   '/finance/cashbook': 'financeEntry',
   '/finance/aging': 'financeReports',
   '/finance/statements': 'financeReports',
+  // Week 5 Day 5 (D159): franchise royalties are gated on
+  // `branches` — the existing §5.1 "Manage branches / franchises"
+  // row (Owner / HO Admin, Super Admin; Auditor read-only). The
+  // screen itself requires write-level `branches`, so the
+  // Auditor's read-only pass at this route gate still stops at
+  // the screen: royalty figures are head-office financials.
+  '/finance/franchise': 'branches',
   '/inventory/transfers': 'stockTransfer',
   // Week 4 Day 5 (D141): the adjustment queue is gated on
   // `stockAdjustReq` — Owner / HO Admin, Branch Mgr + Inventory
@@ -145,6 +152,12 @@ const _routeCapabilities = <String, String>{
   // per-row Approve / Reject buttons apply the stricter
   // `stockAdjustApprove` + not-the-requester check.
   '/inventory/adjustments': 'stockAdjustReq',
+  // Week 5 Day 4 (D154): the quarantine return / disposal queue is
+  // gated on `stockAdjustReq`, like the adjustment queue — all
+  // approvers are also requesters, so no approver is locked out;
+  // the per-row Approve / Reject buttons apply the stricter
+  // `stockAdjustApprove` + not-the-requester check.
+  '/inventory/quarantine-outcomes': 'stockAdjustReq',
   '/staff/salary': 'hrSalary',
   // Week 4 Day 4 (D135): the system-hub screens are sub-screens of
   // Settings for navigation (sidebar + More sheet), but they carry

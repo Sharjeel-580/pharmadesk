@@ -19,13 +19,15 @@ import 'sync_queue.dart';
 /// idempotency (doc ids are the keys; restore overwrites or skips by
 /// policy, never duplicates).
 ///
-/// RESTORE TARGET: the import writes into a [RestoreSink]. The live
-/// mock repositories have no upsert-by-id (they assign their own ids
-/// on create), so a restore into the live repos is a Week 2 Day 2
-/// item; the Firestore implementation restores by document id directly,
-/// where idempotency is natural. The sink is the restore target until
-/// then, and the round-trip (export → import → same docs, second
-/// import adds nothing) is unit-tested.
+/// RESTORE TARGET (Week 5 Day 2, D150 — closes D133): the import
+/// writes into the LIVE repositories by upsert-by-id (existing id →
+/// replaced, new id → inserted) through
+/// `ProductionDataLayer.importBackup`. The `auditLogs` / `syncQueue`
+/// sections are local state, not repo data, so they still land in
+/// the [InMemoryRestoreSink] — as does every section, so the sink
+/// stays the full record of the last restore. [DataImporter] itself
+/// is unchanged: it still imports into a sink with the same policy,
+/// and its unit tests still pin that behaviour.
 
 /// Backup file format.
 class BackupFormat {
@@ -67,6 +69,7 @@ class DataExporter {
     required this.prescriptions,
     required this.purchaseOrders,
     required this.riders,
+    required this.branches,
     required this.audit,
     required this.syncQueue,
     required this.organizationId,
@@ -81,6 +84,7 @@ class DataExporter {
   final PrescriptionRepository prescriptions;
   final PurchaseOrderRepository purchaseOrders;
   final RiderRepository riders;
+  final BranchRepository branches;
   final AuditLogWriter audit;
   final SyncQueue syncQueue;
   final String organizationId;
@@ -107,6 +111,9 @@ class DataExporter {
     sections['supplierLedger'] = supplierLedger;
     sections['riders'] = (await riders.getRiders())
         .map((rider) => _doc(rider.id, rider.toMap()))
+        .toList();
+    sections['branches'] = (await branches.getBranches())
+        .map((branch) => _doc(branch.id, branch.toMap()))
         .toList();
 
     // Branch-scoped sections.

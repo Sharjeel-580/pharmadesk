@@ -1,17 +1,27 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../models/branch.dart';
+import '../../models/cash_reconciliation.dart';
+import '../../models/closing_correction.dart';
+import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
 import '../../models/financial_transaction.dart';
 import '../../models/goods_receipt.dart';
 import '../../models/inventory_item.dart';
+import '../../models/medicine.dart';
 import '../../models/order.dart';
+import '../../models/prescription.dart';
 import '../../models/purchase_order.dart';
+import '../../models/quarantine_outcome_request.dart';
 import '../../models/rider.dart';
 import '../../models/sale.dart';
+import '../../models/stock_adjustment_request.dart';
 import '../../models/stock_transfer.dart';
+import '../../models/supplier.dart';
 import '../../models/supplier_ledger.dart';
+import '../../models/supplier_payment.dart';
 import '../../features/purchases/purchases_logic.dart';
 import '../services/repositories.dart';
 import 'audit_log.dart';
@@ -109,6 +119,7 @@ class StockReceiveResult {
   /// second time.
   final bool isDuplicate;
 }
+
 /// Result of [ProductionDataLayer.recordStockCount].
 class StockCountResult {
   const StockCountResult({
@@ -196,6 +207,31 @@ class GoodsReceiptResult {
   final bool isDuplicate;
 }
 
+/// Result of [ProductionDataLayer.recordSupplierPayment].
+class SupplierPaymentResult {
+  const SupplierPaymentResult({
+    required this.payment,
+    required this.ledgerEntry,
+    required this.transaction,
+    required this.isDuplicate,
+  });
+
+  /// The saved payment record (the original, when [isDuplicate]
+  /// is true).
+  final SupplierPayment payment;
+
+  /// The matching negative supplier-ledger entry.
+  final SupplierLedgerEntry ledgerEntry;
+
+  /// The matching `financialTransactions` entry of type
+  /// `supplierPayment`.
+  final FinancialTransaction transaction;
+
+  /// True when this key was already paid: no money moved a second
+  /// time.
+  final bool isDuplicate;
+}
+
 class ProductionDataLayer {
   ProductionDataLayer({
     required this.organizationId,
@@ -209,21 +245,33 @@ class ProductionDataLayer {
     required this.purchaseOrderRepo,
     required this.riderRepo,
     StockTransferRepository? stockTransferRepo,
+    StockAdjustmentRequestRepository? stockAdjustmentRequestRepo,
     GoodsReceiptRepository? goodsReceiptRepo,
     ExpenseRepository? expenseRepo,
     FinancialTransactionRepository? financialTransactionRepo,
     DailyClosingRepository? dailyClosingRepo,
+    ClosingCorrectionRepository? closingCorrectionRepo,
+    CashReconciliationRepository? cashReconciliationRepo,
+    SupplierPaymentRepository? supplierPaymentRepo,
+    BranchRepository? branchRepo,
     required this.audit,
     required this.syncQueue,
     required this.engine,
-  }) : goodsReceiptRepo =
-           goodsReceiptRepo ?? MockGoodsReceiptRepository(),
-       stockTransferRepo =
-           stockTransferRepo ?? MockStockTransferRepository(),
+  }) : goodsReceiptRepo = goodsReceiptRepo ?? MockGoodsReceiptRepository(),
+       stockTransferRepo = stockTransferRepo ?? MockStockTransferRepository(),
+       stockAdjustmentRequestRepo =
+           stockAdjustmentRequestRepo ?? MockStockAdjustmentRequestRepository(),
        expenseRepo = expenseRepo ?? MockExpenseRepository(),
        financialTransactionRepo =
            financialTransactionRepo ?? MockFinancialTransactionRepository(),
-       dailyClosingRepo = dailyClosingRepo ?? MockDailyClosingRepository();
+       dailyClosingRepo = dailyClosingRepo ?? MockDailyClosingRepository(),
+       closingCorrectionRepo =
+           closingCorrectionRepo ?? MockClosingCorrectionRepository(),
+       cashReconciliationRepo =
+           cashReconciliationRepo ?? MockCashReconciliationRepository(),
+       supplierPaymentRepo =
+           supplierPaymentRepo ?? MockSupplierPaymentRepository(),
+       branchRepo = branchRepo ?? MockBranchRepository();
 
   final String organizationId;
   final InventoryRepository inventoryRepo;
@@ -259,6 +307,39 @@ class ProductionDataLayer {
   final FinancialTransactionRepository financialTransactionRepo;
   final DailyClosingRepository dailyClosingRepo;
 
+  /// The closing-correction + cash-reconciliation stores (Week 5
+  /// Day 4, D156/D157). Optional in the constructor on the same
+  /// pattern as [goodsReceiptRepo]: direct constructions get fresh
+  /// mocks; the app provider passes the bundle's repos, so the
+  /// corrections / reconciliations the layer writes are the ones
+  /// the cashbook screen reads.
+  final ClosingCorrectionRepository closingCorrectionRepo;
+  final CashReconciliationRepository cashReconciliationRepo;
+
+  /// The adjustment-queue store (Week 5 Day 1, D146). Optional in
+  /// the constructor on the same pattern as [goodsReceiptRepo]:
+  /// direct constructions get a fresh mock; the app provider passes
+  /// the bundle's repo, so the requests the layer persists are the
+  /// ones the queue screen re-reads.
+  final StockAdjustmentRequestRepository stockAdjustmentRequestRepo;
+
+  /// The supplier-payments store (Week 5 Day 1, D147). Optional in
+  /// the constructor on the same pattern: direct constructions get
+  /// a fresh mock; the app provider passes the bundle's repo, so
+  /// the payments the layer writes are the ones the finance screens
+  /// read.
+  final SupplierPaymentRepository supplierPaymentRepo;
+
+  /// The branch directory store (Week 5 Day 2, D148). Optional in
+  /// the constructor on the same pattern: direct constructions get
+  /// a fresh mock (seeded from the demo branches); the app provider
+  /// passes the bundle's repo, so the branches the layer guards
+  /// and saves are the ones the directory screen reads. This is
+  /// the store the FR-HO-08 guard (D149) reads — a branch the
+  /// directory never saw is not known-deactivated, so the guard
+  /// lets it through (see [_requireBranchActive]).
+  final BranchRepository branchRepo;
+
   final AuditLogWriter audit;
   final SyncQueue syncQueue;
   final InventoryEngine engine;
@@ -287,12 +368,35 @@ class ProductionDataLayer {
   /// the `from` status).
   final Map<String, InventoryItem> _committedQuarantineKeys = {};
 
+  /// Committed quarantine return / disposal outcomes by idempotency
+  /// key (Week 5 Day 4, D154): a retry with the same key returns
+  /// the original batch instead of applying the outcome twice.
+  final Map<String, InventoryItem> _committedQuarantineOutcomeKeys = {};
+
   /// Committed cashbook writes by idempotency key (Week 4 Day 5,
   /// D145): a retry with the same key returns the original record
   /// instead of writing a second expense / income / closing.
   final Map<String, Expense> _committedExpenseKeys = {};
   final Map<String, FinancialTransaction> _committedIncomeKeys = {};
   final Map<String, DailyClosing> _committedClosingKeys = {};
+
+  /// Committed closing corrections + cash reconciliations by
+  /// idempotency key (Week 5 Day 4, D156/D157): a retry with the
+  /// same key returns the original record instead of writing a
+  /// second reversing entry / drawer count.
+  final Map<String, ClosingCorrection> _committedCorrectionKeys = {};
+  final Map<String, CashReconciliation> _committedReconciliationKeys = {};
+
+  /// Committed supplier payments by idempotency key (Week 5 Day 1,
+  /// D147): a retry with the same key returns the original payment
+  /// AND its ledger + transaction records instead of paying twice.
+  final Map<String, SupplierPaymentResult> _committedSupplierPaymentKeys = {};
+
+  /// Filed adjustment requests by request id (Week 5 Day 1, D146):
+  /// the request id IS the idempotency key — a re-file with the
+  /// same id returns the original request instead of writing a
+  /// second document.
+  final Map<String, StockAdjustmentRequest> _filedAdjustmentKeys = {};
 
   /// Committed standalone stock receives by idempotency key
   /// (Week 3 Day 4, D111): a retry with the same key returns the
@@ -323,6 +427,34 @@ class ProductionDataLayer {
   final InMemoryRestoreSink _restoreSink = InMemoryRestoreSink();
 
   InMemoryRestoreSink get restoredData => _restoreSink;
+
+  /// FR-HO-08 deactivation enforcement (Week 5 Day 2, D149 — SRS
+  /// D-28 / FR-HO-08): a deactivated branch cannot transact.
+  ///
+  /// Every transaction write path in this layer calls this before
+  /// its first write (after the idempotency-duplicate early return,
+  /// so a retried key still returns its original result instead of
+  /// an error for a branch deactivated since the commit). The error
+  /// is an [ArgumentError] — the same type the other layer guards
+  /// throw (D68 sellable-stock, D140 quarantine transitions), so
+  /// the notifiers' existing `on ArgumentError` handlers surface
+  /// it instead of crashing.
+  ///
+  /// A branch id the directory never saw ([branchRepo.getById]
+  /// returns `null`) is NOT refused: the directory is the source of
+  /// truth for deactivation, and an unknown id cannot be known to
+  /// be deactivated. That keeps older direct constructions (tests
+  /// and flows that transact under ids outside the directory)
+  /// working exactly as before.
+  Future<void> _requireBranchActive(String branchId) async {
+    final branch = await branchRepo.getById(branchId);
+    if (branch != null && !branch.active) {
+      throw ArgumentError(
+        'Branch "${branch.name}" is deactivated and cannot transact '
+        '(FR-HO-08) — reactivate it in Branch Management first.',
+      );
+    }
+  }
 
   /// Commits a POS sale end to end.
   ///
@@ -364,6 +496,10 @@ class ProductionDataLayer {
         movements: const [],
       );
     }
+
+    // FR-HO-08 (D149): a deactivated branch cannot transact — the
+    // sale is refused before any stock is reserved or written.
+    await _requireBranchActive(sale.branchId);
 
     // Load the engine from live stock, then reserve the exact FEFO
     // batches the POS allocated. The reserve validates sellability
@@ -488,6 +624,8 @@ class ProductionDataLayer {
     if (existing != null) {
       return OrderCreateResult(order: existing, isDuplicate: true);
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact.
+    await _requireBranchActive(order.branchId);
     final saved = await orderRepo.createOrder(order);
     _committedOrderKeys[key] = saved;
     await audit.write(
@@ -602,6 +740,10 @@ class ProductionDataLayer {
         'file). Check the receipt before receiving again.',
       );
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact —
+    // receiving goods against its POs is refused before any stock
+    // or money moves.
+    await _requireBranchActive(order.branchId);
     if (!canReceivePo(order)) {
       throw ArgumentError(
         'This purchase order cannot receive goods in its current state.',
@@ -645,9 +787,7 @@ class ProductionDataLayer {
     // Load the engine from live stock, then receive each line: the
     // repo creates the batch row, the engine books it (counter +
     // receive ledger movement + audit).
-    final batches = await inventoryRepo.getInventory(
-      branchId: order.branchId,
-    );
+    final batches = await inventoryRepo.getInventory(branchId: order.branchId);
     engine.loadBatches(batches);
     final createdBatches = <InventoryItem>[];
     for (final line in receivedLines) {
@@ -779,8 +919,7 @@ class ProductionDataLayer {
     String actorName = demoActorName,
     String reason = 'Stock received',
   }) async {
-    final key =
-        idempotencyKey ?? newIdempotencyKey('stock-receive-$branchId');
+    final key = idempotencyKey ?? newIdempotencyKey('stock-receive-$branchId');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Stock receive idempotency key is not valid.');
     }
@@ -792,14 +931,14 @@ class ProductionDataLayer {
         isDuplicate: true,
       );
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact.
+    await _requireBranchActive(branchId);
     // Load the engine from live stock BEFORE the repo creates the
     // batch: `loadBatches` resets the counters from the physical
     // rows, so loading after the create (which already includes the
     // new batch) and then booking it would count the batch twice.
     // Same order as `receiveGoods` (D103).
-    engine.loadBatches(
-      await inventoryRepo.getInventory(branchId: branchId),
-    );
+    engine.loadBatches(await inventoryRepo.getInventory(branchId: branchId));
     final created = await inventoryRepo.receiveStock(
       branchId: branchId,
       medicineId: medicineId,
@@ -847,8 +986,7 @@ class ProductionDataLayer {
     String? referenceId,
     String? idempotencyKey,
   }) async {
-    final key =
-        idempotencyKey ?? newIdempotencyKey('stock-adjust-$batchId');
+    final key = idempotencyKey ?? newIdempotencyKey('stock-adjust-$batchId');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Stock adjustment idempotency key is not valid.');
     }
@@ -858,6 +996,8 @@ class ProductionDataLayer {
       (item) => item.id == batchId,
       orElse: () => throw ArgumentError('No batch with id "$batchId".'),
     );
+    // FR-HO-08 (D149): a deactivated branch cannot transact.
+    await _requireBranchActive(batch.branchId);
     engine.loadBatches(
       await inventoryRepo.getInventory(branchId: batch.branchId),
     );
@@ -912,8 +1052,7 @@ class ProductionDataLayer {
     String actorId = demoActorId,
     String actorName = demoActorName,
   }) async {
-    final key =
-        idempotencyKey ?? newIdempotencyKey('stock-count-$batchId');
+    final key = idempotencyKey ?? newIdempotencyKey('stock-count-$batchId');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Stock count idempotency key is not valid.');
     }
@@ -930,6 +1069,10 @@ class ProductionDataLayer {
       (item) => item.id == batchId,
       orElse: () => throw ArgumentError('No batch with id "$batchId".'),
     );
+    // FR-HO-08 (D149): a deactivated branch cannot transact — a
+    // count that would correct stock is refused, including a
+    // zero-variance count (it still stamps the batch row).
+    await _requireBranchActive(batch.branchId);
     if (countedQty < 0) {
       throw ArgumentError('Counted quantity cannot be negative.');
     }
@@ -1039,6 +1182,104 @@ class ProductionDataLayer {
     );
   }
 
+  /// Applies an approved quarantine outcome (Week 5 Day 4, D154 —
+  /// SRS D-11 / FR-INV-07, §5.2.4). Only a batch in `quarantined`
+  /// status can be decided — the batch must still be parked when
+  /// the approver acts (a restored batch cannot be returned or
+  /// disposed; the request stays pending and the approver rejects
+  /// it instead).
+  ///
+  /// 1. **Transition** — return → `returned` with quantity 0 (the
+  ///    units leave the branch's stock); dispose → `disposed` with
+  ///    the quantity kept as the destroyed count. Either way the
+  ///    D68 guard excludes the batch from saleable stock.
+  /// 2. **Audit** — one `batch.returned` / `batch.disposed` entry
+  ///    with the reason and the approver.
+  /// 3. **Sync** — one batch-doc update payload is enqueued (the
+  ///    return also carries the quantity 0), so the sync chip moves
+  ///    for outcome work.
+  /// 4. **Idempotency** — a retry with the same key returns the
+  ///    original batch instead of re-applying the outcome.
+  ///
+  /// The separation of duties (approver ≠ requester) is enforced
+  /// by the queue notifier ([canApproveQuarantineOutcome]), not
+  /// here: the layer owns the transition, the notifier owns who
+  /// may ask for it — same split as the adjustment queue (D141).
+  Future<InventoryItem> applyQuarantineOutcome({
+    required String batchId,
+    required QuarantineOutcome outcome,
+    required String reason,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+  }) async {
+    final to = quarantineOutcomeStatus(outcome);
+    final key =
+        idempotencyKey ??
+        newIdempotencyKey('quarantine-outcome-$batchId-${to.name}');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Quarantine outcome idempotency key is not valid.');
+    }
+    final existing = _committedQuarantineOutcomeKeys[key];
+    if (existing != null) return existing;
+    final batch = (await inventoryRepo.getInventory()).firstWhere(
+      (item) => item.id == batchId,
+      orElse: () => throw ArgumentError('No batch with id "$batchId".'),
+    );
+    // FR-HO-08 (D149): a deactivated branch cannot transact — its
+    // batches cannot change status either.
+    await _requireBranchActive(batch.branchId);
+    if (batch.status != BatchStatus.quarantined) {
+      throw ArgumentError(
+        'Batch ${batch.batchNo} is ${batch.status.name}, not '
+        'quarantined — it cannot be ${to.name}.',
+      );
+    }
+    final InventoryItem updated;
+    if (outcome == QuarantineOutcome.returnToSupplier) {
+      // A returned batch leaves stock: the units went back to the
+      // supplier, so the row's quantity becomes 0 (upsert, D150 —
+      // `updateBatchStatus` leaves the quantity untouched).
+      updated = await inventoryRepo.upsertInventoryItem(
+        batch.copyWith(status: BatchStatus.returned, quantity: 0),
+      );
+    } else {
+      updated = await inventoryRepo.updateBatchStatus(
+        batchId: batchId,
+        status: BatchStatus.disposed,
+        reason: reason,
+      );
+    }
+    engine.loadBatches(
+      await inventoryRepo.getInventory(branchId: batch.branchId),
+    );
+    await audit.write(
+      AuditLogEntry.create(
+        organizationId: organizationId,
+        branchId: batch.branchId,
+        userId: actorId,
+        actorName: actorName,
+        action: outcome == QuarantineOutcome.returnToSupplier
+            ? 'batch.returned'
+            : 'batch.disposed',
+        entityType: 'batch',
+        entityId: batchId,
+        summary:
+            'Batch ${batch.batchNo} ${to.name} '
+            '(${batch.quantity} units) — $reason',
+        before: BatchStatus.quarantined.name,
+        after: to.name,
+      ),
+    );
+    await _enqueueBatchStatusSync(
+      updated,
+      key,
+      quantity: outcome == QuarantineOutcome.returnToSupplier ? 0 : null,
+    );
+    _committedQuarantineOutcomeKeys[key] = updated;
+    return updated;
+  }
+
   Future<InventoryItem> _setBatchStatus({
     required String batchId,
     required BatchStatus from,
@@ -1050,8 +1291,7 @@ class ProductionDataLayer {
     String actorName = demoActorName,
   }) async {
     final key =
-        idempotencyKey ??
-        newIdempotencyKey('batch-status-$batchId-${to.name}');
+        idempotencyKey ?? newIdempotencyKey('batch-status-$batchId-${to.name}');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Batch status idempotency key is not valid.');
     }
@@ -1061,6 +1301,10 @@ class ProductionDataLayer {
       (item) => item.id == batchId,
       orElse: () => throw ArgumentError('No batch with id "$batchId".'),
     );
+    // FR-HO-08 (D149): a deactivated branch cannot transact — its
+    // batches cannot change status either (quarantine and
+    // un-quarantine both go through here).
+    await _requireBranchActive(batch.branchId);
     if (batch.status != from) {
       throw ArgumentError(
         'Batch ${batch.batchNo} is ${batch.status.name}, not '
@@ -1096,11 +1340,14 @@ class ProductionDataLayer {
 
   /// Builds the Firestore payload for one batch-status change and
   /// enqueues it as one sync operation (D140 — D111 pattern): a
-  /// single batch-doc update.
+  /// single batch-doc update. [quantity] is carried only when the
+  /// transition also moves stock — a return to the supplier (D154)
+  /// zeroes the batch quantity, so the sync payload must say so.
   Future<void> _enqueueBatchStatusSync(
     InventoryItem batch,
-    String key,
-  ) async {
+    String key, {
+    int? quantity,
+  }) async {
     final writeBatch = LocalWriteBatch();
     writeBatch.update(
       FirestoreSchema.branchDocPath(
@@ -1110,6 +1357,7 @@ class ProductionDataLayer {
       ),
       {
         'status': batch.status.name,
+        if (quantity case final quantityValue) 'quantity': quantityValue,
         'updatedAt': DateTime.now().toIso8601String(),
       },
     );
@@ -1199,12 +1447,18 @@ class ProductionDataLayer {
           branchId,
           FirestoreSchema.expenses,
           created.id,
-        ): expenseToFirestore(created, orgId: organizationId),
+        ): expenseToFirestore(
+          created,
+          orgId: organizationId,
+        ),
         FirestoreSchema.branchDocPath(
           branchId,
           FirestoreSchema.financialTransactions,
           mirror.id,
-        ): financialTransactionToFirestore(mirror, orgId: organizationId),
+        ): financialTransactionToFirestore(
+          mirror,
+          orgId: organizationId,
+        ),
       },
     );
     _committedExpenseKeys[key] = created;
@@ -1224,8 +1478,7 @@ class ProductionDataLayer {
     String? createdBy,
     String? idempotencyKey,
   }) async {
-    final key =
-        idempotencyKey ?? newIdempotencyKey('finance-income-$branchId');
+    final key = idempotencyKey ?? newIdempotencyKey('finance-income-$branchId');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Income idempotency key is not valid.');
     }
@@ -1253,7 +1506,10 @@ class ProductionDataLayer {
           branchId,
           FirestoreSchema.financialTransactions,
           created.id,
-        ): financialTransactionToFirestore(created, orgId: organizationId),
+        ): financialTransactionToFirestore(
+          created,
+          orgId: organizationId,
+        ),
       },
     );
     _committedIncomeKeys[key] = created;
@@ -1290,11 +1546,425 @@ class ProductionDataLayer {
           created.branchId,
           FirestoreSchema.dailyClosings,
           created.id,
-        ): dailyClosingToFirestore(created, orgId: organizationId),
+        ): dailyClosingToFirestore(
+          created,
+          orgId: organizationId,
+        ),
       },
     );
     _committedClosingKeys[key] = created;
     return created;
+  }
+
+  /// Records a closing correction — the reversing entry for a wrong
+  /// daily closing (Week 5 Day 4, D156 — SRS D-24 / FR-FIN-06).
+  ///
+  /// The original closing is NEVER edited: the layer writes a new
+  /// correction record linked to it ([ClosingCorrection
+  /// .originalClosingId]), writes one `closing.corrected` audit
+  /// entry, and enqueues one sync payload (the correction doc).
+  /// Idempotency follows the same registry pattern as
+  /// [recordDailyClosing]. The totals themselves are computed by
+  /// the caller (the notifier, from the correction form); the layer
+  /// writes the record it is given.
+  Future<ClosingCorrection> recordClosingCorrection({
+    required ClosingCorrection correction,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+  }) async {
+    final key =
+        idempotencyKey ??
+        newIdempotencyKey('finance-correction-${correction.originalClosingId}');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Closing correction idempotency key is not valid.');
+    }
+    final existing = _committedCorrectionKeys[key];
+    if (existing != null) return existing;
+    final created = await closingCorrectionRepo.createCorrection(correction);
+    await audit.write(
+      AuditLogEntry.create(
+        organizationId: organizationId,
+        branchId: created.branchId,
+        userId: actorId,
+        actorName: actorName,
+        action: 'closing.corrected',
+        entityType: 'dailyClosing',
+        entityId: created.originalClosingId,
+        summary:
+            'Closing ${created.originalClosingId} corrected — '
+            'income ${created.correctedIncomeMinor}, expense '
+            '${created.correctedExpenseMinor}, balance '
+            '${created.correctedClosingBalanceMinor} — ${created.reason}',
+        before: 'original closing',
+        after: 'corrected closing',
+      ),
+    );
+    await _enqueueFinanceSync(
+      entityType: 'closingCorrection',
+      entityId: created.id,
+      branchId: created.branchId,
+      key: key,
+      docs: {
+        FirestoreSchema.branchDocPath(
+          created.branchId,
+          FirestoreSchema.closingCorrections,
+          created.id,
+        ): closingCorrectionToFirestore(
+          created,
+          orgId: organizationId,
+        ),
+      },
+    );
+    _committedCorrectionKeys[key] = created;
+    return created;
+  }
+
+  /// Records a cash reconciliation — the counted drawer against the
+  /// expected drawer for a day (Week 5 Day 4, D157 — SRS D-24 /
+  /// FR-FIN-02).
+  ///
+  /// The expected amount is computed by the caller (the notifier,
+  /// from the day's sales + cashbook entries + opening —
+  /// `expectedDrawerMinor`); the layer writes the record it is
+  /// given, writes one `cash.reconciled` audit entry, and enqueues
+  /// one sync payload (the reconciliation doc). Idempotency
+  /// follows the same registry pattern as [recordDailyClosing].
+  /// The difference is recorded, never absorbed: a short drawer
+  /// stays short in the record until a later count explains it.
+  Future<CashReconciliation> recordCashReconciliation({
+    required CashReconciliation reconciliation,
+    String? idempotencyKey,
+    String actorId = demoActorId,
+    String actorName = demoActorName,
+  }) async {
+    final key =
+        idempotencyKey ??
+        newIdempotencyKey('finance-reconciliation-${reconciliation.branchId}');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Cash reconciliation idempotency key is not valid.');
+    }
+    final existing = _committedReconciliationKeys[key];
+    if (existing != null) return existing;
+    final created = await cashReconciliationRepo.createReconciliation(
+      reconciliation,
+    );
+    await audit.write(
+      AuditLogEntry.create(
+        organizationId: organizationId,
+        branchId: created.branchId,
+        userId: actorId,
+        actorName: actorName,
+        action: 'cash.reconciled',
+        entityType: 'cashReconciliation',
+        entityId: created.id,
+        summary:
+            'Drawer reconciled — expected ${created.expectedMinor}, '
+            'counted ${created.countedMinor}, difference '
+            '${created.differenceMinor}',
+        before: 'expected ${created.expectedMinor}',
+        after: 'counted ${created.countedMinor}',
+      ),
+    );
+    await _enqueueFinanceSync(
+      entityType: 'cashReconciliation',
+      entityId: created.id,
+      branchId: created.branchId,
+      key: key,
+      docs: {
+        FirestoreSchema.branchDocPath(
+          created.branchId,
+          FirestoreSchema.cashReconciliations,
+          created.id,
+        ): cashReconciliationToFirestore(
+          created,
+          orgId: organizationId,
+        ),
+      },
+    );
+    _committedReconciliationKeys[key] = created;
+    return created;
+  }
+
+  /// Records a supplier payment through the production write path
+  /// (Week 5 Day 1, D147 — closes the D145 follow-up).
+  ///
+  /// The finance notifier used to write three records across two
+  /// repos directly (payment + supplier-ledger entry +
+  /// `financialTransactions` entry). Now the layer is the single
+  /// write path, like `recordExpense` (D145):
+  ///
+  /// 1. **Idempotency** — [idempotencyKey] (minted per call when
+  ///    omitted) is the dedupe key AND the payment record's id, so
+  ///    a retry with the same key returns the original payment with
+  ///    its ledger + transaction records and moves NO money a second
+  ///    time (the Firestore repo also dedupes on the doc id, D65).
+  /// 2. **Validation** — the amount must be positive and the
+  ///    allocations must sum to it (the notifier validates against
+  ///    the outstanding payable first; the layer re-checks the
+  ///    shape it owns so a direct caller cannot write a
+  ///    half-allocated payment).
+  /// 3. **Records** — the payment, then the matching negative
+  ///    supplier-ledger entry (same reason text the notifier built
+  ///    before: `Payment made — <method>` + optional reference, or
+  ///    the caller's [reason]), then the matching
+  ///    `financialTransactions` entry of type `supplierPayment` —
+  ///    the same three records, in the same order, with the same
+  ///    values as the old repo-direct path. The ledger / aging /
+  ///    statement numbers do not change: this is a wiring move, not
+  ///    a computation change.
+  /// 4. **Sync** — one batched-write payload (payment doc + ledger
+  ///    doc + transaction doc) is enqueued, so the sync-status chip
+  ///    moves for supplier payments.
+  Future<SupplierPaymentResult> recordSupplierPayment({
+    required String supplierId,
+    required String branchId,
+    required int amountMinor,
+    SupplierPaymentMethod method = SupplierPaymentMethod.cash,
+    String reference = '',
+    String reason = '',
+    String? paidBy,
+    required List<PaymentAllocation> allocations,
+    String? idempotencyKey,
+  }) async {
+    final key =
+        idempotencyKey ?? newIdempotencyKey('supplier-payment-$branchId');
+    if (!FirestoreSchema.isValidIdempotencyKey(key)) {
+      throw ArgumentError('Supplier payment idempotency key is not valid.');
+    }
+    final existing = _committedSupplierPaymentKeys[key];
+    if (existing != null) {
+      return SupplierPaymentResult(
+        payment: existing.payment,
+        ledgerEntry: existing.ledgerEntry,
+        transaction: existing.transaction,
+        isDuplicate: true,
+      );
+    }
+    if (amountMinor <= 0) {
+      throw ArgumentError('Payment amount must be more than zero.');
+    }
+    final allocated = allocations.fold(
+      0,
+      (sum, allocation) => sum + allocation.amountMinor,
+    );
+    if (allocations.isEmpty || allocated != amountMinor) {
+      throw ArgumentError(
+        'Payment allocations ($allocated paisa) do not sum to the '
+        'payment amount ($amountMinor paisa).',
+      );
+    }
+    final created = await supplierPaymentRepo.createPayment(
+      SupplierPayment(
+        id: key,
+        branchId: branchId,
+        supplierId: supplierId,
+        amountMinor: amountMinor,
+        method: method,
+        reference: reference.trim(),
+        paidBy: paidBy,
+        paidAt: DateTime.now(),
+        allocations: allocations,
+      ),
+    );
+    final ledgerReason = reason.trim().isEmpty
+        ? 'Payment made — ${supplierPaymentMethodLabel(method)}'
+              '${reference.trim().isEmpty ? '' : ' (${reference.trim()})'}'
+        : reason.trim();
+    final ledgerEntry = await supplierRepo.addLedgerEntry(
+      SupplierLedgerEntry(
+        id: '',
+        supplierId: supplierId,
+        kind: SupplierLedgerEntryKind.payment,
+        amountMinor: -amountMinor,
+        reason: ledgerReason,
+        referenceId: created.id,
+        balanceAfterMinor: 0, // set by the repository
+        createdAt: DateTime.now(),
+      ),
+    );
+    final transaction = await financialTransactionRepo.addTransaction(
+      FinancialTransaction(
+        id: '',
+        branchId: branchId,
+        type: FinancialTransactionType.supplierPayment,
+        amountMinor: -amountMinor,
+        category: 'Supplier payment',
+        referenceType: 'supplierPayment',
+        referenceId: created.id,
+        createdBy: paidBy,
+        createdAt: DateTime.now(),
+      ),
+    );
+    await _enqueueFinanceSync(
+      entityType: 'supplierPayment',
+      entityId: created.id,
+      branchId: branchId,
+      key: key,
+      docs: {
+        FirestoreSchema.branchDocPath(
+          branchId,
+          FirestoreSchema.supplierPayments,
+          created.id,
+        ): supplierPaymentToFirestore(
+          created,
+          orgId: organizationId,
+        ),
+        '${FirestoreSchema.supplierLedgerPath(supplierId)}/${ledgerEntry.id}':
+            supplierLedgerEntryToFirestore(ledgerEntry, orgId: organizationId),
+        FirestoreSchema.branchDocPath(
+          branchId,
+          FirestoreSchema.financialTransactions,
+          transaction.id,
+        ): financialTransactionToFirestore(
+          transaction,
+          orgId: organizationId,
+        ),
+      },
+    );
+    final result = SupplierPaymentResult(
+      payment: created,
+      ledgerEntry: ledgerEntry,
+      transaction: transaction,
+      isDuplicate: false,
+    );
+    _committedSupplierPaymentKeys[key] = result;
+    return result;
+  }
+
+  /// Files a stock-adjustment request through the production write
+  /// path (Week 5 Day 1, D146 — closes the D141 follow-up).
+  ///
+  /// The queue notifier used to keep requests in memory only. Now
+  /// filing persists the request: the repo stores it under
+  /// `branches/{branchId}/stockAdjustments/{id}` (mock now,
+  /// Firestore when the bundle switches) and one sync payload (the
+  /// request doc) is enqueued, so the request survives a notifier
+  /// rebuild and an app restart.
+  ///
+  /// 1. **Idempotency** — the request id IS the key (also the
+  ///    idempotency key for the approval apply, D141): a re-file
+  ///    with the same id returns the original request and writes
+  ///    nothing a second time.
+  /// 2. **Validation** — the layer re-checks the shape it owns
+  ///    (non-zero quantity, a reason); the notifier validates the
+  ///    full request (including decrease ≤ on-hand) first.
+  Future<StockAdjustmentRequest> fileAdjustmentRequest(
+    StockAdjustmentRequest request,
+  ) async {
+    if (request.id.isEmpty) {
+      throw ArgumentError('An adjustment request needs an id.');
+    }
+    final existing = _filedAdjustmentKeys[request.id];
+    if (existing != null) return existing;
+    if (request.deltaQty == 0) {
+      throw ArgumentError('Adjustment quantity cannot be zero.');
+    }
+    if (request.reason.trim().isEmpty) {
+      throw ArgumentError('An adjustment reason is required.');
+    }
+    // A request already in the store but NOT in this layer's
+    // registry (a previous layer instance filed it, e.g. before an
+    // app restart) dedupes the same way — the repo upsert would
+    // overwrite the same doc, but returning the stored request also
+    // skips the second sync payload (same shape as the orphan
+    // check in `receiveGoods`, D103).
+    final stored = await stockAdjustmentRequestRepo.getById(request.id);
+    if (stored != null) {
+      _filedAdjustmentKeys[stored.id] = stored;
+      return stored;
+    }
+    final saved = await stockAdjustmentRequestRepo.saveRequest(request);
+    await _enqueueFinanceSync(
+      entityType: 'stockAdjustmentRequest',
+      entityId: saved.id,
+      branchId: saved.branchId,
+      key: saved.id,
+      docs: {
+        FirestoreSchema.stockAdjustmentDocPath(saved.branchId, saved.id):
+            stockAdjustmentRequestToFirestore(saved, orgId: organizationId),
+      },
+    );
+    _filedAdjustmentKeys[saved.id] = saved;
+    return saved;
+  }
+
+  /// Re-reads the persisted adjustment requests (Week 5 Day 1,
+  /// D146): the queue notifier calls this on start so a rebuild
+  /// restores the requests filed in earlier sessions. Loaded
+  /// requests join the file registry, so re-filing one of them
+  /// dedupes instead of writing a second document.
+  Future<List<StockAdjustmentRequest>> loadAdjustmentRequests({
+    String? branchId,
+  }) async {
+    final requests = await stockAdjustmentRequestRepo.getRequests(
+      branchId: branchId,
+    );
+    for (final request in requests) {
+      _filedAdjustmentKeys[request.id] = request;
+    }
+    return requests;
+  }
+
+  /// Re-reads the persisted branches (Week 5 Day 2, D148): the
+  /// branch directory notifier calls this on start so a rebuild
+  /// restores the branches added in earlier sessions.
+  Future<List<Branch>> loadBranches() => branchRepo.getBranches();
+
+  /// One branch by id (Week 5 Day 2, D148) — the FR-HO-08 guard's
+  /// read path, and the directory detail screen's. Returns `null`
+  /// when the directory never saw the id.
+  Future<Branch?> getBranch(String branchId) => branchRepo.getById(branchId);
+
+  /// Persists a branch add / edit / activate / deactivate (Week 5
+  /// Day 2, D148 — D146 pattern): one upsert by id (never a
+  /// duplicate document) plus one sync payload (the branch doc),
+  /// so the directory survives a rebuild and an app restart. The
+  /// caller (the directory notifier) owns validation and the
+  /// last-active-branch protection; this only writes.
+  Future<Branch> saveBranch(Branch branch) async {
+    final saved = await branchRepo.saveBranch(branch);
+    await _enqueueFinanceSync(
+      entityType: 'branch',
+      entityId: saved.id,
+      branchId: saved.id,
+      key: 'branch-${saved.id}',
+      kind: SyncOperationKind.update,
+      docs: {
+        FirestoreSchema.branchDoc(saved.id): branchToFirestore(
+          saved,
+          orgId: organizationId,
+        ),
+      },
+    );
+    return saved;
+  }
+
+  /// Persists a decided adjustment request (Week 5 Day 1, D146):
+  /// the approve / reject decision is written to the same document
+  /// (upsert by id — never a second document) and one update sync
+  /// payload is enqueued. The stock movement itself is applied by
+  /// [adjustStock] on approval; this only records the decision.
+  Future<StockAdjustmentRequest> updateAdjustmentRequest(
+    StockAdjustmentRequest request,
+  ) async {
+    if (request.id.isEmpty) {
+      throw ArgumentError('An adjustment request needs an id.');
+    }
+    final saved = await stockAdjustmentRequestRepo.saveRequest(request);
+    await _enqueueFinanceSync(
+      entityType: 'stockAdjustmentRequest',
+      entityId: saved.id,
+      branchId: saved.branchId,
+      key: 'stock-adjust-decision-${saved.id}',
+      kind: SyncOperationKind.update,
+      docs: {
+        FirestoreSchema.stockAdjustmentDocPath(saved.branchId, saved.id):
+            stockAdjustmentRequestToFirestore(saved, orgId: organizationId),
+      },
+    );
+    _filedAdjustmentKeys[saved.id] = saved;
+    return saved;
   }
 
   /// Builds the Firestore batched-write payload for one cashbook
@@ -1306,10 +1976,17 @@ class ProductionDataLayer {
     required String branchId,
     required String key,
     required Map<String, Map<String, dynamic>> docs,
+    SyncOperationKind kind = SyncOperationKind.create,
   }) async {
     final writeBatch = LocalWriteBatch();
     for (final entry in docs.entries) {
-      writeBatch.set(entry.key, entry.value);
+      // An update payload rewrites the doc the same way the repo
+      // does (setDocument) — the operation kind records the intent.
+      if (kind == SyncOperationKind.update) {
+        writeBatch.update(entry.key, entry.value);
+      } else {
+        writeBatch.set(entry.key, entry.value);
+      }
     }
     final chunks = writeBatch.chunks();
     await syncQueue.enqueue(
@@ -1318,7 +1995,7 @@ class ProductionDataLayer {
       entityId: entityId,
       branchId: branchId,
       organizationId: organizationId,
-      kind: SyncOperationKind.create,
+      kind: kind,
       payload: {
         'path': docs.keys.first,
         'operations': writeBatch.toMap()['operations'],
@@ -1358,8 +2035,7 @@ class ProductionDataLayer {
     String actorId = demoActorId,
     String actorName = demoActorName,
   }) async {
-    final key =
-        idempotencyKey ?? newIdempotencyKey('transfer-$fromBranchId');
+    final key = idempotencyKey ?? newIdempotencyKey('transfer-$fromBranchId');
     if (!FirestoreSchema.isValidIdempotencyKey(key)) {
       throw ArgumentError('Transfer idempotency key is not valid.');
     }
@@ -1370,6 +2046,11 @@ class ProductionDataLayer {
         isDuplicate: true,
       );
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact — a
+    // transfer neither out of nor into a deactivated branch can be
+    // requested.
+    await _requireBranchActive(fromBranchId);
+    await _requireBranchActive(toBranchId);
     if (fromBranchId == toBranchId) {
       throw ArgumentError(
         'A transfer needs two different branches — source and '
@@ -1388,9 +2069,7 @@ class ProductionDataLayer {
       }
       final medicine = await medicineRepo.getById(item.medicineId);
       if (medicine == null) {
-        throw ArgumentError(
-          'No medicine with id "${item.medicineId}".',
-        );
+        throw ArgumentError('No medicine with id "${item.medicineId}".');
       }
       lines.add(
         TransferItem(
@@ -1468,8 +2147,7 @@ class ProductionDataLayer {
         'transfer can be approved.',
       );
     }
-    if (transfer.requestedBy != null &&
-        transfer.requestedBy == actorId) {
+    if (transfer.requestedBy != null && transfer.requestedBy == actorId) {
       throw ArgumentError(
         'You requested this transfer — someone else must approve it.',
       );
@@ -1481,8 +2159,7 @@ class ProductionDataLayer {
       action: 'transfer.approved',
       actorId: actorId,
       actorName: actorName,
-      summary:
-          'Transfer ${transfer.transferNumber} approved by $actorName',
+      summary: 'Transfer ${transfer.transferNumber} approved by $actorName',
     );
   }
 
@@ -1506,8 +2183,7 @@ class ProductionDataLayer {
       action: 'transfer.rejected',
       actorId: actorId,
       actorName: actorName,
-      summary:
-          'Transfer ${transfer.transferNumber} rejected by $actorName',
+      summary: 'Transfer ${transfer.transferNumber} rejected by $actorName',
     );
   }
 
@@ -1532,8 +2208,7 @@ class ProductionDataLayer {
       action: 'transfer.cancelled',
       actorId: actorId,
       actorName: actorName,
-      summary:
-          'Transfer ${transfer.transferNumber} cancelled by $actorName',
+      summary: 'Transfer ${transfer.transferNumber} cancelled by $actorName',
     );
   }
 
@@ -1624,6 +2299,10 @@ class ProductionDataLayer {
         'transfer can be dispatched.',
       );
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact — stock
+    // cannot leave a branch that has been deactivated since the
+    // transfer was approved.
+    await _requireBranchActive(transfer.fromBranchId);
     // Load the engine from live source stock BEFORE reserving: the
     // reserve walks the engine's snapshots, and a stale engine
     // would dispatch stock another sale already took.
@@ -1674,13 +2353,11 @@ class ProductionDataLayer {
         TransferAllocation(
           medicineId: reservation.medicineId,
           batchId: reservation.batchId,
-          batchNo:
-              engine.batchById(reservation.batchId)?.batchNo ?? '',
+          batchNo: engine.batchById(reservation.batchId)?.batchNo ?? '',
           quantity: reservation.quantity,
           mfgDate: engine.batchById(reservation.batchId)?.mfgDate,
           expiryDate: engine.batchById(reservation.batchId)?.expiryDate,
-          unitCostMinor:
-              engine.batchById(reservation.batchId)?.costMinor ?? 0,
+          unitCostMinor: engine.batchById(reservation.batchId)?.costMinor ?? 0,
         ),
     ];
     final updated = transfer.copyWith(
@@ -1760,6 +2437,10 @@ class ProductionDataLayer {
         'transfer can be received.',
       );
     }
+    // FR-HO-08 (D149): a deactivated branch cannot transact —
+    // stock cannot arrive into a branch that has been deactivated
+    // since the transfer was dispatched.
+    await _requireBranchActive(transfer.toBranchId);
     if (transfer.dispatchAllocations.isEmpty) {
       throw StateError(
         'Transfer ${transfer.transferNumber} was dispatched without '
@@ -1782,13 +2463,11 @@ class ProductionDataLayer {
         medicineId: allocation.medicineId,
         batchNo: allocation.batchNo,
         mfgDate:
-            allocation.mfgDate ?? DateTime.now().subtract(
-              const Duration(days: 30),
-            ),
+            allocation.mfgDate ??
+            DateTime.now().subtract(const Duration(days: 30)),
         expiryDate:
-            allocation.expiryDate ?? DateTime.now().add(
-              const Duration(days: 365),
-            ),
+            allocation.expiryDate ??
+            DateTime.now().add(const Duration(days: 365)),
         quantity: allocation.quantity,
         costMinor: allocation.unitCostMinor,
       );
@@ -1887,12 +2566,9 @@ class ProductionDataLayer {
         );
       }
       if (rider.branchId != null && rider.branchId != order.branchId) {
-        throw ArgumentError(
-          'Rider ${rider.name} belongs to another branch.',
-        );
+        throw ArgumentError('Rider ${rider.name} belongs to another branch.');
       }
-      if (rider.currentOrderId != null &&
-          rider.currentOrderId != order.id) {
+      if (rider.currentOrderId != null && rider.currentOrderId != order.id) {
         throw ArgumentError(
           'Rider ${rider.name} is already out on order '
           '${rider.currentOrderId}.',
@@ -1915,9 +2591,7 @@ class ProductionDataLayer {
       }
     }
     if (rider != null) {
-      await riderRepo.updateRider(
-        rider.copyWith(currentOrderId: order.id),
-      );
+      await riderRepo.updateRider(rider.copyWith(currentOrderId: order.id));
     }
     await audit.write(
       AuditLogEntry.create(
@@ -1933,11 +2607,12 @@ class ProductionDataLayer {
         summary: riderId == null
             ? 'Rider removed from order ${order.id} by $actorName'
             : 'Order ${order.id} assigned to rider ${rider!.name} '
-                'by $actorName',
+                  'by $actorName',
       ),
     );
     await syncQueue.enqueue(
-      idempotencyKey: 'rider-assign-${order.id}-${DateTime.now().millisecondsSinceEpoch}',
+      idempotencyKey:
+          'rider-assign-${order.id}-${DateTime.now().millisecondsSinceEpoch}',
       entityType: 'order',
       entityId: order.id,
       branchId: order.branchId,
@@ -2003,13 +2678,182 @@ class ProductionDataLayer {
     return _exporter.downloadBackup(branchId: branchId);
   }
 
-  /// Restores a backup document into the restore sink (see
-  /// `backup_export.dart` for the policy). Returns the import report.
-  ImportReport importBackup(
+  /// Restores a backup document into the LIVE repositories (Week 5
+  /// Day 2, D150 — closes the D133 follow-up: the restore target is
+  /// no longer the sink alone).
+  ///
+  /// Validation runs BEFORE any write: wrong format, wrong version
+  /// or a missing `sections` map aborts the whole import (the old
+  /// `DataImporter` behaviour — nothing is written then). Each repo
+  /// section is then upserted by id through its repository
+  /// (existing id → replaced in place, new id → inserted); the
+  /// `auditLogs` / `syncQueue` sections are local state, not repo
+  /// data, so they land in the restore sink only — as does every
+  /// other section, so [restoredData] stays the full record of the
+  /// last restore. Unknown sections also land in the sink, so a
+  /// newer backup's section is never lost. A doc that fails to
+  /// parse or upsert is recorded in [ImportReport.errors] and
+  /// skipped; the rest still import.
+  ///
+  /// The report counts are measured against the LIVE repos, not the
+  /// sink: `created` = ids that did not exist in the live repo
+  /// before this import, `overwritten` = ids that did (and were
+  /// replaced under [ImportPolicy.overwrite]), `skipped` = ids that
+  /// did (and were left alone under [ImportPolicy.skipExisting]).
+  /// Re-importing the same backup under `skipExisting` therefore
+  /// creates nothing, and re-importing it under `overwrite`
+  /// replaces everything without duplicating a document. (The sink
+  /// itself is NOT policy-gated: it records every validated doc of
+  /// the last restore, applied or skipped.)
+  Future<ImportReport> importBackup(
     Map<String, dynamic> json, {
     ImportPolicy policy = ImportPolicy.skipExisting,
-  }) {
-    return DataImporter().importBackup(json, _restoreSink, policy: policy);
+  }) async {
+    final errors = DataImporter.validateBackup(json);
+    if (errors.isNotEmpty) {
+      return ImportReport(
+        created: 0,
+        overwritten: 0,
+        skipped: 0,
+        errors: errors,
+      );
+    }
+    var created = 0;
+    var overwritten = 0;
+    var skipped = 0;
+    final docErrors = <String>[];
+    final sections = json['sections'] as Map;
+    for (final entry in sections.entries) {
+      final collection = entry.key as String;
+      final docs = entry.value as List;
+      for (final rawDoc in docs) {
+        final doc = rawDoc as Map;
+        final id = doc['id'] as String;
+        final payload = Map<String, dynamic>.from(doc)..remove('id');
+        // Existence is measured BEFORE the sink put below (the
+        // sink-only sections measure it in the sink).
+        final exists = await _restoreDocExists(collection, id, payload);
+        // The sink records every validated doc of this restore.
+        _restoreSink.put(collection, id, payload);
+        if (exists && policy == ImportPolicy.skipExisting) {
+          skipped++;
+          continue;
+        }
+        try {
+          await _restoreDoc(collection, id, payload);
+          if (exists) {
+            overwritten++;
+          } else {
+            created++;
+          }
+        } catch (error) {
+          docErrors.add('Section "$collection" doc "$id": $error');
+        }
+      }
+    }
+    return ImportReport(
+      created: created,
+      overwritten: overwritten,
+      skipped: skipped,
+      errors: docErrors,
+    );
+  }
+
+  /// True when a doc with [id] already exists in the live store for
+  /// [collection] (the restore's created-vs-overwritten decision).
+  /// The `auditLogs` / `syncQueue` sections and unknown sections
+  /// have no live store — their existence is measured in the sink.
+  Future<bool> _restoreDocExists(
+    String collection,
+    String id,
+    Map<String, dynamic> payload,
+  ) async {
+    switch (collection) {
+      case 'medicines':
+        return await medicineRepo.getById(id) != null;
+      case 'suppliers':
+        return await supplierRepo.getById(id) != null;
+      case 'supplierLedger':
+        final entries = await supplierRepo.getLedgerEntries(
+          payload['supplierId'] as String? ?? '',
+        );
+        return entries.any((entry) => entry.id == id);
+      case 'riders':
+        return await riderRepo.getById(id) != null;
+      case 'orders':
+        return await orderRepo.getById(id) != null;
+      case 'sales':
+        return await saleRepo.getById(id) != null;
+      case 'inventory':
+        final branchId = payload['branchId'] as String?;
+        final items = await inventoryRepo.getInventory(branchId: branchId);
+        return items.any((item) => item.id == id);
+      case 'prescriptions':
+        return await prescriptionRepo.getById(id) != null;
+      case 'purchaseOrders':
+        return await purchaseOrderRepo.getById(id) != null;
+      case 'customers':
+        return await customerRepo.getById(id) != null;
+      case 'customerLedger':
+        final entries = await customerRepo.getLedgerEntries(
+          payload['customerId'] as String? ?? '',
+        );
+        return entries.any((entry) => entry.id == id);
+      case 'branches':
+        return await branchRepo.getById(id) != null;
+      default:
+        // Sink-only section (`auditLogs`, `syncQueue`, unknown):
+        // existence is measured in the sink, before this import's
+        // put (see [importBackup]).
+        return _restoreSink.contains(collection, id);
+    }
+  }
+
+  /// Upserts one restored doc into its live repository. Sink-only
+  /// sections (`auditLogs`, `syncQueue`, unknown) have no live
+  /// write — the sink put in [importBackup] is their whole restore.
+  Future<void> _restoreDoc(
+    String collection,
+    String id,
+    Map<String, dynamic> payload,
+  ) async {
+    switch (collection) {
+      case 'medicines':
+        await medicineRepo.upsertMedicine(Medicine.fromMap(id, payload));
+      case 'suppliers':
+        await supplierRepo.upsertSupplier(Supplier.fromMap(id, payload));
+      case 'supplierLedger':
+        await supplierRepo.upsertLedgerEntry(
+          SupplierLedgerEntry.fromMap(id, payload),
+        );
+      case 'riders':
+        await riderRepo.upsertRider(Rider.fromMap(id, payload));
+      case 'orders':
+        await orderRepo.upsertOrder(Order.fromMap(id, payload));
+      case 'sales':
+        await saleRepo.upsertSale(Sale.fromMap(id, payload));
+      case 'inventory':
+        await inventoryRepo.upsertInventoryItem(
+          InventoryItem.fromMap(id, payload),
+        );
+      case 'prescriptions':
+        await prescriptionRepo.upsertPrescription(
+          Prescription.fromMap(id, payload),
+        );
+      case 'purchaseOrders':
+        await purchaseOrderRepo.upsertPurchaseOrder(
+          PurchaseOrder.fromMap(id, payload),
+        );
+      case 'customers':
+        await customerRepo.upsertCustomer(Customer.fromMap(id, payload));
+      case 'customerLedger':
+        await customerRepo.upsertLedgerEntry(LedgerEntry.fromMap(id, payload));
+      case 'branches':
+        await branchRepo.saveBranch(Branch.fromMap(id, payload));
+      default:
+        // Sink-only section — nothing more to write.
+        break;
+    }
   }
 
   DataExporter get _exporter => DataExporter(
@@ -2022,6 +2866,7 @@ class ProductionDataLayer {
     prescriptions: prescriptionRepo,
     purchaseOrders: purchaseOrderRepo,
     riders: riderRepo,
+    branches: branchRepo,
     audit: audit,
     syncQueue: syncQueue,
     organizationId: organizationId,
@@ -2200,14 +3045,9 @@ class ProductionDataLayer {
       movement.toMap(),
     );
     batch.update(
-      FirestoreSchema.inventoryDocPath(
-        movement.branchId,
-        movement.medicineId,
-      ),
+      FirestoreSchema.inventoryDocPath(movement.branchId, movement.medicineId),
       {
-        'quantityOnHand': engine
-            .counterFor(movement.medicineId)
-            .quantityOnHand,
+        'quantityOnHand': engine.counterFor(movement.medicineId).quantityOnHand,
         'quantityReserved': engine
             .counterFor(movement.medicineId)
             .quantityReserved,
@@ -2292,10 +3132,7 @@ class ProductionDataLayer {
   }) async {
     final batch = LocalWriteBatch();
     batch.set(
-      FirestoreSchema.stockTransferDocPath(
-        transfer.fromBranchId,
-        transfer.id,
-      ),
+      FirestoreSchema.stockTransferDocPath(transfer.fromBranchId, transfer.id),
       stockTransferToFirestore(transfer, orgId: organizationId),
     );
     for (final created in destinationBatches ?? const []) {
@@ -2384,12 +3221,17 @@ final productionDataLayerProvider = Provider<ProductionDataLayer>((ref) {
     purchaseOrderRepo: ref.read(purchaseOrderRepositoryProvider),
     riderRepo: ref.read(riderRepositoryProvider),
     stockTransferRepo: ref.read(stockTransferRepositoryProvider),
+    stockAdjustmentRequestRepo: ref.read(
+      stockAdjustmentRequestRepositoryProvider,
+    ),
     goodsReceiptRepo: ref.read(goodsReceiptRepositoryProvider),
     expenseRepo: ref.read(expenseRepositoryProvider),
-    financialTransactionRepo: ref.read(
-      financialTransactionRepositoryProvider,
-    ),
+    financialTransactionRepo: ref.read(financialTransactionRepositoryProvider),
     dailyClosingRepo: ref.read(dailyClosingRepositoryProvider),
+    closingCorrectionRepo: ref.read(closingCorrectionRepositoryProvider),
+    cashReconciliationRepo: ref.read(cashReconciliationRepositoryProvider),
+    supplierPaymentRepo: ref.read(supplierPaymentRepositoryProvider),
+    branchRepo: ref.read(branchRepositoryProvider),
     audit: audit,
     syncQueue: syncQueue,
     engine: engine,
