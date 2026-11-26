@@ -144,6 +144,18 @@ class OrderItem {
       (unitPrice * 100).round() * quantity;
 }
 
+/// The human-readable sequential order number (`ORD-DHA-1001`, …),
+/// assigned by the repository counter at creation (Firestore) or by
+/// the mock sequence. `''` means "not assigned" — orders seeded
+/// before the field existed carry `''` and read back through
+/// [effectiveOrderNumber], which derives the same `ORD-…` shape from
+/// the id, so a legacy order never shows an empty number (D165).
+String defaultOrderNumberForId(String id) {
+  if (id.isEmpty) return '';
+  final stem = id.startsWith('ord-') ? id.substring(4) : id;
+  return 'ORD-${stem.toUpperCase()}';
+}
+
 /// A customer order.
 ///
 /// Firestore collection: `orders`.
@@ -159,6 +171,19 @@ class Order {
   final String? orderNotes;
   final String? prescriptionId;
   final double totalAmount;
+
+  /// Human-readable sequential number (`ORD-DHA-1001`). `''` = not
+  /// assigned yet (legacy / seeded orders) — see
+  /// [effectiveOrderNumber]. Assigned by the repository at creation;
+  /// an update or restore never re-numbers an existing order (D165).
+  final String orderNumber;
+
+  /// Client idempotency key for this order (D53: the Firestore doc id
+  /// is the key, so a retried write can never duplicate the order).
+  /// `''` = not assigned yet — see [effectiveIdempotencyKey], which
+  /// falls back to the order id, so the key is stable per order: the
+  /// same order re-serialized keeps the same key (D165).
+  final String idempotencyKey;
 
   /// Discount applied to the order, in int minor units (paisa).
   /// Day 0 orders have no discount (0). Day 4 create/edit sets it.
@@ -187,12 +212,27 @@ class Order {
     this.orderNotes,
     this.prescriptionId,
     required this.totalAmount,
+    this.orderNumber = '',
+    this.idempotencyKey = '',
     this.discountMinor = 0,
     this.source = OrderSource.phone,
     this.fulfillment = FulfillmentType.delivery,
     this.createdAt,
     this.updatedAt,
   });
+
+  /// The number to show / write: the assigned [orderNumber] when
+  /// present, otherwise the stable derivation from [id]
+  /// (`ord-dha-1001` → `ORD-DHA-1001`). Never empty for a
+  /// non-empty id.
+  String get effectiveOrderNumber =>
+      orderNumber.isNotEmpty ? orderNumber : defaultOrderNumberForId(id);
+
+  /// The key to dedupe on: the assigned [idempotencyKey] when
+  /// present, otherwise the order id itself (the D53 doc-id rule).
+  /// Stable per order — re-serializing never mints a new key.
+  String get effectiveIdempotencyKey =>
+      idempotencyKey.isNotEmpty ? idempotencyKey : id;
 
   factory Order.fromMap(String id, Map<String, dynamic> map) {
     final rawItems = map['items'] as List<dynamic>? ?? [];
@@ -211,6 +251,8 @@ class Order {
       orderNotes: map['orderNotes'] as String?,
       prescriptionId: map['prescriptionId'] as String?,
       totalAmount: (map['totalAmount'] as num?)?.toDouble() ?? 0,
+      orderNumber: map['orderNumber'] as String? ?? '',
+      idempotencyKey: map['idempotencyKey'] as String? ?? '',
       discountMinor: (map['discountMinor'] as num?)?.toInt() ?? 0,
       source: orderSourceFromString(map['source'] as String?),
       fulfillment: fulfillmentTypeFromString(
@@ -233,6 +275,12 @@ class Order {
       'orderNotes': orderNotes,
       'prescriptionId': prescriptionId,
       'totalAmount': totalAmount,
+      // Effective values (D165, same posture as Branch.toMap
+      // writing effectiveCode): a backup export never carries an
+      // empty number or key, so a restore keeps the same stable
+      // values the order already showed.
+      'orderNumber': effectiveOrderNumber,
+      'idempotencyKey': effectiveIdempotencyKey,
       'discountMinor': discountMinor,
       'source': source.name,
       'fulfillment': fulfillment.name,
@@ -270,6 +318,8 @@ class Order {
     String? prescriptionId,
     bool clearPrescriptionId = false,
     double? totalAmount,
+    String? orderNumber,
+    String? idempotencyKey,
     int? discountMinor,
     OrderSource? source,
     FulfillmentType? fulfillment,
@@ -290,6 +340,8 @@ class Order {
           ? null
           : (prescriptionId ?? this.prescriptionId),
       totalAmount: totalAmount ?? this.totalAmount,
+      orderNumber: orderNumber ?? this.orderNumber,
+      idempotencyKey: idempotencyKey ?? this.idempotencyKey,
       discountMinor: discountMinor ?? this.discountMinor,
       source: source ?? this.source,
       fulfillment: fulfillment ?? this.fulfillment,
