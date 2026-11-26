@@ -228,9 +228,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     const Expanded(child: Divider()),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
-                      child: Text(
-                        'Demo accounts — one tap to sign in',
-                        style: theme.textTheme.bodySmall,
+                      // Week 8 Day 2 (D177): capped + ellipsis — the
+                      // label is wider than the 390px line in the
+                      // test font (104px overflow); on a real phone
+                      // it fits and renders unchanged.
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 220),
+                        child: Text(
+                          'Demo accounts — one tap to sign in',
+                          style: theme.textTheme.bodySmall,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     ),
                     const Expanded(child: Divider()),
