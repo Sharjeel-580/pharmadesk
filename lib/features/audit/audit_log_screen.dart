@@ -39,7 +39,13 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
     final user = ref.watch(authProvider);
     final entriesAsync = ref.watch(_auditEntriesProvider);
     final theme = Theme.of(context);
-    return Padding(
+    // Week 8 Day 2 (D177): the whole screen scrolls (the staff
+    // list pattern) — the header + note + four filter dropdowns
+    // are taller than the 390px viewport leaves for the list, so
+    // the old fixed Column overflowed 116px on the bottom and the
+    // list collapsed to nothing. PagedList is a plain Column, so
+    // it scrolls with the page.
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -87,11 +93,10 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
                 actionPrefix: _actionFilter,
                 from: from,
               );
-              return Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _Filters(
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _Filters(
                       entries: visible,
                       branchFilter: _branchFilter,
                       actorFilter: _actorFilter,
@@ -113,62 +118,57 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
                       style: theme.textTheme.bodySmall,
                     ),
                     const SizedBox(height: 8),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: PagedList<AuditLogEntry>(
-                          items: filtered,
-                          emptyMessage:
-                              'No audit entries match these filters.',
-                          itemBuilder: (context, entry) => Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: PharmaCard(
-                              child: InkWell(
-                                onTap: () => _showDetail(context, entry),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            entry.action,
-                                            style: theme.textTheme.titleSmall
-                                                ?.copyWith(
-                                                  fontWeight: FontWeight.w700,
-                                                ),
-                                          ),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            entry.summary.isEmpty
-                                                ? '${entry.entityType} '
-                                                    '${entry.entityId}'
-                                                : entry.summary,
-                                            style:
-                                                theme.textTheme.bodyMedium,
-                                          ),
-                                          Text(
-                                            '${entry.actorName} • '
-                                            '${_branchName(entry.branchId)} • '
-                                            '${_timeLabel(entry.createdAt)}',
-                                            style:
-                                                theme.textTheme.bodySmall,
-                                          ),
-                                        ],
+                    PagedList<AuditLogEntry>(
+                      items: filtered,
+                      emptyMessage:
+                          'No audit entries match these filters.',
+                      itemBuilder: (context, entry) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: PharmaCard(
+                          child: InkWell(
+                            onTap: () => _showDetail(context, entry),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        entry.action,
+                                        style: theme.textTheme.titleSmall
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                            ),
                                       ),
-                                    ),
-                                    const Icon(Icons.chevron_right),
-                                  ],
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        entry.summary.isEmpty
+                                            ? '${entry.entityType} '
+                                                '${entry.entityId}'
+                                            : entry.summary,
+                                        style:
+                                            theme.textTheme.bodyMedium,
+                                      ),
+                                      Text(
+                                        '${entry.actorName} • '
+                                        '${_branchName(entry.branchId)} • '
+                                        '${_timeLabel(entry.createdAt)}',
+                                        style:
+                                            theme.textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ),
+                                const Icon(Icons.chevron_right),
+                              ],
                             ),
                           ),
                         ),
                       ),
                     ),
                   ],
-                ),
-              );
+                );
             },
           ),
         ],
@@ -306,54 +306,75 @@ class _Filters extends StatelessWidget {
       runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        DropdownButton<String?>(
-          key: const ValueKey('audit-branch-filter'),
-          value: branchFilter,
-          hint: const Text('All branches'),
-          items: [
-            const DropdownMenuItem<String?>(value: null, child: Text('All branches')),
-            for (final branch in demoBranches)
-              DropdownMenuItem<String?>(
-                value: branch.id,
-                child: Text(branch.name),
-              ),
-          ],
-          onChanged: onBranchChanged,
+        // Week 8 Day 2 (D177): every filter dropdown is capped at
+        // 280px with isExpanded (the D153/D162 trap) — branch,
+        // actor and action names are wider than the 390px line in
+        // the test font. The cap keeps the desktop filters side by
+        // side.
+        SizedBox(
+          width: 280,
+          child: DropdownButton<String?>(
+            key: const ValueKey('audit-branch-filter'),
+            isExpanded: true,
+            value: branchFilter,
+            hint: const Text('All branches'),
+            items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('All branches')),
+              for (final branch in demoBranches)
+                DropdownMenuItem<String?>(
+                  value: branch.id,
+                  child: Text(branch.name),
+                ),
+            ],
+            onChanged: onBranchChanged,
+          ),
         ),
-        DropdownButton<String?>(
-          key: const ValueKey('audit-actor-filter'),
-          value: actorFilter,
-          hint: const Text('All actors'),
-          items: [
-            const DropdownMenuItem<String?>(value: null, child: Text('All actors')),
-            for (final actor in auditActors(entries))
-              DropdownMenuItem<String?>(value: actor, child: Text(actor)),
-          ],
-          onChanged: onActorChanged,
+        SizedBox(
+          width: 280,
+          child: DropdownButton<String?>(
+            key: const ValueKey('audit-actor-filter'),
+            isExpanded: true,
+            value: actorFilter,
+            hint: const Text('All actors'),
+            items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('All actors')),
+              for (final actor in auditActors(entries))
+                DropdownMenuItem<String?>(value: actor, child: Text(actor)),
+            ],
+            onChanged: onActorChanged,
+          ),
         ),
-        DropdownButton<String?>(
-          key: const ValueKey('audit-action-filter'),
-          value: actionFilter,
-          hint: const Text('All actions'),
-          items: [
-            const DropdownMenuItem<String?>(value: null, child: Text('All actions')),
-            for (final family in auditActionFamilies(entries))
-              DropdownMenuItem<String?>(value: family, child: Text(family)),
-          ],
-          onChanged: onActionChanged,
+        SizedBox(
+          width: 280,
+          child: DropdownButton<String?>(
+            key: const ValueKey('audit-action-filter'),
+            isExpanded: true,
+            value: actionFilter,
+            hint: const Text('All actions'),
+            items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('All actions')),
+              for (final family in auditActionFamilies(entries))
+                DropdownMenuItem<String?>(value: family, child: Text(family)),
+            ],
+            onChanged: onActionChanged,
+          ),
         ),
-        DropdownButton<int>(
-          key: const ValueKey('audit-range-filter'),
-          value: rangeDays,
-          items: const [
-            DropdownMenuItem(value: 0, child: Text('All time')),
-            DropdownMenuItem(value: 1, child: Text('Today')),
-            DropdownMenuItem(value: 7, child: Text('Last 7 days')),
-            DropdownMenuItem(value: 30, child: Text('Last 30 days')),
-          ],
-          onChanged: (value) {
-            if (value != null) onRangeChanged(value);
-          },
+        SizedBox(
+          width: 280,
+          child: DropdownButton<int>(
+            key: const ValueKey('audit-range-filter'),
+            isExpanded: true,
+            value: rangeDays,
+            items: const [
+              DropdownMenuItem(value: 0, child: Text('All time')),
+              DropdownMenuItem(value: 1, child: Text('Today')),
+              DropdownMenuItem(value: 7, child: Text('Last 7 days')),
+              DropdownMenuItem(value: 30, child: Text('Last 30 days')),
+            ],
+            onChanged: (value) {
+              if (value != null) onRangeChanged(value);
+            },
+          ),
         ),
       ],
     );
