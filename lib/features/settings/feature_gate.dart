@@ -86,6 +86,9 @@ String _titleForRoute(String route) {
   if (route == '/branches' || route.startsWith('/branches/')) {
     return 'Branch Management';
   }
+  if (route == '/finance/franchise') {
+    return 'Franchise Royalties';
+  }
   if (route == '/audit-log' || route.startsWith('/audit-log/')) {
     return 'Audit Log';
   }
@@ -104,6 +107,9 @@ String _subtitleForRoute(String route) {
   if (route == '/branches' || route.startsWith('/branches/')) {
     return 'Own branches and franchises — list, detail, franchise '
         'settings, commission / royalty.';
+  }
+  if (route == '/finance/franchise') {
+    return 'Franchise commission and royalty by branch — head office only.';
   }
   if (route == '/audit-log' || route.startsWith('/audit-log/')) {
     return 'Filterable log of all important actions.';
