@@ -28,13 +28,34 @@ import 'backup_provider.dart';
 ///   export.
 /// - **Restore (admin only):** paste a backup JSON document, it is
 ///   validated first (`DataImporter.validateBackup`), then an
-///   explicit confirmation step states that it replaces the current
-///   live data, and only then is it imported (overwrite policy)
-///   into the live repositories by upsert-by-id (Week 5 Day 2,
-///   D150 — the D133 follow-up is closed), with the import report
-///   shown. Audit history and the pending sync queue are local
-///   state, not repo data: they land in the layer's restore sink
-///   only, never rewriting live history.
+///   explicit confirmation step states what it will and will not do,
+///   and only then is it imported (overwrite policy) into the live
+///   repositories by upsert-by-id (Week 5 Day 2, D150 — the D133
+///   follow-up is closed), with the import report shown. Audit
+///   history and the pending sync queue are local state, not repo
+///   data: they land in the layer's restore sink only, never
+///   rewriting live history.
+///
+/// **Restore semantics (Week 6 Day 5, D169 — decided, not extended):**
+/// a restore only adds or replaces the documents in the backup; it
+/// never deletes anything, so records created after the export stay
+/// exactly as they are — and a record that was in the backup comes
+/// back even if it was deleted after the export. Counters are NOT
+/// restored (report/stock counters are rollup figures recomputed
+/// from the restored records). The sale payment legs (the per-method
+/// split of a split payment) are NOT restored — a sale comes back
+/// with its total, payment method and cash received. Extending the
+/// restore to cover counters + payment legs was rejected: the legs
+/// live only in a Firestore subcollection, and rewriting them on
+/// restore is a money-path change that cannot be tested end-to-end
+/// without a Firebase project (a Dazy-only step), so a stated limit
+/// is safer than an unverified rewrite. The screen states all of
+/// this in plain language (the "What restore does NOT do" card),
+/// and the confirmation dialog says the same.
+///
+/// There is no scheduled backup to report yet: the Cloud Function
+/// export (SRS §2.6) needs the Firebase project, so the screen says
+/// "not configured" instead of inventing a schedule.
 ///
 /// There is no scheduled backup to report yet: the Cloud Function
 /// export (SRS §2.6) needs the Firebase project, so the screen says
@@ -129,10 +150,14 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Restore this backup?'),
         content: Text(
-          'This will replace the current live data with the '
-          'contents of this backup ($totalDocs documents, overwrite '
-          'policy — a document with the same id is replaced, never '
-          'duplicated). The backup was exported at '
+          'This will add or replace the documents in this backup '
+          '($totalDocs documents, overwrite policy — a document with '
+          'the same id is replaced, never duplicated). Records that '
+          'are not in the backup are left untouched, and a record '
+          'that was in the backup comes back even if it was deleted '
+          'after the export. Counters and split-payment legs are not '
+          'restored — see "What restore does NOT do" on the backup '
+          'screen. The backup was exported at '
           '${json['exportedAt'] ?? 'an unknown time'} for organization '
           '${json['organizationId'] ?? 'unknown'}. '
           'Audit history and the pending sync queue are restored '
@@ -273,6 +298,45 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                     'are NOT in the JSON backup — they live in Cloud '
                     'Storage (SRS §3.4); only their metadata is '
                     'exported.',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            PharmaCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'What restore does NOT do',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Restore never deletes anything. Records created '
+                    'after the backup was exported stay exactly as '
+                    'they are — a restore only adds or replaces the '
+                    'documents in the backup, it never rolls the data '
+                    'back to the export. A record that was in the '
+                    'backup comes back even if it was deleted after '
+                    'the export.',
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Counters are not restored. Report counters and '
+                    'stock counters are rollup figures that are '
+                    'recomputed from the restored records, so they '
+                    'follow the restored data instead of being written '
+                    'back from the backup.',
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Split-payment legs are not restored. A sale '
+                    'comes back with its total, payment method and '
+                    'cash received, but the per-method split of a '
+                    'split payment is not restored.',
                   ),
                 ],
               ),
