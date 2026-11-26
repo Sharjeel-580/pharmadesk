@@ -1,6 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/attendance.dart';
+import '../../models/branch_inventory_location.dart';
+import '../../models/branch.dart';
+import '../../models/cash_reconciliation.dart';
+import '../../models/closing_correction.dart';
 import '../../models/customer.dart';
 import '../../models/customer_ledger.dart';
 import '../../models/daily_closing.dart';
@@ -16,6 +20,7 @@ import '../../models/rider.dart';
 import '../../models/sale.dart';
 import '../../models/sale_return.dart';
 import '../../models/salary_record.dart';
+import '../../models/stock_adjustment_request.dart';
 import '../../models/stock_transfer.dart';
 import '../../models/shift.dart';
 import '../../models/staff.dart';
@@ -24,6 +29,7 @@ import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 import '../data/repository_factory.dart';
 import '../data/report_counters.dart';
+import 'branch_context.dart';
 import 'demo_seed_data.dart';
 
 /// Repository interfaces — the contract between presentation/state and
@@ -47,6 +53,15 @@ abstract class MedicineRepository {
   /// edit). The id must already exist; throws [ArgumentError] when
   /// it does not. Returns the saved medicine.
   Future<Medicine> updateMedicine(Medicine medicine);
+
+  /// Creates or replaces a medicine by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place, a
+  /// new id is inserted as given (an empty id gets a minted one).
+  /// Unlike [updateMedicine] this never throws for a missing id,
+  /// and unlike a create it never re-checks uniqueness — a restore
+  /// replays data that was valid when exported. Returns the saved
+  /// medicine.
+  Future<Medicine> upsertMedicine(Medicine medicine);
 }
 
 abstract class OrderRepository {
@@ -61,6 +76,14 @@ abstract class OrderRepository {
   /// Replaces a whole order (Day 4 edit: items, quantities, discount,
   /// rider, notes). The id must already exist.
   Future<void> updateOrder(Order order);
+
+  /// Creates or replaces an order by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place, a
+  /// new id is inserted as given (an empty id gets a minted one).
+  /// The order number is repo-assigned on insert (same sequence as
+  /// [createOrder]); an existing order keeps its number. Returns
+  /// the saved order.
+  Future<Order> upsertOrder(Order order);
 }
 
 abstract class InventoryRepository {
@@ -114,6 +137,38 @@ abstract class InventoryRepository {
     required BatchStatus status,
     String? reason,
   });
+
+  /// Creates or replaces one batch row by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place
+  /// (quantity, status and dates as given), a new id is inserted as
+  /// given (an empty id gets a minted one). The per-(branch,
+  /// medicine) on-hand counter is NOT recomputed here — counters
+  /// are rollup state and are not part of a backup. Returns the
+  /// saved row.
+  Future<InventoryItem> upsertInventoryItem(InventoryItem item);
+
+  /// Per-branch rack / shelf override for one medicine (Week 5 Day 3,
+  /// D152 — SRS §3.3 `branches/{branchId}/inventory` doc). Returns
+  /// the override, or `null` when the branch keeps the medicine at
+  /// the master default shelf (no record, or a record with both
+  /// fields empty).
+  Future<BranchInventoryLocation?> getBranchLocation({
+    required String branchId,
+    required String medicineId,
+  });
+
+  /// All rack / shelf overrides at one branch (or every branch when
+  /// [branchId] is omitted). Records with both fields empty are
+  /// never returned — they are not overrides.
+  Future<List<BranchInventoryLocation>> getBranchLocations({String? branchId});
+
+  /// Saves a per-branch rack / shelf override (D152). Saving with
+  /// both rack and shelf empty CLEARS the override — the branch
+  /// falls back to the master location — and returns the cleared
+  /// (empty) record. Returns the saved override.
+  Future<BranchInventoryLocation> saveBranchLocation(
+    BranchInventoryLocation location,
+  );
 }
 
 abstract class CustomerRepository {
@@ -138,6 +193,25 @@ abstract class CustomerRepository {
   /// current outstanding, so the statement never drifts. The ledger
   /// is append-only — entries are never edited or deleted.
   Future<LedgerEntry> addLedgerEntry(LedgerEntry entry);
+
+  /// Creates or replaces a customer by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place, a
+  /// new id is inserted as given (an empty id gets a minted one).
+  /// No phone-uniqueness check — a restore replays data that was
+  /// valid when exported. [branchId] is the branch the customer
+  /// belongs to; the mock ignores it (customers are org-wide in
+  /// the demo) and the Firestore implementation files the doc
+  /// under it (falling back to the first branch when omitted).
+  /// Returns the saved customer.
+  Future<Customer> upsertCustomer(Customer customer, {String? branchId});
+
+  /// Creates or replaces one khata entry by id (Week 5 Day 2, D150
+  /// — restore upsert-by-id): an existing id is replaced in place,
+  /// a new id is inserted as given. Unlike [addLedgerEntry] the
+  /// [LedgerEntry.balanceAfterMinor] is kept exactly as given — a
+  /// restore replays history, it does not recompute it. Returns the
+  /// saved entry.
+  Future<LedgerEntry> upsertLedgerEntry(LedgerEntry entry, {String? branchId});
 }
 
 /// Completed counter (POS) sales (Day 6).
@@ -160,6 +234,14 @@ abstract class SaleRepository {
   /// must already exist; the invoice number and idempotency key are
   /// never changed here.
   Future<void> updateSale(Sale sale);
+
+  /// Creates or replaces a sale by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place
+  /// (status, totals and items as given), a new id is inserted as
+  /// given (an empty id gets a minted one). The invoice number and
+  /// idempotency key are kept as given — a restore replays history,
+  /// it does not re-number it. Returns the saved sale.
+  Future<Sale> upsertSale(Sale sale);
 }
 
 /// Returns / refunds against completed POS sales (Week 2 Day 4,
@@ -200,6 +282,21 @@ abstract class SupplierRepository {
   /// supplier's current outstanding, so the statement never drifts.
   /// The ledger is append-only — entries are never edited or deleted.
   Future<SupplierLedgerEntry> addLedgerEntry(SupplierLedgerEntry entry);
+
+  /// Creates or replaces a supplier by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place, a
+  /// new id is inserted as given (an empty id gets a minted one).
+  /// No phone-uniqueness check — a restore replays data that was
+  /// valid when exported. Returns the saved supplier.
+  Future<Supplier> upsertSupplier(Supplier supplier);
+
+  /// Creates or replaces one payables entry by id (Week 5 Day 2,
+  /// D150 — restore upsert-by-id): an existing id is replaced in
+  /// place, a new id is inserted as given. Unlike [addLedgerEntry]
+  /// the [SupplierLedgerEntry.balanceAfterMinor] is kept exactly as
+  /// given — a restore replays history, it does not recompute it.
+  /// Returns the saved entry.
+  Future<SupplierLedgerEntry> upsertLedgerEntry(SupplierLedgerEntry entry);
 }
 
 abstract class PrescriptionRepository {
@@ -240,6 +337,18 @@ abstract class PrescriptionRepository {
     Prescription prescription, {
     String? branchId,
   });
+
+  /// Creates or replaces a prescription by id (Week 5 Day 2, D150
+  /// — restore upsert-by-id): an existing id is replaced in place
+  /// (status, review and dates as given — unlike [createPrescription]
+  /// the status is NOT reset to Pending), a new id is inserted as
+  /// given (an empty id gets a minted one). [branchId] falls back
+  /// to the id prefix / the record's own branch, as in
+  /// [createPrescription]. Returns the saved record.
+  Future<Prescription> upsertPrescription(
+    Prescription prescription, {
+    String? branchId,
+  });
 }
 
 /// Purchase orders (Day 7, SRS FR-PUR-01/02).
@@ -263,6 +372,15 @@ abstract class PurchaseOrderRepository {
   /// Replaces a whole PO (status changes, received quantities). The
   /// id must already exist.
   Future<void> updatePurchaseOrder(PurchaseOrder order);
+
+  /// Creates or replaces a PO by id (Week 5 Day 2, D150 — restore
+  /// upsert-by-id): an existing id is replaced in place (status,
+  /// received quantities and items as given — unlike
+  /// [createPurchaseOrder] the status is NOT reset to Draft), a new
+  /// id is inserted as given (an empty id gets a minted one). The
+  /// PO number is kept when given, else repo-assigned on insert
+  /// (same sequence as [createPurchaseOrder]). Returns the saved PO.
+  Future<PurchaseOrder> upsertPurchaseOrder(PurchaseOrder order);
 }
 
 abstract class RiderRepository {
@@ -275,6 +393,13 @@ abstract class RiderRepository {
   /// riders. The id must already exist; throws [ArgumentError] when
   /// it does not.
   Future<void> updateRider(Rider rider);
+
+  /// Creates or replaces a rider by id (Week 5 Day 2, D150 —
+  /// restore upsert-by-id): an existing id is replaced in place, a
+  /// new id is inserted as given (an empty id gets a minted one).
+  /// [branchId] falls back to the record's own branch. Returns the
+  /// saved rider.
+  Future<Rider> upsertRider(Rider rider, {String? branchId});
 }
 
 /// Stock transfers between branches (Week 4 Day 2, D118 — SRS D-16).
@@ -309,6 +434,76 @@ abstract class StockTransferRepository {
   /// Replaces a whole transfer (status changes, allocations, actor
   /// stamps). The id must already exist.
   Future<void> updateTransfer(StockTransfer transfer);
+}
+
+/// Adjustment approval queue (Week 5 Day 1, D146 — SRS D-14 /
+/// FR-INV-08, §5.2.4).
+///
+/// One document per request under
+/// `branches/{branchId}/stockAdjustments/{id}` (doc id = request id).
+/// The mock starts empty: requests only arise from filing in the
+/// session, so there is nothing to seed. The Firestore implementation
+/// stores them under the same path — it lands with the Firebase-wiring
+/// chunk, the same Day 7 → Day 3 pattern as suppliers and purchase
+/// orders (D89). The layer owns the write path; screens depend only
+/// on this interface via the layer.
+abstract class StockAdjustmentRequestRepository {
+  /// All requests, optionally scoped to one branch.
+  Future<List<StockAdjustmentRequest>> getRequests({String? branchId});
+
+  Future<StockAdjustmentRequest?> getById(String id);
+
+  /// Creates or replaces one request, keyed by its id (D65 pattern):
+  /// a re-save overwrites the same document, never a duplicate — so
+  /// filing and deciding share one write path. An empty id gets an
+  /// assigned one (`adj-N` in the mock, a Firestore auto-id in the
+  /// Firestore implementation).
+  Future<StockAdjustmentRequest> saveRequest(StockAdjustmentRequest request);
+}
+
+/// Branch directory (Week 5 Day 2, D148 — SRS D-28 / FR-HO-01/02/08,
+/// §3.1 `branches`).
+///
+/// Closes the D131 follow-up: the directory is no longer an
+/// in-memory notifier seeded from the demo branches — it reads and
+/// writes through this interface (mock by default, Firestore when
+/// the bundle switches), the same Day 3 → Day 5 pattern as the
+/// staff / transfer / adjustment-queue repos (D73/D101/D118/D146).
+/// The mock is seeded from [demoBranches]; the Firestore
+/// implementation stores one doc per branch under `branches/{id}`
+/// (the root collection — branches are org-wide, not branch-scoped).
+///
+/// The repository owns the branch ROW, not the directory rules: the
+/// notifier still owns validation (`validateBranchForm`), the
+/// last-active-branch protection and the `branch-<slug>` id minting
+/// (the form dialog builds the id; an empty id here gets a minted
+/// one). Deactivation is still the `active` flag — enforcement on
+/// transactions lives in the production data layer (D149, FR-HO-08),
+/// which reads the branch row through this interface; the repo
+/// itself enforces nothing about transacting.
+abstract class BranchRepository {
+  /// All branches, in display order (mock: seed order; Firestore:
+  /// `name` order).
+  Future<List<Branch>> getBranches();
+
+  Future<Branch?> getById(String id);
+
+  /// Saves a new branch. The caller supplies the id (the directory
+  /// mints `branch-<slug>`); an empty id gets a minted one
+  /// (`branch-<slug>` in the mock, a Firestore auto-id in the
+  /// Firestore implementation). Throws [ArgumentError] when another
+  /// branch already has the id.
+  Future<Branch> createBranch(Branch branch);
+
+  /// Saves an edited branch. The id must already exist; throws
+  /// [ArgumentError] when it does not. The id itself never changes.
+  Future<Branch> updateBranch(Branch branch);
+
+  /// Creates or replaces a branch by id (the layer's directory
+  /// write path, D146 pattern): an existing id is replaced in
+  /// place, a new id is inserted as given (an empty id gets a
+  /// minted one). Returns the saved branch.
+  Future<Branch> saveBranch(Branch branch);
 }
 
 /// Staff directory (Week 2 Day 5, SRS §3.7 `employees` / §5.1
@@ -405,6 +600,50 @@ abstract class DailyClosingRepository {
   Future<DailyClosing> createClosing(DailyClosing closing);
 }
 
+/// Closing corrections (Week 5 Day 4, D156 — SRS D-24 / FR-FIN-06).
+///
+/// One document per reversing entry, written by the production data
+/// layer — never directly by a screen. The mock starts empty:
+/// corrections only arise from correcting a closing in the session.
+/// Append-only: a correction is never edited or deleted (a wrong
+/// correction is fixed by a newer correction, which re-states the
+/// day in full).
+abstract class ClosingCorrectionRepository {
+  Future<List<ClosingCorrection>> getCorrections({String? branchId});
+
+  /// Corrections for one original closing, oldest first.
+  Future<List<ClosingCorrection>> getCorrectionsForClosing(
+    String originalClosingId,
+  );
+
+  /// Saves a new correction. The repository assigns the id and
+  /// returns the saved record.
+  Future<ClosingCorrection> createCorrection(ClosingCorrection correction);
+}
+
+/// Cash reconciliations (Week 5 Day 4, D157 — SRS D-24 / FR-FIN-02).
+///
+/// One document per drawer count, written by the production data
+/// layer — never directly by a screen. The mock starts empty:
+/// reconciliations only arise from counting a drawer in the
+/// session. Append-only: a recount is a new record, never an edit
+/// of the previous count.
+abstract class CashReconciliationRepository {
+  Future<List<CashReconciliation>> getReconciliations({String? branchId});
+
+  /// Reconciliations for one branch-day, oldest first.
+  Future<List<CashReconciliation>> getReconciliationsForDay({
+    required String branchId,
+    required DateTime date,
+  });
+
+  /// Saves a new reconciliation. The repository assigns the id and
+  /// returns the saved record.
+  Future<CashReconciliation> createReconciliation(
+    CashReconciliation reconciliation,
+  );
+}
+
 /// Supplier payments (Week 2 Day 5, SRS §3.6 `supplierPayments`).
 abstract class SupplierPaymentRepository {
   Future<List<SupplierPayment>> getPayments({
@@ -414,8 +653,10 @@ abstract class SupplierPaymentRepository {
 
   /// Saves a new payment with its payable allocations. The
   /// repository assigns the id and returns the saved record. The
-  /// caller also writes the matching supplier-ledger entry and
-  /// `financialTransactions` entry (see the finance provider).
+  /// matching supplier-ledger entry and `financialTransactions`
+  /// entry are written by the production data layer in the same
+  /// call (Week 5 Day 1, D147 — the layer is the single write path
+  /// for supplier payments, like `recordExpense` for expenses).
   Future<SupplierPayment> createPayment(SupplierPayment payment);
 }
 
@@ -426,10 +667,7 @@ abstract class SupplierPaymentRepository {
 /// receipts only arise from receiving in the session, so there is
 /// nothing to seed.
 abstract class GoodsReceiptRepository {
-  Future<List<GoodsReceipt>> getGoodsReceipts({
-    String? branchId,
-    String? poId,
-  });
+  Future<List<GoodsReceipt>> getGoodsReceipts({String? branchId, String? poId});
   Future<GoodsReceipt?> getById(String id);
 
   /// Saves a receipt. The repository assigns the id and the
@@ -495,6 +733,21 @@ class MockMedicineRepository implements MedicineRepository {
     demoMedicines[index] = saved;
     return saved;
   }
+
+  @override
+  Future<Medicine> upsertMedicine(Medicine medicine) async {
+    final id = medicine.id.isEmpty
+        ? 'med-${demoMedicines.length + 1}'
+        : medicine.id;
+    final saved = medicine.copyWith(id: id, updatedAt: DateTime.now());
+    final index = demoMedicines.indexWhere((m) => m.id == id);
+    if (index == -1) {
+      demoMedicines.add(saved);
+    } else {
+      demoMedicines[index] = saved;
+    }
+    return saved;
+  }
 }
 
 class MockOrderRepository implements OrderRepository {
@@ -547,6 +800,22 @@ class MockOrderRepository implements OrderRepository {
     final index = _orders.indexWhere((o) => o.id == order.id);
     if (index == -1) return;
     _orders[index] = order.copyWith(updatedAt: DateTime.now());
+  }
+
+  @override
+  Future<Order> upsertOrder(Order order) async {
+    final branchCode = order.branchId == 'branch-dha-main' ? 'dha' : 'glb';
+    final id = order.id.isEmpty
+        ? 'ord-$branchCode-${1000 + _orders.length + 1}'
+        : order.id;
+    final saved = order.copyWith(id: id, updatedAt: DateTime.now());
+    final index = _orders.indexWhere((o) => o.id == id);
+    if (index == -1) {
+      _orders.add(saved);
+    } else {
+      _orders[index] = saved;
+    }
+    return saved;
   }
 }
 
@@ -680,6 +949,66 @@ class MockInventoryRepository implements InventoryRepository {
     _items[index] = updated;
     return updated;
   }
+
+  @override
+  Future<InventoryItem> upsertInventoryItem(InventoryItem item) async {
+    final branchCode = item.branchId == 'branch-dha-main' ? 'DHA' : 'GLB';
+    final id = item.id.isEmpty
+        ? 'inv-$branchCode-${_items.length + 1}-rx'
+        : item.id;
+    final saved = item.copyWith(id: id, updatedAt: DateTime.now());
+    final index = _items.indexWhere((row) => row.id == id);
+    if (index == -1) {
+      _items.add(saved);
+    } else {
+      _items[index] = saved;
+    }
+    return saved;
+  }
+
+  /// Per-branch rack / shelf overrides (Week 5 Day 3, D152), keyed
+  /// `branchId|medicineId`. Empty overrides are never stored — a
+  /// save with both fields empty deletes the record, so the branch
+  /// falls back to the master location.
+  final Map<String, BranchInventoryLocation> _locations = {};
+
+  String _locationKey(String branchId, String medicineId) =>
+      '$branchId|$medicineId';
+
+  @override
+  Future<BranchInventoryLocation?> getBranchLocation({
+    required String branchId,
+    required String medicineId,
+  }) async => _locations[_locationKey(branchId, medicineId)];
+
+  @override
+  Future<List<BranchInventoryLocation>> getBranchLocations({
+    String? branchId,
+  }) async {
+    final values = _locations.values.where(
+      (location) => branchId == null || location.branchId == branchId,
+    );
+    return List.unmodifiable(values);
+  }
+
+  @override
+  Future<BranchInventoryLocation> saveBranchLocation(
+    BranchInventoryLocation location,
+  ) async {
+    final key = _locationKey(location.branchId, location.medicineId);
+    if (location.isEmpty) {
+      _locations.remove(key);
+      return location;
+    }
+    final saved = BranchInventoryLocation(
+      branchId: location.branchId,
+      medicineId: location.medicineId,
+      rack: location.rack?.trim(),
+      shelf: location.shelf?.trim(),
+    );
+    _locations[key] = saved;
+    return saved;
+  }
 }
 
 class MockCustomerRepository implements CustomerRepository {
@@ -742,6 +1071,47 @@ class MockCustomerRepository implements CustomerRepository {
     return created;
   }
 
+  @override
+  Future<Customer> upsertCustomer(Customer customer, {String? branchId}) async {
+    // [branchId] is ignored here (see the interface doc) — the
+    // mock keeps customers org-wide.
+    final id = customer.id.isEmpty
+        ? 'cust-${_customers.length + 1}'
+        : customer.id;
+    final index = _customers.indexWhere((c) => c.id == id);
+    // A restore replays history: the given `createdAt` wins, then
+    // the stored one on a replace, then "now" on a fresh insert.
+    final saved = customer.copyWith(
+      id: id,
+      createdAt:
+          customer.createdAt ??
+          (index == -1 ? null : _customers[index].createdAt) ??
+          DateTime.now(),
+    );
+    if (index == -1) {
+      _customers.add(saved);
+    } else {
+      _customers[index] = saved;
+    }
+    return saved;
+  }
+
+  @override
+  Future<LedgerEntry> upsertLedgerEntry(
+    LedgerEntry entry, {
+    String? branchId,
+  }) async {
+    final id = entry.id.isEmpty ? 'led-${_ledger.length + 1}' : entry.id;
+    final saved = entry.copyWith(id: id);
+    final index = _ledger.indexWhere((e) => e.id == id);
+    if (index == -1) {
+      _ledger.add(saved);
+    } else {
+      _ledger[index] = saved;
+    }
+    return saved;
+  }
+
   static String _phoneDigits(String phone) =>
       phone.replaceAll(RegExp(r'[^0-9]'), '');
 }
@@ -790,6 +1160,28 @@ class MockSaleRepository implements SaleRepository {
     if (index == -1) return;
     _sales[index] = sale;
   }
+
+  @override
+  Future<Sale> upsertSale(Sale sale) async {
+    final branchCode = sale.branchId == 'branch-dha-main' ? 'DHA' : 'GLB';
+    final sequence = (_sequences[branchCode] ?? 1000) + 1;
+    final id = sale.id.isEmpty ? 'sale-$branchCode-$sequence' : sale.id;
+    if (sale.id.isEmpty) _sequences[branchCode] = sequence;
+    final saved = sale.copyWith(
+      id: id,
+      invoiceNumber: sale.invoiceNumber.isEmpty
+          ? 'INV-$branchCode-$sequence'
+          : sale.invoiceNumber,
+      createdAt: sale.createdAt ?? DateTime.now(),
+    );
+    final index = _sales.indexWhere((s) => s.id == id);
+    if (index == -1) {
+      _sales.add(saved);
+    } else {
+      _sales[index] = saved;
+    }
+    return saved;
+  }
 }
 
 /// Sale returns (Week 2 Day 4): mutable in-memory returns for the
@@ -801,9 +1193,7 @@ class MockSaleReturnRepository implements SaleReturnRepository {
   @override
   Future<List<SaleReturn>> getReturns({String? branchId}) async {
     if (branchId == null) return List.unmodifiable(_returns);
-    return List.unmodifiable(
-      _returns.where((r) => r.branchId == branchId),
-    );
+    return List.unmodifiable(_returns.where((r) => r.branchId == branchId));
   }
 
   @override
@@ -885,6 +1275,38 @@ class MockSupplierRepository implements SupplierRepository {
     return created;
   }
 
+  @override
+  Future<Supplier> upsertSupplier(Supplier supplier) async {
+    // The model carries no `createdAt` — the saved row is the given
+    // row with a minted id when the id was empty.
+    final id = supplier.id.isEmpty
+        ? 'sup-${_suppliers.length + 1}'
+        : supplier.id;
+    final saved = supplier.copyWith(id: id);
+    final index = _suppliers.indexWhere((s) => s.id == id);
+    if (index == -1) {
+      _suppliers.add(saved);
+    } else {
+      _suppliers[index] = saved;
+    }
+    return saved;
+  }
+
+  @override
+  Future<SupplierLedgerEntry> upsertLedgerEntry(
+    SupplierLedgerEntry entry,
+  ) async {
+    final id = entry.id.isEmpty ? 'sled-${_ledger.length + 1}' : entry.id;
+    final saved = entry.copyWith(id: id);
+    final index = _ledger.indexWhere((e) => e.id == id);
+    if (index == -1) {
+      _ledger.add(saved);
+    } else {
+      _ledger[index] = saved;
+    }
+    return saved;
+  }
+
   static String _phoneDigits(String phone) =>
       phone.replaceAll(RegExp(r'[^0-9]'), '');
 }
@@ -913,6 +1335,23 @@ class MockRiderRepository implements RiderRepository {
       throw ArgumentError('No rider with id "${rider.id}".');
     }
     _riders[index] = rider;
+  }
+
+  @override
+  Future<Rider> upsertRider(Rider rider, {String? branchId}) async {
+    final id = rider.id.isEmpty ? 'rider-${_riders.length + 1}' : rider.id;
+    final saved = rider.copyWith(
+      id: id,
+      branchId: branchId ?? rider.branchId,
+      createdAt: rider.createdAt ?? DateTime.now(),
+    );
+    final index = _riders.indexWhere((r) => r.id == id);
+    if (index == -1) {
+      _riders.add(saved);
+    } else {
+      _riders[index] = saved;
+    }
+    return saved;
   }
 }
 
@@ -951,12 +1390,8 @@ class MockStockTransferRepository implements StockTransferRepository {
       // document instead of writing a second one.
       return _transfers.firstWhere((t) => t.id == id);
     }
-    final fromCode = transfer.fromBranchId == 'branch-dha-main'
-        ? 'DHA'
-        : 'GLB';
-    final toCode = transfer.toBranchId == 'branch-dha-main'
-        ? 'DHA'
-        : 'GLB';
+    final fromCode = transfer.fromBranchId == 'branch-dha-main' ? 'DHA' : 'GLB';
+    final toCode = transfer.toBranchId == 'branch-dha-main' ? 'DHA' : 'GLB';
     final created = transfer.copyWith(
       id: id,
       transferNumber: transfer.transferNumber.isEmpty
@@ -976,6 +1411,134 @@ class MockStockTransferRepository implements StockTransferRepository {
       throw ArgumentError('No transfer with id "${transfer.id}".');
     }
     _transfers[index] = transfer.copyWith(updatedAt: DateTime.now());
+  }
+}
+
+/// Adjustment approval queue (Week 5 Day 1, D146): mutable
+/// in-memory requests for the session, starting empty — requests
+/// only arise from filing, so there is nothing to seed.
+class MockStockAdjustmentRequestRepository
+    implements StockAdjustmentRequestRepository {
+  final List<StockAdjustmentRequest> _requests = [];
+
+  @override
+  Future<List<StockAdjustmentRequest>> getRequests({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_requests);
+    return List.unmodifiable(
+      _requests.where((request) => request.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<StockAdjustmentRequest?> getById(String id) async {
+    for (final request in _requests) {
+      if (request.id == id) return request;
+    }
+    return null;
+  }
+
+  @override
+  Future<StockAdjustmentRequest> saveRequest(
+    StockAdjustmentRequest request,
+  ) async {
+    final id = request.id.isEmpty ? 'adj-${_requests.length + 1}' : request.id;
+    // An empty id gets an assigned one; a non-empty id is kept —
+    // the round-trip through the map rebuilds the same request.
+    final saved = StockAdjustmentRequest.fromMap(id, request.toMap());
+    final index = _requests.indexWhere((item) => item.id == id);
+    if (index == -1) {
+      _requests.add(saved);
+    } else {
+      // D65 pattern: a re-save overwrites the same record, never a
+      // duplicate — filing and deciding share this write path.
+      _requests[index] = saved;
+    }
+    return saved;
+  }
+}
+
+/// Branch directory (Week 5 Day 2, D148): mutable in-memory
+/// branches for the session, seeded from [demoBranches] — the
+/// directory's session state lives here now instead of in the
+/// notifier, so a fresh mock per bundle still starts from the same
+/// two demo branches and a deactivation survives a notifier
+/// rebuild. The Firestore implementation stores the same rows
+/// under `branches/{id}`.
+class MockBranchRepository implements BranchRepository {
+  final List<Branch> _branches = List.of(demoBranches);
+
+  @override
+  Future<List<Branch>> getBranches() async => List.unmodifiable(_branches);
+
+  @override
+  Future<Branch?> getById(String id) async {
+    for (final branch in _branches) {
+      if (branch.id == id) return branch;
+    }
+    return null;
+  }
+
+  @override
+  Future<Branch> createBranch(Branch branch) async {
+    final id = branch.id.isEmpty ? _mintId(branch.name) : branch.id;
+    if (_branches.any((b) => b.id == id)) {
+      throw ArgumentError('A branch with id "$id" already exists.');
+    }
+    final created = _withId(branch, id);
+    _branches.add(created);
+    return created;
+  }
+
+  @override
+  Future<Branch> updateBranch(Branch branch) async {
+    final index = _branches.indexWhere((b) => b.id == branch.id);
+    if (index == -1) {
+      throw ArgumentError('No branch with id "${branch.id}".');
+    }
+    _branches[index] = branch;
+    return branch;
+  }
+
+  @override
+  Future<Branch> saveBranch(Branch branch) async {
+    final id = branch.id.isEmpty ? _mintId(branch.name) : branch.id;
+    final saved = _withId(branch, id);
+    final index = _branches.indexWhere((b) => b.id == id);
+    if (index == -1) {
+      _branches.add(saved);
+    } else {
+      _branches[index] = saved;
+    }
+    return saved;
+  }
+
+  /// `branch-<slug>` from the name — the same rule the form dialog
+  /// uses (`branch_form_dialog.dart`), so a repo-minted id looks
+  /// exactly like a dialog-minted one.
+  static String _mintId(String name) {
+    final slug = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return 'branch-${slug.isEmpty ? 'new' : slug}';
+  }
+
+  /// A copy of [branch] carrying [id] (`Branch.copyWith` has no
+  /// `id` parameter, so the copy is built explicitly).
+  static Branch _withId(Branch branch, String id) {
+    return Branch(
+      id: id,
+      name: branch.name,
+      address: branch.address,
+      phone: branch.phone,
+      deliveryAreas: branch.deliveryAreas,
+      active: branch.active,
+      createdAt: branch.createdAt ?? DateTime.now(),
+      type: branch.type,
+      managerId: branch.managerId,
+      franchiseFeeRateBps: branch.franchiseFeeRateBps,
+      royaltyRateBps: branch.royaltyRateBps,
+    );
   }
 }
 
@@ -1155,23 +1718,16 @@ class MockExpenseRepository implements ExpenseRepository {
 /// of the seeded expenses.
 class MockFinancialTransactionRepository
     implements FinancialTransactionRepository {
-  final List<FinancialTransaction> _txns =
-      generateDemoFinancialTransactions();
+  final List<FinancialTransaction> _txns = generateDemoFinancialTransactions();
 
   @override
-  Future<List<FinancialTransaction>> getTransactions({
-    String? branchId,
-  }) async {
+  Future<List<FinancialTransaction>> getTransactions({String? branchId}) async {
     if (branchId == null) return List.unmodifiable(_txns);
-    return List.unmodifiable(
-      _txns.where((txn) => txn.branchId == branchId),
-    );
+    return List.unmodifiable(_txns.where((txn) => txn.branchId == branchId));
   }
 
   @override
-  Future<FinancialTransaction> addTransaction(
-    FinancialTransaction txn,
-  ) async {
+  Future<FinancialTransaction> addTransaction(FinancialTransaction txn) async {
     // Week 4 Day 3 (D125): a caller-supplied `createdAt` is the
     // transaction's business date (a backdated cashbook income entry
     // lands on its entry date, not today) — it is kept. Only a
@@ -1220,15 +1776,93 @@ class MockDailyClosingRepository implements DailyClosingRepository {
   Future<DailyClosing> createClosing(DailyClosing closing) async {
     if (await getClosing(branchId: closing.branchId, date: closing.date) !=
         null) {
-      throw ArgumentError(
-        'A closing already exists for this branch and day.',
-      );
+      throw ArgumentError('A closing already exists for this branch and day.');
     }
     final created = closing.copyWith(
       id: 'dc-${_closings.length + 1}',
       closedAt: closing.closedAt ?? DateTime.now(),
     );
     _closings.add(created);
+    return created;
+  }
+}
+
+/// Closing corrections (Week 5 Day 4, D156): mutable in-memory
+/// corrections for the session. The demo starts with none —
+/// corrections only arise from correcting a closing. Append-only:
+/// a correction is never edited or deleted.
+class MockClosingCorrectionRepository implements ClosingCorrectionRepository {
+  final List<ClosingCorrection> _corrections = [];
+
+  @override
+  Future<List<ClosingCorrection>> getCorrections({String? branchId}) async {
+    if (branchId == null) return List.unmodifiable(_corrections);
+    return List.unmodifiable(_corrections.where((c) => c.branchId == branchId));
+  }
+
+  @override
+  Future<List<ClosingCorrection>> getCorrectionsForClosing(
+    String originalClosingId,
+  ) async {
+    return List.unmodifiable(
+      _corrections.where((c) => c.originalClosingId == originalClosingId),
+    );
+  }
+
+  @override
+  Future<ClosingCorrection> createCorrection(
+    ClosingCorrection correction,
+  ) async {
+    final created = correction.copyWith(
+      id: 'cc-${_corrections.length + 1}',
+      correctedAt: correction.correctedAt ?? DateTime.now(),
+    );
+    _corrections.add(created);
+    return created;
+  }
+}
+
+/// Cash reconciliations (Week 5 Day 4, D157): mutable in-memory
+/// drawer counts for the session. The demo starts with none —
+/// reconciliations only arise from counting a drawer. Append-only:
+/// a recount is a new record.
+class MockCashReconciliationRepository implements CashReconciliationRepository {
+  final List<CashReconciliation> _reconciliations = [];
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  @override
+  Future<List<CashReconciliation>> getReconciliations({
+    String? branchId,
+  }) async {
+    if (branchId == null) return List.unmodifiable(_reconciliations);
+    return List.unmodifiable(
+      _reconciliations.where((r) => r.branchId == branchId),
+    );
+  }
+
+  @override
+  Future<List<CashReconciliation>> getReconciliationsForDay({
+    required String branchId,
+    required DateTime date,
+  }) async {
+    return List.unmodifiable(
+      _reconciliations.where(
+        (r) => r.branchId == branchId && _sameDay(r.date, date),
+      ),
+    );
+  }
+
+  @override
+  Future<CashReconciliation> createReconciliation(
+    CashReconciliation reconciliation,
+  ) async {
+    final created = reconciliation.copyWith(
+      id: 'cr-${_reconciliations.length + 1}',
+      countedAt: reconciliation.countedAt ?? DateTime.now(),
+    );
+    _reconciliations.add(created);
     return created;
   }
 }
@@ -1248,9 +1882,7 @@ class MockSupplierPaymentRepository implements SupplierPaymentRepository {
   }) async {
     var scoped = _payments;
     if (branchId != null) {
-      scoped = scoped
-          .where((payment) => payment.branchId == branchId)
-          .toList();
+      scoped = scoped.where((payment) => payment.branchId == branchId).toList();
     }
     if (supplierId != null) {
       scoped = scoped
@@ -1262,8 +1894,17 @@ class MockSupplierPaymentRepository implements SupplierPaymentRepository {
 
   @override
   Future<SupplierPayment> createPayment(SupplierPayment payment) async {
+    if (payment.id.isNotEmpty) {
+      // D65 pattern: a caller-supplied non-empty id is the document
+      // id — a retry with the same id returns the existing payment
+      // instead of writing a second one (the layer passes its
+      // idempotency key as the id, D147).
+      for (final stored in _payments) {
+        if (stored.id == payment.id) return stored;
+      }
+    }
     final created = payment.copyWith(
-      id: 'spay-${_payments.length + 1}',
+      id: payment.id.isNotEmpty ? payment.id : 'spay-${_payments.length + 1}',
       createdAt: DateTime.now(),
     );
     _payments.add(created);
@@ -1374,6 +2015,37 @@ class MockPrescriptionRepository implements PrescriptionRepository {
     _prescriptions.add(created);
     return created;
   }
+
+  @override
+  Future<Prescription> upsertPrescription(
+    Prescription prescription, {
+    String? branchId,
+  }) async {
+    // Unlike `createPrescription` the status is kept as given — a
+    // restore replays the review state, it does not reset it.
+    final explicitBranch = branchId ?? prescription.branchId;
+    final isDha =
+        explicitBranch == 'branch-dha-main' ||
+        (explicitBranch == null && prescription.id.startsWith('rx-dha-'));
+    final prefix = isDha ? 'rx-dha-' : 'rx-glb-';
+    final count = _prescriptions.where((rx) => rx.id.startsWith(prefix)).length;
+    final id = prescription.id.isEmpty
+        ? '$prefix${count + 1}'
+        : prescription.id;
+    final saved = prescription.copyWith(
+      id: id,
+      branchId:
+          explicitBranch ?? (isDha ? 'branch-dha-main' : 'branch-demo-gulberg'),
+      createdAt: prescription.createdAt ?? DateTime.now(),
+    );
+    final index = _prescriptions.indexWhere((rx) => rx.id == id);
+    if (index == -1) {
+      _prescriptions.add(saved);
+    } else {
+      _prescriptions[index] = saved;
+    }
+    return saved;
+  }
 }
 
 /// Purchase orders (Day 7): mutable in-memory POs for the session.
@@ -1430,6 +2102,30 @@ class MockPurchaseOrderRepository implements PurchaseOrderRepository {
     final index = _orders.indexWhere((po) => po.id == order.id);
     if (index == -1) return;
     _orders[index] = order.copyWith(updatedAt: DateTime.now());
+  }
+
+  @override
+  Future<PurchaseOrder> upsertPurchaseOrder(PurchaseOrder order) async {
+    // Unlike `createPurchaseOrder` the status is kept as given — a
+    // restore replays the PO state, it does not reset it to Draft.
+    final branchCode = order.branchId == 'branch-dha-main' ? 'DHA' : 'GLB';
+    final sequence = 1000 + _orders.length + 1;
+    final id = order.id.isEmpty ? 'po-$branchCode-$sequence' : order.id;
+    final saved = order.copyWith(
+      id: id,
+      poNumber: order.poNumber.isEmpty
+          ? 'PO-$branchCode-$sequence'
+          : order.poNumber,
+      createdAt: order.createdAt ?? DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    final index = _orders.indexWhere((po) => po.id == id);
+    if (index == -1) {
+      _orders.add(saved);
+    } else {
+      _orders[index] = saved;
+    }
+    return saved;
   }
 }
 
@@ -1517,9 +2213,7 @@ class MockSalaryRepository implements SalaryRepository {
     // edit UI will use): negative amounts, a bad month, or a
     // negative net never reach the store.
     if (record.employeeId.isEmpty || record.branchId.isEmpty) {
-      throw ArgumentError(
-        'A salary record needs an employee and a branch.',
-      );
+      throw ArgumentError('A salary record needs an employee and a branch.');
     }
     if (!RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(record.month)) {
       throw ArgumentError('Month must look like YYYY-MM (e.g. 2026-11).');
@@ -1608,10 +2302,28 @@ final riderRepositoryProvider = Provider<RiderRepository>(
 /// is the default and a Firestore bundle override switches it to the
 /// Firestore implementation exactly like the Day 3 repos (D101
 /// pattern).
-final stockTransferRepositoryProvider =
-    Provider<StockTransferRepository>(
-      (ref) => ref.watch(repositoryBundleProvider).stockTransfers,
+final stockTransferRepositoryProvider = Provider<StockTransferRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).stockTransfers,
+);
+
+/// Week 5 Day 1 adjustment queue (D146): mock-backed by default —
+/// the provider reads from the [RepositoryBundle], so the mock bundle
+/// is the default and a Firestore bundle override switches it to the
+/// Firestore implementation exactly like the Day 3 repos (D101
+/// pattern).
+final stockAdjustmentRequestRepositoryProvider =
+    Provider<StockAdjustmentRequestRepository>(
+      (ref) => ref.watch(repositoryBundleProvider).stockAdjustments,
     );
+
+/// Week 5 Day 2 branch directory (D148): mock-backed by default —
+/// the provider reads from the [RepositoryBundle], so the mock bundle
+/// is the default and a Firestore bundle override switches it to the
+/// Firestore implementation exactly like the Day 3 repos (D101
+/// pattern).
+final branchRepositoryProvider = Provider<BranchRepository>(
+  (ref) => ref.watch(repositoryBundleProvider).branches,
+);
 
 /// Week 2 Day 5 repositories (D89): mock-backed by default — the
 /// providers below read from the [RepositoryBundle] (Week 3 Day 1,
@@ -1652,6 +2364,21 @@ final supplierPaymentRepositoryProvider = Provider<SupplierPaymentRepository>(
 final dailyClosingRepositoryProvider = Provider<DailyClosingRepository>(
   (ref) => ref.watch(repositoryBundleProvider).dailyClosings,
 );
+
+/// Week 5 Day 4 repositories (D156/D157): mock-backed by default —
+/// the providers below read from the [RepositoryBundle], so the mock
+/// bundle is the default and a Firestore bundle override switches
+/// them to their Firestore implementations exactly like the Day 3
+/// repos (D101 pattern).
+final closingCorrectionRepositoryProvider =
+    Provider<ClosingCorrectionRepository>(
+      (ref) => ref.watch(repositoryBundleProvider).closingCorrections,
+    );
+
+final cashReconciliationRepositoryProvider =
+    Provider<CashReconciliationRepository>(
+      (ref) => ref.watch(repositoryBundleProvider).cashReconciliations,
+    );
 
 /// Week 3 Day 2 repositories (D102/D103): mock-backed by default —
 /// the providers below read from the [RepositoryBundle], so the mock
