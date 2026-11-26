@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/data/permission_service.dart';
+import '../../core/data/sync_queue.dart';
 import '../../core/services/branch_context.dart';
 import '../../core/utils/file_download.dart';
 import '../../core/utils/money.dart';
@@ -156,6 +157,10 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
             children: [
               DropdownButton<String?>(
                 value: _branchId,
+                // Week 6 Day 5 (D170): the longest branch name made
+                // this 21px wider than the 390px line in the test
+                // font (the D153/D162 `isExpanded` trap).
+                isExpanded: true,
                 hint: const Text('All branches'),
                 items: [
                   const DropdownMenuItem<String?>(
@@ -793,6 +798,14 @@ class _ExpenseDialogState extends ConsumerState<_ExpenseDialog> {
   String? _error;
   bool _saving = false;
 
+  /// Dialog-held idempotency key (Week 6 Day 2, D115 / D162 — same
+  /// pattern as the cashbook entry dialog): minted once for this
+  /// dialog's lifetime and reused on every submit, so a double-submit
+  /// returns the original expense instead of recording a second one.
+  late final String _idempotencyKey = newIdempotencyKey(
+    'finance-expense-${widget.branchId}',
+  );
+
   @override
   void dispose() {
     _amount.dispose();
@@ -812,6 +825,7 @@ class _ExpenseDialogState extends ConsumerState<_ExpenseDialog> {
           amountMinor: amountMinor,
           description: _description.text,
           expenseDate: _date,
+          idempotencyKey: _idempotencyKey,
         );
     if (!mounted) return;
     setState(() => _saving = false);
