@@ -27,6 +27,41 @@ String salePaymentMethodLabel(SalePaymentMethod method) => switch (method) {
   SalePaymentMethod.credit => 'Credit (khata)',
 };
 
+/// Short payment summary for the history badge / receipt: the single
+/// method label, or "Split: Cash + Card" for a split sale (D137).
+String salePaymentSummary(Sale sale) => sale.isSplit
+    ? 'Split: ${sale.payments.map((payment) => salePaymentMethodLabel(payment.method)).join(' + ')}'
+    : salePaymentMethodLabel(sale.paymentMethod);
+
+/// One leg of a split payment (Week 4 Day 5, D137 — SRS FR-POS-05).
+///
+/// A sale may settle across methods (e.g. part cash + part card, or
+/// part cash + part credit). Each leg is a method + the amount it
+/// settles, in int minor units (paisa); the legs sum to the sale
+/// total (enforced by [validateSplitPayments] in `billing_logic.dart`).
+/// The map shape is the SRS §3.4 `payments` subcollection doc
+/// (`method` / `amount`), so the same map serves the sale doc's
+/// `payments` list and the subcollection docs the layer enqueues.
+class SalePayment {
+  const SalePayment({required this.method, required this.amountMinor});
+
+  final SalePaymentMethod method;
+
+  /// Amount this leg settles, int minor units (paisa, positive).
+  final int amountMinor;
+
+  factory SalePayment.fromMap(Map<String, dynamic> map) {
+    return SalePayment(
+      method: salePaymentMethodFromString(map['method'] as String?),
+      amountMinor: (map['amount'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {'method': method.name, 'amount': amountMinor};
+  }
+}
+
 /// Lifecycle of a completed sale (SRS §3.4 `sales.status`, Week 2
 /// Day 4 — FR-POS-08 returns).
 ///
@@ -179,6 +214,13 @@ class Sale {
   final int totalMinor;
   final SalePaymentMethod paymentMethod;
 
+  /// The payment legs (Week 4 Day 5, D137 — FR-POS-05). One leg for
+  /// a single-method sale, several for a split. The list is the
+  /// source of truth for what settled the bill; [paymentMethod] is
+  /// the primary method (the largest leg) kept for the legacy
+  /// single-method readers (history badge, receipt label).
+  final List<SalePayment> payments;
+
   /// Cash handed over, int minor units — cash sales only (0 otherwise).
   final int cashReceivedMinor;
 
@@ -207,6 +249,7 @@ class Sale {
     this.taxMinor = 0,
     required this.totalMinor,
     required this.paymentMethod,
+    this.payments = const [],
     this.cashReceivedMinor = 0,
     this.changeMinor = 0,
     required this.idempotencyKey,
@@ -216,6 +259,19 @@ class Sale {
 
   factory Sale.fromMap(String id, Map<String, dynamic> map) {
     final rawItems = map['items'] as List<dynamic>? ?? [];
+    final rawPayments = map['payments'] as List<dynamic>? ?? [];
+    final method = salePaymentMethodFromString(
+      map['paymentMethod'] as String?,
+    );
+    final total = (map['totalMinor'] as num?)?.toInt() ?? 0;
+    // Legacy docs (pre-split) carry no `payments` list: the single
+    // leg is the sale's method settling the whole total (D137).
+    final payments = rawPayments.isEmpty
+        ? [SalePayment(method: method, amountMinor: total)]
+        : rawPayments
+              .whereType<Map<String, dynamic>>()
+              .map(SalePayment.fromMap)
+              .toList();
     return Sale(
       id: id,
       invoiceNumber: map['invoiceNumber'] as String? ?? '',
@@ -229,10 +285,9 @@ class Sale {
       subtotalMinor: (map['subtotalMinor'] as num?)?.toInt() ?? 0,
       billDiscountMinor: (map['billDiscountMinor'] as num?)?.toInt() ?? 0,
       taxMinor: (map['taxMinor'] as num?)?.toInt() ?? 0,
-      totalMinor: (map['totalMinor'] as num?)?.toInt() ?? 0,
-      paymentMethod: salePaymentMethodFromString(
-        map['paymentMethod'] as String?,
-      ),
+      totalMinor: total,
+      paymentMethod: method,
+      payments: payments,
       cashReceivedMinor: (map['cashReceivedMinor'] as num?)?.toInt() ?? 0,
       changeMinor: (map['changeMinor'] as num?)?.toInt() ?? 0,
       idempotencyKey: map['idempotencyKey'] as String? ?? id,
@@ -253,6 +308,7 @@ class Sale {
       'taxMinor': taxMinor,
       'totalMinor': totalMinor,
       'paymentMethod': paymentMethod.name,
+      'payments': payments.map((payment) => payment.toMap()).toList(),
       'cashReceivedMinor': cashReceivedMinor,
       'changeMinor': changeMinor,
       'idempotencyKey': idempotencyKey,
@@ -260,6 +316,30 @@ class Sale {
       'createdAt': dateToMap(createdAt),
     };
   }
+
+  /// True when the sale settled across more than one method.
+  bool get isSplit => payments.length > 1;
+
+  /// What the legs sum to (== [totalMinor] for a valid sale).
+  int get splitTotalMinor =>
+      payments.fold(0, (sum, payment) => sum + payment.amountMinor);
+
+  /// The credit (khata) leg, int paisa — 0 when no leg is credit.
+  /// The khata entry for a sale is this amount, never the full total
+  /// (D137: a split sale puts only its credit part on credit).
+  int get creditMinor => payments
+      .where((payment) => payment.method == SalePaymentMethod.credit)
+      .fold(0, (sum, payment) => sum + payment.amountMinor);
+
+  /// The cash leg, int paisa — 0 when no leg is cash.
+  int get cashMinor => payments
+      .where((payment) => payment.method == SalePaymentMethod.cash)
+      .fold(0, (sum, payment) => sum + payment.amountMinor);
+
+  /// True when any leg is credit (the khata note shows for split
+  /// sales too — the old [isCredit] only covered single-method
+  /// credit sales).
+  bool get hasCreditLeg => creditMinor > 0;
 
   /// True when this sale went on the customer's khata.
   bool get isCredit => paymentMethod == SalePaymentMethod.credit;
@@ -282,6 +362,7 @@ class Sale {
     int? taxMinor,
     int? totalMinor,
     SalePaymentMethod? paymentMethod,
+    List<SalePayment>? payments,
     int? cashReceivedMinor,
     int? changeMinor,
     String? idempotencyKey,
@@ -300,6 +381,7 @@ class Sale {
       taxMinor: taxMinor ?? this.taxMinor,
       totalMinor: totalMinor ?? this.totalMinor,
       paymentMethod: paymentMethod ?? this.paymentMethod,
+      payments: payments ?? this.payments,
       cashReceivedMinor: cashReceivedMinor ?? this.cashReceivedMinor,
       changeMinor: changeMinor ?? this.changeMinor,
       idempotencyKey: idempotencyKey ?? this.idempotencyKey,

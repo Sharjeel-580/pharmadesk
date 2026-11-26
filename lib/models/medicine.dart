@@ -45,6 +45,11 @@ class Medicine {
   /// Sample EAN-13 barcode (Day 5): the catalogue search and the Day 6
   /// POS scan by barcode. Fictional demo values, never real GTINs.
   final String? barcode;
+
+  /// Storage location — shelf / bin (Week 4 Day 5, D138 — SRS D-10 /
+  /// FR-INV-10). The master default for the medicine; a per-branch
+  /// rack/shelf override (SRS §3.3 `inventory` doc) is a follow-up.
+  final String? location;
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -64,6 +69,7 @@ class Medicine {
     this.imageUrl,
     this.description,
     this.barcode,
+    this.location,
     this.createdAt,
     this.updatedAt,
   });
@@ -89,6 +95,7 @@ class Medicine {
       imageUrl: map['imageUrl'] as String?,
       description: map['description'] as String?,
       barcode: map['barcode'] as String?,
+      location: map['location'] as String?,
       createdAt: parseDate(map['createdAt']),
       updatedAt: parseDate(map['updatedAt']),
     );
@@ -110,8 +117,53 @@ class Medicine {
       'imageUrl': imageUrl,
       'description': description,
       'barcode': barcode,
+      'location': location,
       'createdAt': dateToMap(createdAt),
       'updatedAt': dateToMap(updatedAt),
     };
+  }
+
+  Medicine copyWith({
+    String? id,
+    String? name,
+    String? brand,
+    String? categoryId,
+    String? strength,
+    String? packSize,
+    double? price,
+    double? mrp,
+    bool clearMrp = false,
+    int? purchasePriceMinor,
+    StockStatus? stockStatus,
+    bool? requiresPrescription,
+    String? genericAlternativeId,
+    String? imageUrl,
+    String? description,
+    String? barcode,
+    String? location,
+    bool clearLocation = false,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return Medicine(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      brand: brand ?? this.brand,
+      categoryId: categoryId ?? this.categoryId,
+      strength: strength ?? this.strength,
+      packSize: packSize ?? this.packSize,
+      price: price ?? this.price,
+      mrp: clearMrp ? null : (mrp ?? this.mrp),
+      purchasePriceMinor: purchasePriceMinor ?? this.purchasePriceMinor,
+      stockStatus: stockStatus ?? this.stockStatus,
+      requiresPrescription: requiresPrescription ?? this.requiresPrescription,
+      genericAlternativeId: genericAlternativeId ?? this.genericAlternativeId,
+      imageUrl: imageUrl ?? this.imageUrl,
+      description: description ?? this.description,
+      barcode: barcode ?? this.barcode,
+      location: clearLocation ? null : (location ?? this.location),
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
   }
 }
