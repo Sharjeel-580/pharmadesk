@@ -9,7 +9,17 @@ import 'inventory_provider.dart';
 import 'quarantine_outcome_logic.dart';
 
 /// The quarantine return / disposal approval queue (Week 5 Day 4,
-/// D154 — SRS D-11 / FR-INV-07, §5.2.4; D141 pattern).
+/// D154 — SRS D-11 / FR-INV-07, §5.2.4; D141 pattern; persisted
+/// Week 7 Day 1, D171).
+///
+/// Requests are filed through the production data layer
+/// ([ProductionDataLayer.fileQuarantineOutcomeRequest]) and stored
+/// under `branches/{branchId}/quarantineOutcomes/{id}` (mock now,
+/// Firestore when the bundle switches), so a request survives a
+/// notifier rebuild and an app restart. The notifier re-reads the
+/// persisted requests on start ([refresh], kicked off from [build])
+/// and resumes the `qo-N` sequence past them, so a re-filed id can
+/// never collide with a persisted one.
 ///
 /// Flow: the Return / Dispose dialog on a quarantined batch row
 /// files a request ([requestOutcome]); an approver (a role the §5.1
@@ -18,14 +28,9 @@ import 'quarantine_outcome_logic.dart';
 /// Approval applies the outcome through the layer — status (+
 /// quantity 0 on a return) + audit + sync, exactly like the
 /// quarantine transition itself (D140) — and the batch row updates
-/// at once. A rejected batch stays quarantined.
-///
-/// The queue is session-only, like the adjustment queue was at
-/// D141: Firestore persistence (`branches/{branchId}/
-/// quarantineOutcomes`, D146 pattern) is a follow-up, not smuggled
-/// into this day. The outcome itself IS persisted — the batch row
-/// carries the outcome status, so a decided batch survives a
-/// restart even though the queue entry does not.
+/// at once. A rejected batch stays quarantined. The decision is
+/// persisted to the same document before the state updates, so the
+/// persisted queue never lags the screen.
 final quarantineOutcomeQueueProvider =
     NotifierProvider<
       QuarantineOutcomeQueueNotifier,
@@ -36,18 +41,63 @@ class QuarantineOutcomeQueueNotifier
     extends Notifier<List<QuarantineOutcomeRequest>> {
   int _sequence = 0;
 
+  /// The in-flight initial load, started by [build]: mutating
+  /// methods await it before minting an id or deciding a request,
+  /// so they always see the persisted queue first.
+  Future<void>? _loadFuture;
+
   @override
-  List<QuarantineOutcomeRequest> build() => const [];
+  List<QuarantineOutcomeRequest> build() {
+    _loadFuture = refresh();
+    return const [];
+  }
+
+  Future<void> _ensureLoaded() => _loadFuture ?? Future.value();
+
+  /// Re-reads the persisted requests from the layer and merges them
+  /// into the state. Persisted requests win, except for one
+  /// interleave: a decision that is already in memory but not yet
+  /// persisted (the persist runs just before the state update, so
+  /// this only happens if that persist failed) is kept over a
+  /// still-pending persisted copy — the next decision write repairs
+  /// the persisted copy. Also resumes [_sequence] past the highest
+  /// persisted `qo-N` id.
+  Future<void> refresh() async {
+    final persisted = await ref
+        .read(productionDataLayerProvider)
+        .loadQuarantineOutcomeRequests();
+    final mergedById = <String, QuarantineOutcomeRequest>{
+      for (final request in persisted) request.id: request,
+    };
+    for (final current in state) {
+      final kept = mergedById[current.id];
+      if (kept == null) {
+        mergedById[current.id] = current;
+      } else if (!current.isPending && kept.isPending) {
+        mergedById[current.id] = current;
+      }
+    }
+    state = mergedById.values.toList();
+    for (final request in state) {
+      final match = RegExp(r'^qo-(\d+)$').firstMatch(request.id);
+      if (match != null) {
+        final number = int.tryParse(match.group(1) ?? '') ?? 0;
+        if (number > _sequence) _sequence = number;
+      }
+    }
+  }
 
   /// Files a new return / disposal request for a quarantined batch.
-  /// Returns the request, or `null` when the requester is signed
-  /// out or the reason is missing.
-  QuarantineOutcomeRequest? requestOutcome({
+  /// Persists it through the layer first, then adds it to the
+  /// state. Returns the request, or `null` when the requester is
+  /// signed out or the reason is missing.
+  Future<QuarantineOutcomeRequest?> requestOutcome({
     required InventoryItem batch,
     required String medicineName,
     required QuarantineOutcome outcome,
     required String reason,
-  }) {
+  }) async {
+    await _ensureLoaded();
     final requester = ref.read(authProvider);
     if (requester == null) return null;
     final error = validateQuarantineOutcomeRequest(reason: reason);
@@ -67,8 +117,11 @@ class QuarantineOutcomeQueueNotifier
       requesterName: requester.name,
       requestedAt: DateTime.now(),
     );
-    state = [...state, request];
-    return request;
+    final saved = await ref
+        .read(productionDataLayerProvider)
+        .fileQuarantineOutcomeRequest(request);
+    state = [...state, saved];
+    return saved;
   }
 
   /// Approves a pending request and applies it through the layer.
@@ -76,14 +129,20 @@ class QuarantineOutcomeQueueNotifier
   /// not pending, the caller may not approve it (wrong role, or the
   /// requester themself — §5.2.4), or the layer rejects the apply
   /// (e.g. the batch is no longer quarantined — the request stays
-  /// pending, and the approver can try again or reject it).
+  /// pending, and the approver can try again or reject it; or the
+  /// branch was deactivated — FR-HO-08, D149/D161, same refusal).
   ///
   /// The idempotency key is the request id, so a double-tap on
-  /// Approve applies the outcome once.
+  /// Approve applies the outcome once. The decision is persisted
+  /// before the state updates; a retry after a failed persist
+  /// replays the apply as a duplicate (no second stock move, D171 —
+  /// the batch row is already in the target status) and then
+  /// persists the decision.
   Future<QuarantineOutcomeRequest?> approveOutcome({
     required String requestId,
     String? note,
   }) async {
+    await _ensureLoaded();
     final index = state.indexWhere((item) => item.id == requestId);
     if (index == -1) return null;
     final request = state[index];
@@ -110,6 +169,9 @@ class QuarantineOutcomeQueueNotifier
         decidedAt: DateTime.now(),
         decisionNote: note?.trim().isEmpty ?? true ? null : note!.trim(),
       );
+      await ref
+          .read(productionDataLayerProvider)
+          .updateQuarantineOutcomeRequest(approved);
       state = [
         for (var i = 0; i < state.length; i++)
           if (i == index) approved else state[i],
@@ -124,13 +186,15 @@ class QuarantineOutcomeQueueNotifier
 
   /// Rejects a pending request. Only an approver (same gate as
   /// approve — a role that may approve, other than the requester)
-  /// may reject. The batch stays quarantined. Returns the rejected
+  /// may reject. The batch stays quarantined. The decision is
+  /// persisted before the state updates. Returns the rejected
   /// request, or `null` when the request is not pending or the
   /// caller may not decide it.
-  QuarantineOutcomeRequest? rejectOutcome({
+  Future<QuarantineOutcomeRequest?> rejectOutcome({
     required String requestId,
     String? note,
-  }) {
+  }) async {
+    await _ensureLoaded();
     final index = state.indexWhere((item) => item.id == requestId);
     if (index == -1) return null;
     final request = state[index];
@@ -146,6 +210,9 @@ class QuarantineOutcomeQueueNotifier
       decidedAt: DateTime.now(),
       decisionNote: note?.trim().isEmpty ?? true ? null : note!.trim(),
     );
+    await ref
+        .read(productionDataLayerProvider)
+        .updateQuarantineOutcomeRequest(rejected);
     state = [
       for (var i = 0; i < state.length; i++)
         if (i == index) rejected else state[i],

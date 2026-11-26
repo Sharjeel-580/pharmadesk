@@ -169,7 +169,7 @@ class _QuarantineOutcomeScreenState
     );
     controller.dispose();
     if (note == null) return;
-    final rejected = ref
+    final rejected = await ref
         .read(quarantineOutcomeQueueProvider.notifier)
         .rejectOutcome(requestId: request.id, note: note);
     if (!context.mounted) return;

@@ -868,14 +868,14 @@ class _QuarantineOutcomeDialogState
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     final reason = _reasonController.text.trim();
     final error = validateQuarantineOutcomeRequest(reason: reason);
     if (error != null) {
       setState(() => _error = error);
       return;
     }
-    final request = ref
+    final request = await ref
         .read(quarantineOutcomeQueueProvider.notifier)
         .requestOutcome(
           batch: widget.batch,
@@ -884,9 +884,11 @@ class _QuarantineOutcomeDialogState
           reason: reason,
         );
     if (request == null) {
+      if (!mounted) return;
       setState(() => _error = 'Could not file the request — please try again.');
       return;
     }
+    if (!mounted) return;
     Navigator.of(context).pop(request);
   }
 
