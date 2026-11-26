@@ -1,4 +1,6 @@
+import '../../models/daily_closing.dart';
 import '../../models/expense.dart';
+import '../../models/financial_transaction.dart';
 import '../../models/supplier_ledger.dart';
 import '../../models/supplier_payment.dart';
 
@@ -265,4 +267,247 @@ String supplierStatementCsv(List<SupplierLedgerEntry> entries) {
     );
   }
   return buffer.toString();
+}
+
+// --- Cashbook (Week 4 Day 3, D124–D126 — SRS D-24 / FR-FIN-01/02) ---
+
+/// Fixed income categories for cashbook income entries (D125).
+///
+/// The mirror of the fixed [expenseCategories] list: the SRS names
+/// income/expense categories but lists no income categories, so the
+/// demo keeps a small fixed list (same rule as expenses — the
+/// category NAME is the id). Sales income is NOT here: sales revenue
+/// lives in the P&L, not in the cashbook — these are the non-sale
+/// money-in lines (owner money, loans, refunds received).
+const incomeCategories = <String>[
+  'Owner contribution',
+  'Loan received',
+  'Refund received',
+  'Other income',
+];
+
+/// One cashbook line: an expense record or an income transaction,
+/// unified for the cashbook list. [amountMinor] is UNSIGNED (the
+/// kind says which way the money moved); [note] is the expense
+/// description, empty for income (see D125 — income transactions
+/// carry no note field).
+enum CashbookEntryKind { income, expense }
+
+typedef CashbookEntry = ({
+  String id,
+  DateTime date,
+  CashbookEntryKind kind,
+  String category,
+  int amountMinor,
+  String note,
+  String? referenceId,
+});
+
+/// Unifies the branch's expenses and income transactions into the
+/// cashbook list, newest first. Expense entries come from the
+/// `expenses` collection (their date is the expense date); income
+/// entries come from `financialTransactions` of type `income` (their
+/// date is the transaction date). Supplier/customer payments and
+/// expense mirrors are NOT income — only type `income` counts, so a
+/// recorded expense never appears twice (once as the expense, once
+/// as its mirror transaction).
+List<CashbookEntry> cashbookEntries({
+  required List<Expense> expenses,
+  required List<FinancialTransaction> transactions,
+  String? branchId,
+}) {
+  final entries = <CashbookEntry>[
+    for (final expense in expenses)
+      if (branchId == null || expense.branchId == branchId)
+        (
+          id: expense.id,
+          date: expense.expenseDate,
+          kind: CashbookEntryKind.expense,
+          category: expense.category,
+          amountMinor: expense.amountMinor,
+          note: expense.description,
+          referenceId: null,
+        ),
+    for (final txn in transactions)
+      if (txn.type == FinancialTransactionType.income &&
+          (branchId == null || txn.branchId == branchId))
+        (
+          id: txn.id,
+          date: txn.createdAt ?? DateTime.now(),
+          kind: CashbookEntryKind.income,
+          category: txn.category.isEmpty ? 'Other income' : txn.category,
+          amountMinor: txn.amountMinor,
+          note: '',
+          referenceId: txn.referenceId,
+        ),
+  ];
+  entries.sort((a, b) => b.date.compareTo(a.date));
+  return entries;
+}
+
+/// Validates a new cashbook entry before saving: the category must
+/// be on the fixed list for its kind, the amount is the UNSIGNED
+/// whole rupees the staff typed (converted to paisa by the caller),
+/// the date may not be in the future, and the note is capped at 200
+/// characters (same cap as `validateExpense`).
+List<String> validateCashbookEntry({
+  required bool isIncome,
+  required String category,
+  required int amountMinor,
+  required DateTime date,
+  String note = '',
+  DateTime? now,
+}) {
+  final errors = <String>[];
+  final categories = isIncome ? incomeCategories : expenseCategories;
+  if (!categories.contains(category)) {
+    errors.add('Pick a ${isIncome ? 'income' : 'expense'} category.');
+  }
+  if (amountMinor <= 0) {
+    errors.add('Amount must be more than zero.');
+  }
+  final today = now ?? DateTime.now();
+  final entryDay = DateTime(date.year, date.month, date.day);
+  final todayDay = DateTime(today.year, today.month, today.day);
+  if (entryDay.isAfter(todayDay)) {
+    errors.add('Entries cannot be dated in the future.');
+  }
+  if (note.trim().length > 200) {
+    errors.add('Note is too long (max 200 characters).');
+  }
+  return errors;
+}
+
+/// Totals for one day's closing (D126).
+class DailyClosingTotals {
+  const DailyClosingTotals({
+    required this.incomeMinor,
+    required this.expenseMinor,
+    required this.openingBalanceMinor,
+    required this.closingBalanceMinor,
+  });
+
+  /// Money in that day (int paisa).
+  final int incomeMinor;
+
+  /// Money out that day (int paisa).
+  final int expenseMinor;
+
+  /// Balance carried into the day.
+  final int openingBalanceMinor;
+
+  /// `opening + income − expense`.
+  final int closingBalanceMinor;
+}
+
+/// Computes a day's closing totals from the branch's cashbook
+/// entries: only entries dated that day count, and the opening
+/// balance is the previous closing's closing balance (0 when no
+/// earlier closing exists).
+DailyClosingTotals computeDailyClosing({
+  required List<CashbookEntry> entries,
+  required DateTime date,
+  required int openingBalanceMinor,
+}) {
+  final day = DateTime(date.year, date.month, date.day);
+  var income = 0;
+  var expense = 0;
+  for (final entry in entries) {
+    final entryDay = DateTime(
+      entry.date.year,
+      entry.date.month,
+      entry.date.day,
+    );
+    if (entryDay != day) continue;
+    if (entry.kind == CashbookEntryKind.income) {
+      income += entry.amountMinor;
+    } else {
+      expense += entry.amountMinor;
+    }
+  }
+  return DailyClosingTotals(
+    incomeMinor: income,
+    expenseMinor: expense,
+    openingBalanceMinor: openingBalanceMinor,
+    closingBalanceMinor: openingBalanceMinor + income - expense,
+  );
+}
+
+/// The opening balance for closing [date]: the latest closing
+/// BEFORE that day for the branch, or 0 when no earlier closing
+/// exists. A closing for the same day is not its own opening — the
+/// caller rejects a duplicate close first (see
+/// `validateDailyClosing`).
+int previousClosingBalance({
+  required List<DailyClosing> closings,
+  required String branchId,
+  required DateTime date,
+}) {
+  final day = DateTime(date.year, date.month, date.day);
+  DailyClosing? latest;
+  for (final closing in closings) {
+    if (closing.branchId != branchId) continue;
+    final closingDay = DateTime(
+      closing.date.year,
+      closing.date.month,
+      closing.date.day,
+    );
+    if (!closingDay.isBefore(day)) continue;
+    if (latest == null || closingDay.isAfter(DateTime(
+      latest.date.year,
+      latest.date.month,
+      latest.date.day,
+    ))) {
+      latest = closing;
+    }
+  }
+  return latest?.closingBalanceMinor ?? 0;
+}
+
+/// Validates closing a day: the day may not be in the future, and a
+/// branch-day may be closed only once.
+List<String> validateDailyClosing({
+  required DateTime date,
+  required List<DailyClosing> existing,
+  required String branchId,
+  DateTime? now,
+}) {
+  final errors = <String>[];
+  final today = now ?? DateTime.now();
+  final day = DateTime(date.year, date.month, date.day);
+  final todayDay = DateTime(today.year, today.month, today.day);
+  if (day.isAfter(todayDay)) {
+    errors.add('A future day cannot be closed yet.');
+  }
+  final duplicate = existing.any(
+    (closing) =>
+        closing.branchId == branchId &&
+        DateTime(
+          closing.date.year,
+          closing.date.month,
+          closing.date.day,
+        ) ==
+            day,
+  );
+  if (duplicate) {
+    errors.add('This day is already closed for this branch.');
+  }
+  return errors;
+}
+
+/// True when the cashbook entries for a closing's day no longer add
+/// up to the totals the closing recorded — i.e. entries were added
+/// (or backdated) after the close. The closing itself is never
+/// rewritten; the screen shows this as "changed since closing".
+bool dailyClosingIsStale({
+  required DailyClosing closing,
+  required List<CashbookEntry> entries,
+}) {
+  final totals = computeDailyClosing(
+    entries: entries,
+    date: closing.date,
+    openingBalanceMinor: closing.openingBalanceMinor,
+  );
+  return totals.incomeMinor != closing.totalIncomeMinor ||
+      totals.expenseMinor != closing.totalExpenseMinor;
 }
